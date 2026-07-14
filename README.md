@@ -1,18 +1,10 @@
-基于现有的优秀开源轮子，我为你设计了一个名为 **ModuAgent** 的可扩展 Agent 项目方案。该方案采用模块化设计，完美契合“模型切换、Skill装配、MCP工具接入、权限管理”的需求。
-### 一、 技术栈选型
-| 模块 | 开源轮子选型 | 选型理由 |
-| :--- | :--- | :--- |
-| **底层框架** | **FastAPI** | 异步高性能，自带 OpenAPI 文档，适合做 Agent 服务端 |
-| **Agent 编排** | **LangGraph** | 支持状态机流转，适合构建带记忆和工具循环的 Agent |
-| **模型切换层** | **LiteLLM** | 统一 API 代理，支持 100+ 大模型（OpenAI, Claude, 本地 Ollama 等）无缝切换 |
-| **工具协议** | **MCP (Model Context Protocol)** | Anthropic 提出的标准协议，使用 `mcp` 官方 Python SDK |
-| **Skill 框架** | **LangChain Tools / 自定义基类** | 将 Skill 封装为标准 Tool，支持动态加载 |
-| **权限管理** | **Casbin** | 轻量级、支持 RBAC/ABAC，非常适合细粒度接口和资源权限控制 |
-| **持久化** | **PostgreSQL + Redis** | 存储用户配置、会话状态、Casbin 策略；Redis 做缓存 |
----
-### 二、 核心架构设计
-项目采用分层架构，请求自上而下流转：
-```text
+# futureAgent 模块化 AI Agent 框架
+
+基于开源轮子拼装的模块化 AI Agent 框架，所有组件都使用现成的高质量开源项目。
+
+## 🏗️ 架构设计
+
+```
 ┌───────────────────────────────────────────────────────────┐
 │                      API Gateway (FastAPI)                 │
 ├───────────────────────────────────────────────────────────┤
@@ -22,7 +14,7 @@
 ├───────────────────────────────────────────────────────────┤
 │  Agent Orchestrator (LangGraph)                           │
 │  - 管理对话状态                                           │
-│  - 维护执行图         │
+│  - 维护执行图                                             │
 ├─────────────┬─────────────┬───────────────────────────────┤
 │  Model Hub  │  Skill Hub  │  Tool Hub                     │
 │ (LiteLLM)   │ (Prompt/    │ (MCP Client & Local Tools)    │
@@ -31,205 +23,247 @@
 │  Infrastructure (PostgreSQL / Redis / Vector DB)          │
 └───────────────────────────────────────────────────────────┘
 ```
----
-### 三、 核心模块实现细节与代码设计
-#### 1. 模型切换
-利用 **LiteLLM**，我们只需维护一个模型配置表，通过传入不同的 `model_name` 即可实现切换。
+
+## 🔧 技术栈
+
+| 模块 | 开源轮子 | GitHub |
+|------|---------|--------|
+| **Web 框架** | FastAPI | https://github.com/fastapi/fastapi |
+| **Agent 编排** | LangGraph | https://github.com/langchain-ai/langgraph |
+| **模型切换** | LiteLLM | https://github.com/BerriAI/litellm |
+| **工具协议** | MCP Python SDK | https://github.com/modelcontextprotocol/python-sdk |
+| **权限管理** | PyCasbin | https://github.com/casbin/pycasbin |
+| **ORM** | SQLModel | https://github.com/fastapi/sqlmodel |
+| **可观测性** | Langfuse | https://github.com/langfuse/langfuse |
+| **数据库** | PostgreSQL + pgvector | https://github.com/pgvector/pgvector |
+| **反向代理** | Nginx | https://github.com/nginx/nginx |
+| **前端** | @ant-design/x + React | https://github.com/ant-design/x |
+
+## 📁 项目结构
+
+```
+futureAgent/
+├── api/                    # FastAPI 路由层
+│   ├── __init__.py
+│   └── routes.py           # REST API 接口
+├── auth/                   # 权限模块 (Casbin)
+│   ├── __init__.py
+│   ├── auth_manager.py     # 权限管理器
+│   ├── rbac_model.conf     # Casbin 模型配置
+│   └── rbac_policy.csv     # 权限策略
+├── core/                   # 核心引擎
+│   ├── __init__.py
+│   ├── agent_engine.py     # LangGraph 编排引擎
+│   ├── model_hub.py        # LiteLLM 模型管理
+│   ├── skill_manager.py    # Skill 装配器
+│   └── mcp_manager.py      # MCP 客户端管理
+├── db/                     # 数据库模块
+├── nginx/                  # Nginx 配置
+│   └── nginx.conf
+├── frontend/               # 前端 (React + @ant-design/x)
+│   ├── src/
+│   ├── package.json
+│   └── vite.config.js
+├── skills/                 # Skill 定义 (YAML)
+│   ├── chatbot.yaml
+│   ├── data_analyst.yaml
+│   └── coder.yaml
+├── config.py               # 全局配置
+├── main.py                 # 启动入口
+├── requirements.txt        # Python 依赖
+├── docker-compose.yml      # Docker Compose
+├── Dockerfile             # Docker 构建
+├── .env.example           # 环境变量模板
+└── .gitignore
+```
+
+## 🚀 快速开始
+
+### 1. 环境准备
+
+```bash
+# 克隆项目
+git clone <your-repo-url>
+cd futureAgent
+
+# 创建虚拟环境
+python -m venv .venv
+source .venv/bin/activate  # Linux/Mac
+# .venv\Scripts\activate   # Windows
+
+# 安装 Python 依赖
+pip install -r requirements.txt
+
+# 安装前端依赖
+cd frontend
+npm install
+cd ..
+```
+
+### 2. 配置环境变量
+
+```bash
+cp .env.example .env
+# 编辑 .env 填入你的 API Key
+```
+
+### 3. 启动服务
+
+```bash
+# 方式一: 本地启动 (推荐开发用)
+
+# 终端 1: 启动后端
+python main.py
+
+# 终端 2: 启动前端
+cd frontend
+npm run dev
+
+# 方式二: 使用 Docker Compose (推荐生产部署)
+docker-compose up -d
+```
+
+### 4. 访问地址
+
+| 服务 | 地址 | 说明 |
+|------|------|------|
+| **前端 Dashboard** | http://localhost:5173 | React + @ant-design/x |
+| **futureAgent API** | http://localhost:8000 | FastAPI 主服务 |
+| **API 文档 (Swagger)** | http://localhost:8000/docs | 交互式 API 文档 |
+| **API 文档 (ReDoc)** | http://localhost:8000/redoc | 另一种文档格式 |
+| **Nginx 代理** | http://localhost | 反向代理入口 |
+| **MCP Server** | http://localhost:8050 | MCP 工具服务 |
+| **PostgreSQL** | localhost:5432 | 数据库 |
+
+### 5. 默认账号密码
+
+| 服务 | 账号 | 密码 | 说明 |
+|------|------|------|------|
+| **PostgreSQL** | `postgres` | `password` | 数据库超级用户 |
+| **权限角色** | `admin` | - | 管理员，拥有所有权限 |
+| **权限角色** | `developer` | - | 开发者，可用所有模型/工具 |
+| **权限角色** | `user` | - | 普通用户，仅限 gpt-3.5-turbo + chatbot |
+
+> ⚠️ 账号密码配置在 `docker-compose.yml` (数据库) 和 `auth/rbac_policy.csv` (权限策略) 中，生产环境请务必修改！
+
+## 📡 API 使用示例
+
+### 简单聊天
+
+```bash
+curl -X POST http://localhost:8000/api/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "你好，介绍一下你自己",
+    "user_role": "developer",
+    "model_id": "gpt-4o-mini"
+  }'
+```
+
+### Agent 模式 (带工具调用)
+
+```bash
+curl -X POST http://localhost:8000/api/v1/chat/agent \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "帮我分析一下桌面的 sales.csv 文件",
+    "user_role": "developer",
+    "model_id": "claude-3-5-sonnet",
+    "skill_name": "data_analyst",
+    "mcp_servers": ["filesystem_server", "python_executor"]
+  }'
+```
+
+### 列出可用模型
+
+```bash
+curl http://localhost:8000/api/v1/models
+```
+
+### 列出可用 Skill
+
+```bash
+curl http://localhost:8000/api/v1/skills
+```
+
+## 🔐 权限管理
+
+权限策略定义在 `auth/rbac_policy.csv` 中：
+
+```csv
+# admin 可以操作一切
+p, admin, *, *
+
+# developer 可以用所有模型
+p, developer, model:*, use
+
+# user 只能用 gpt-3.5
+p, user, model:gpt-3.5-turbo, use
+
+# 角色继承：admin 继承 developer
+g, admin, developer
+```
+
+## 🧩 添加自定义 Skill
+
+在 `skills/` 目录下创建 YAML 文件：
+
+```yaml
+name: my_custom_skill
+description: 我的自定义 Skill
+system_prompt: |
+  你是一个专业的XXX助手，擅长...
+allowed_tool_names:
+  - tool_name_1
+  - tool_name_2
+```
+
+然后在 `api/routes.py` 中注册：
+
 ```python
-from litellm import acompletion
-from typing import Optional
-class ModelHub:
-    @staticmethod
-    async def generate(model_id: str, messages: list, tools: Optional[list] = None):
-        # LiteLLM 统一了不同模型的调用方式
-        # model_id 例如: "gpt-4o", "claude-3-5-sonnet", "ollama/llama3"
-        response = await acompletion(
-            model=model_id,
-            messages=messages,
-            tools=tools,
-            temperature=0.7
-        )
-        return response
+sm.register_skill(Skill(
+    name="my_custom_skill",
+    description="我的自定义 Skill",
+    system_prompt="...",
+    allowed_tool_names=["tool_name_1", "tool_name_2"],
+))
 ```
-#### 2. MCP 工具安装与集成
-MCP 工具通常作为独立进程或服务运行。我们设计一个 `MCPManager` 来动态连接和加载 MCP 工具。
-```python
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-from langchain_mcp_adapters.tools import load_mcp_tools
-class MCPManager:
-    def __init__(self):
-        self.sessions = {} # 存储已连接的 MCP server sessions
-    async def install_mcp_server(self, server_name: str, command: str, args: list):
-        """动态安装并连接一个 MCP Server"""
-        server_params = StdioServerParameters(command=command, args=args)
-        
-        # 创建连接
-        read, write = await stdio_client(server_params).__aenter__()
-        session = await ClientSession(read, write).__aenter__()
-        self.sessions[server_name] = session
-        
-        # 初始化
-        await session.initialize()
-        return f"MCP Server {server_name} installed."
-    async def get_mcp_tools(self, server_name: str):
-        """获取指定 MCP Server 提供的工具，转换为 LangChain Tool 格式"""
-        session = self.sessions.get(server_name)
-        if not session:
-            return []
-        # 使用 langchain-mcp-adapters 将 MCP 工具转为 Agent 可用的 Tool
-        return await load_mcp_tools(session)
+
+## 🔄 模型切换
+
+通过 LiteLLM 支持 100+ 模型无缝切换：
+
+| 模型 ID | 提供商 |
+|---------|--------|
+| `gpt-4o` | OpenAI |
+| `gpt-4o-mini` | OpenAI |
+| `claude-3-5-sonnet-20241022` | Anthropic |
+| `ollama/llama3` | Ollama (本地) |
+| `gemini/gemini-1.5-pro` | Google |
+
+## 📊 数据流
+
 ```
-#### 3. Skill 装配
-Skill 可以理解为**特定领域的提示词模板 + 专属工具集 + 专属子图**。我们将其抽象为标准配置。
-```python
-from pydantic import BaseModel
-from typing import List, Optional
-class Skill(BaseModel):
-    name: str
-    description: str
-    system_prompt: str           # Skill 专属人设和提示词
-    allowed_tool_names: List[str] # 该 Skill 允许调用的工具白名单
-class SkillManager:
-    def __init__(self):
-        self.skills_db = {} # 实际可存放在数据库
-    def register_skill(self, skill: Skill):
-        self.skills_db[skill.name] = skill
-    def assemble_skill(self, skill_name: str, available_tools: list) -> dict:
-        """装配 Skill，过滤出可用的工具"""
-        skill = self.skills_db[skill_name]
-        # 根据 Skill 配置，白名单过滤工具
-        active_tools = [
-            tool for tool in available_tools 
-            if tool.name in skill.allowed_tool_names
-        ]
-        return {
-            "system_prompt": skill.system_prompt,
-            "tools": active_tools
-        }
+用户请求 → FastAPI 路由
+         → Casbin 权限校验
+         → LiteLLM 选择模型
+         → SkillManager 装配 Skill
+         → MCPManager 加载工具
+         → LangGraph Agent 执行
+         → SSE 流式返回
 ```
-#### 4. 权限管理
-使用 **Casbin** 进行 RBAC 权限控制。定义策略：`sub, obj, act` (主体, 资源, 操作)。
-**Casbin Model (rbac_model.conf):**
-```ini
-[request_definition]
-r = sub, obj, act
-[policy_definition]
-p = sub, obj, act
-[role_definition]
-g = _, _
-[policy_effect]
-e = some(where (p.eft == allow))
-[matchers]
-m = g(r.sub, p.sub) && keyMatch2(r.obj, p.obj) && r.act == p.act
-```
-**权限校验中间件:**
-```python
-from fastapi import HTTPException
-import casbin
-class AuthManager:
-    def __init__(self, model_path, policy_path):
-        self.enforcer = casbin.Enforcer(model_path, policy_path)
-    
-    def check_permission(self, user_role: str, resource: str, action: str):
-        # resource 例如: "model:gpt-4o", "skill:coder", "mcp:filesystem"
-        if not self.enforcer.enforce(user_role, resource, action):
-            raise HTTPException(status_code=403, detail=f"Permission denied for {resource}")
-# 权限策略示例：
-# p, admin, *, *               (admin可以操作一切)
-# p, developer, model:*, use   (developer可以用所有模型)
-# p, user, model:gpt-3.5, use  (user只能用gpt-3.5)
-# p, user, skill:chatbot, use  (user只能装配chatbot skill)
-```
-#### 5. LangGraph 整合引擎
-最后，使用 **LangGraph** 将上述组件串联起来。
-```python
-from langgraph.prebuilt import create_react_agent
-from langchain_core.messages import HumanMessage, SystemMessage
-class AgentEngine:
-    def __init__(self, model_hub, mcp_manager, skill_manager, auth_manager):
-        self.model_hub = model_hub
-        self.mcp_manager = mcp_manager
-        self.skill_manager = skill_manager
-        self.auth_manager = auth_manager
-    async def run(self, user_role: str, query: str, config: dict):
-        # 1. 权限校验
-        self.auth_manager.check_permission(user_role, f"model:{config['model_id']}", "use")
-        self.auth_manager.check_permission(user_role, f"skill:{config['skill_name']}", "use")
-        
-        # 2. 获取所有可用工具 (本地工具 + MCP工具)
-        all_tools = []
-        for mcp_server in config.get("mcp_servers", []):
-            self.auth_manager.check_permission(user_role, f"mcp:{mcp_server}", "use")
-            all_tools.extend(await self.mcp_manager.get_mcp_tools(mcp_server))
-            
-        # 3. 装配 Skill (过滤工具 + 获取提示词)
-        skill_data = self.skill_manager.assemble_skill(config['skill_name'], all_tools)
-        
-        # 4. 构建消息
-        messages = [
-            SystemMessage(content=skill_data["system_prompt"]),
-            HumanMessage(content=query)
-        ]
-        
-        # 5. 动态创建 LangGraph ReAct Agent 并执行
-        # 这里通过 LiteLLM 包装器接入 LangChain
-        from langchain_community.chat_models import ChatLiteLLM
-        llm = ChatLiteLLM(model=config['model_id'])
-        
-        agent = create_react_agent(llm, tools=skill_data["tools"])
-        
-        # 6. 执行并返回流式结果
-        async for event in agent.astream_events({"messages": messages}, version="v1"):
-            if event["event"] == "on_chat_model_stream":
-                yield event["data"]["chunk"].content
-```
----
-### 四、 数据流与接口设计示例
-假设我们提供一个 REST API `/v1/chat/completions`，用户发起请求的流程如下：
-1. **请求传入：**
-   ```json
-   {
-     "query": "帮我分析一下桌面的 sales.csv 文件",
-     "config": {
-       "model_id": "claude-3-5-sonnet",
-       "skill_name": "data_analyst",
-       "mcp_servers": ["filesystem_server", "python_executor"]
-     }
-   }
-   ```
-2. **FastAPI 路由处理：**
-   - 解析 Token 获取 `user_role` (如 "developer")。
-   - 调用 `AgentEngine.run()`。
-3. **引擎内部流转：**
-   - **AuthManager** 校验 "developer" 是否能用 claude-3.5、data_analyst skill 和 filesystem MCP。
-   - **MCPManager** 连接文件系统 MCP 和 Python 执行 MCP，拿到 `read_csv`, `run_python` 工具。
-   - **SkillManager** 装配 data_analyst，设定系统提示词为“你是一个数据分析师...”，并保留 `read_csv` 和 `run_python` 工具。
-   - **LangGraph Agent** 启动，通过 LiteLLM 调用 Claude，发现需要读文件，调用 MCP 的 `read_csv` 工具，再调用 `run_python` 分析数据，最终生成回答。
-4. **流式返回：** 将结果通过 SSE (Server-Sent Events) 推送给前端。
-### 五、 项目目录结构建议
-```text
-modu_agent/
-├── api/                  # FastAPI 路由层
-│   ├── routes.py
-│   └── deps.py
-├── core/                 # 核心引擎
-│   ├── agent_engine.py   # LangGraph 编排
-│   ├── model_hub.py      # LiteLLM 模型管理
-│   ├── skill_manager.py  # Skill 装配器
-│   └── mcp_manager.py    # MCP 客户端管理
-├── auth/                 # 权限模块
-│   ├── casbin_model.conf
-│   └── auth_manager.py
-├── db/                   # 数据库模型与操作
-├── skills/               # 具体的 Skill 定义 (YAML或JSON)
-│   ├── coder.yaml
-│   └── data_analyst.yaml
-├── config.py             # 全局配置
-└── main.py               # 启动入口
-```
-### 六、 总结与优势
-1. **解耦性强**：模型使用 LiteLLM，工具使用 MCP，权限使用 Casbin，任何一层都可以独立替换。
-2. **未来扩展性**：MCP 协议天然支持丰富的生态（如 GitHub, Postgres, Slack 等 MCP Server），无需自己写各种 API 对接代码。
-3. **企业级可用**：Casbin 提供了企业级的权限控制，确保不同部门/级别的用户只能使用被授权的模型和工具。
-4. **开发效率高**：LangGraph 的 `create_react_agent` 极大地简化了 Agent 的工具调用循环逻辑，开箱即用。
+
+## 📝 开源轮子来源
+
+1. **FastAPI MCP LangGraph Template** - https://github.com/NicholasGoh/fastapi-mcp-langgraph-template
+   - 提供了 FastAPI + LangGraph + MCP + Langfuse + PostgreSQL 的基础模板
+   
+2. **LiteLLM** - https://github.com/BerriAI/litellm
+   - 统一 API 代理，支持 100+ 大模型无缝切换
+   
+3. **PyCasbin** - https://github.com/casbin/pycasbin
+   - 轻量级权限管理，支持 RBAC/ABAC
+
+## 📄 License
+
+MIT License
