@@ -3,13 +3,14 @@ AgentEngine - 统一编排引擎
 整合 LiteLLM + LangGraph + MCP + Casbin
 """
 import functools
+import uuid
 from typing import AsyncGenerator, Optional
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.base import RunnableSequence
 from langchain_core.tools import StructuredTool
-from langgraph.graph import MessagesState, StateGraph
+from langgraph.graph import END, MessagesState, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -22,7 +23,7 @@ from config import settings
 
 
 class State(MessagesState):
-    next: str
+    pass
 
 
 class AgentEngine:
@@ -61,12 +62,12 @@ class AgentEngine:
             agent = prompt | llm
         return agent
 
-    def _agent_node_factory(
+    async def _agent_node_factory(
         self,
         state: State,
         agent: RunnableSequence,
     ) -> State:
-        result = agent.invoke(state)
+        result = await agent.ainvoke(state)
         return dict(messages=[result])
 
     def _graph_factory(
@@ -78,10 +79,12 @@ class AgentEngine:
     ) -> CompiledStateGraph:
         graph_builder = StateGraph(State)
         graph_builder.add_node(name, agent_node)
-        graph_builder.add_node("tools", ToolNode(tools))
-
-        graph_builder.add_conditional_edges(name, tools_condition)
-        graph_builder.add_edge("tools", name)
+        if tools:
+            graph_builder.add_node("tools", ToolNode(tools))
+            graph_builder.add_conditional_edges(name, tools_condition)
+            graph_builder.add_edge("tools", name)
+        else:
+            graph_builder.add_edge(name, END)
 
         graph_builder.set_entry_point(name)
         graph = graph_builder.compile(checkpointer=checkpointer)
@@ -113,18 +116,21 @@ class AgentEngine:
         skill_name = config.get("skill_name", "default")
         mcp_servers = config.get("mcp_servers", [])
 
-        # 1. 权限校验
-        self.auth_manager.check_permission(user_role, f"model:{model_id}", "use")
-        self.auth_manager.check_permission(user_role, f"skill:{skill_name}", "use")
-        for mcp_server in mcp_servers:
-            self.auth_manager.check_permission(user_role, f"mcp:{mcp_server}", "use")
+        # 1. 权限校验（API 层也会提前执行一次，以便返回正确 HTTP 状态）
+        self.validate_permissions(user_role, config)
 
         # 2. 获取所有可用工具 (MCP工具)
         all_tools: list[StructuredTool] = []
-        async with self.mcp_manager.connect_all() as sessions:
+        async with self.mcp_manager.connect_many(mcp_servers) as sessions:
             for session in sessions:
                 tools = await self.mcp_manager.get_mcp_tools(session)
                 all_tools.extend(tools)
+
+            # 未授权工具不会进入模型上下文，即使 MCP 服务本身可访问。
+            all_tools = [
+                tool for tool in all_tools
+                if self.auth_manager.is_allowed(user_role, f"tool:{tool.name}", "use")
+            ]
 
             # 3. 装配 Skill (过滤工具 + 获取提示词)
             skill_data = self.skill_manager.assemble_skill(skill_name, all_tools)
@@ -146,12 +152,42 @@ class AgentEngine:
             messages = [HumanMessage(content=query)]
 
             # 7. 执行并流式返回
-            graph_config = dict(configurable=dict(thread_id="1"))
+            graph_config = {
+                "configurable": {
+                    "thread_id": config.get("thread_id") or str(uuid.uuid4())
+                }
+            }
 
-            async for event in graph.astream_events(
+            async for message, _metadata in graph.astream(
                 {"messages": messages},
                 graph_config,
-                version="v2",
-                stream_mode="updates",
+                stream_mode="messages",
             ):
-                yield str(event)
+                if isinstance(message, AIMessageChunk):
+                    text = self._content_to_text(message.content)
+                    if text:
+                        yield text
+
+    def validate_permissions(self, user_role: str, config: dict) -> None:
+        """在打开 SSE 响应前验证所请求资源。"""
+        model_id = config.get("model_id", settings.default_model)
+        skill_name = config.get("skill_name", "default")
+        self.auth_manager.check_permission(user_role, f"model:{model_id}", "use")
+        self.auth_manager.check_permission(user_role, f"skill:{skill_name}", "use")
+        for mcp_server in config.get("mcp_servers", []):
+            self.auth_manager.check_permission(user_role, f"mcp:{mcp_server}", "use")
+
+    @staticmethod
+    def _content_to_text(content) -> str:
+        """兼容 LangChain 字符串和 content block 两种流式格式。"""
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+        return "".join(parts)

@@ -3,39 +3,39 @@ model_list:
   - model_name: gpt-4o
     litellm_params:
       model: gpt-4o
-      api_key: sk-placeholder
+      api_key: os.environ/OPENAI_API_KEY
   - model_name: gpt-4o-mini
     litellm_params:
       model: gpt-4o-mini
-      api_key: sk-placeholder
+      api_key: os.environ/OPENAI_API_KEY
   - model_name: gpt-3.5-turbo
     litellm_params:
       model: gpt-3.5-turbo
-      api_key: sk-placeholder
+      api_key: os.environ/OPENAI_API_KEY
   - model_name: claude-3-5-sonnet-20241022
     litellm_params:
-      model: claude-3-5-sonnet-20241022
-      api_key: sk-placeholder
+      model: anthropic/claude-3-5-sonnet-20241022
+      api_key: os.environ/ANTHROPIC_API_KEY
   - model_name: claude-3-haiku-20240307
     litellm_params:
-      model: claude-3-haiku-20240307
-      api_key: sk-placeholder
+      model: anthropic/claude-3-haiku-20240307
+      api_key: os.environ/ANTHROPIC_API_KEY
   - model_name: ollama/llama3
     litellm_params:
       model: ollama/llama3
-      api_base: http://localhost:11434
+      api_base: os.environ/OLLAMA_BASE_URL
   - model_name: ollama/qwen2.5
     litellm_params:
       model: ollama/qwen2.5
-      api_base: http://localhost:11434
+      api_base: os.environ/OLLAMA_BASE_URL
   - model_name: gemini/gemini-1.5-pro
     litellm_params:
       model: gemini/gemini-1.5-pro
-      api_key: sk-placeholder
+      api_key: os.environ/GOOGLE_API_KEY
   - model_name: gemini/gemini-1.5-flash
     litellm_params:
       model: gemini/gemini-1.5-flash
-      api_key: sk-placeholder
+      api_key: os.environ/GOOGLE_API_KEY
 
 litellm_settings:
   drop_params: True
@@ -48,8 +48,8 @@ litellm_settings:
   temperature: 0.7
 
 general_settings:
-  master_key: sk-futureagent
-  salt_key: futureagent-salt
+  master_key: os.environ/LITELLM_MASTER_KEY
+  salt_key: os.environ/LITELLM_SALT_KEY
   enable_ui: True
   ui_path: /ui
 

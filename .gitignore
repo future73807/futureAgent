@@ -25,6 +25,18 @@ env/
 # 日志
 *.log
 
+# 前端构建产物
+node_modules/
+dist/
+
+# MCP 本地工作区
+mcp_server/workspace/
+
+# Runtime uploads can contain user-provided files. Keep only the empty
+# directory marker in source control.
+uploads/*
+!uploads/.gitkeep
+
 # 系统
 .DS_Store
 Thumbs.db

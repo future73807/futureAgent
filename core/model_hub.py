@@ -29,9 +29,11 @@ class ModelHub:
                 litellm.openai_key = settings.openai_api_key
             if settings.anthropic_api_key:
                 litellm.anthropic_key = settings.anthropic_api_key
+            if settings.google_api_key:
+                litellm.gemini_key = settings.google_api_key
 
-    @staticmethod
     async def generate(
+        self,
         model_id: str,
         messages: list,
         tools: Optional[list] = None,
@@ -41,17 +43,29 @@ class ModelHub:
         """LiteLLM 统一调用接口"""
         if not LITELLM_AVAILABLE:
             raise ImportError("LiteLLM not installed. Run: pip install litellm")
+        request_model = model_id
+        if settings.litellm_proxy_url:
+            # LiteLLM Proxy 暴露 OpenAI 兼容接口；openai/ 前缀让本地 LiteLLM
+            # 客户端把模型名原样交给 Proxy，由后台配置决定真实提供商。
+            request_model = f"openai/{model_id}"
+            kwargs = {
+                "api_base": self._proxy_base_url(),
+                "api_key": settings.litellm_master_key,
+            }
+        else:
+            kwargs = self._provider_kwargs(model_id)
         response = await acompletion(
-            model=model_id,
+            model=request_model,
             messages=messages,
             tools=tools,
             temperature=temperature,
             stream=stream,
+            **kwargs,
         )
         return response
 
-    @staticmethod
     def get_chat_model(
+        self,
         model_id: Optional[str] = None,
         temperature: float = 0,
         streaming: bool = True,
@@ -62,13 +76,25 @@ class ModelHub:
         用于接入 LangGraph 的 create_react_agent
         """
         model = model_id or settings.default_model
+        if settings.litellm_proxy_url:
+            from langchain_openai import ChatOpenAI
+            return ChatOpenAI(
+                model=model,
+                temperature=temperature,
+                streaming=streaming,
+                api_key=settings.litellm_master_key,
+                base_url=self._proxy_base_url(),
+                **kwargs,
+            )
+        provider_kwargs = self._provider_kwargs(model)
+        provider_kwargs.update(kwargs)
         if LITELLM_AVAILABLE:
             from langchain_community.chat_models import ChatLiteLLM
             return ChatLiteLLM(
                 model=model,
                 temperature=temperature,
                 streaming=streaming,
-                **kwargs,
+                **provider_kwargs,
             )
         else:
             # 后备方案: 使用 langchain-openai
@@ -78,8 +104,94 @@ class ModelHub:
                 temperature=temperature,
                 streaming=streaming,
                 api_key=settings.openai_api_key,
-                **kwargs,
+                base_url=provider_kwargs.pop("api_base", settings.openai_base_url),
+                **provider_kwargs,
             )
+
+    @staticmethod
+    def _proxy_base_url() -> str:
+        base_url = settings.litellm_proxy_url.rstrip("/")
+        return base_url if base_url.endswith("/v1") else f"{base_url}/v1"
+
+    @staticmethod
+    def _provider_kwargs(model_id: str) -> dict:
+        if model_id.startswith("ollama/"):
+            return {"api_base": settings.ollama_base_url}
+        if model_id.startswith(("gpt-", "openai/")) and settings.openai_base_url:
+            return {"api_base": settings.openai_base_url}
+        return {}
+
+    @staticmethod
+    def _is_usable_credential(value: str) -> bool:
+        """Reject the example values that make a route look falsely usable.
+
+        A copied ``.env.example`` intentionally contains readable placeholder
+        values.  They must not be treated as provider credentials: otherwise
+        a direct chat request gets as far as an SSE stream and only fails after
+        the UI appears to have started working.
+        """
+        candidate = (value or "").strip()
+        normalized = candidate.lower()
+        if not candidate:
+            return False
+        placeholders = {
+            "sk-your-openai-key",
+            "your-google-api-key",
+            "replace-with-a-long-random-secret",
+            "change-this-development-secret-before-production",
+        }
+        return normalized not in placeholders and not normalized.startswith(
+            ("sk-your-", "your-", "replace-with-")
+        )
+
+    @classmethod
+    def is_direct_provider_configured(cls, model_id: str) -> bool:
+        """Return whether the API itself has a usable direct provider route."""
+        if model_id.startswith(("gpt-", "openai/")):
+            return cls._is_usable_credential(settings.openai_api_key)
+        if model_id.startswith("claude"):
+            return cls._is_usable_credential(settings.anthropic_api_key)
+        if model_id.startswith(("gemini/", "gemini-")):
+            return cls._is_usable_credential(settings.google_api_key)
+        if model_id.startswith("ollama/"):
+            return bool(settings.ollama_base_url.strip())
+        return False
+
+    @classmethod
+    def is_model_configured(cls, model_id: str) -> bool:
+        """Return whether a request has an application-level route.
+
+        A LiteLLM proxy is a configured route, not evidence that a particular
+        upstream provider can answer.  Callers that present status to an
+        operator should use :meth:`configuration_source` so they can make that
+        distinction visible.
+        """
+        return bool(settings.litellm_proxy_url.strip()) or cls.is_direct_provider_configured(model_id)
+
+    @classmethod
+    def configuration_source(cls, model_id: str) -> str:
+        if settings.litellm_proxy_url.strip():
+            return "litellm_proxy"
+        if cls.is_direct_provider_configured(model_id):
+            return "direct_provider"
+        return "missing"
+
+    @staticmethod
+    def readiness_error(model_id: str) -> str | None:
+        """Return a stable pre-flight failure before opening an SSE stream.
+
+        A configured key still cannot prove that a remote provider is healthy,
+        but this removes the two avoidable failures of the old demo: starting a
+        successful-looking stream without LiteLLM installed, and attempting a
+        cloud provider call without any credential.
+        """
+        if settings.litellm_proxy_url.strip():
+            return None
+        if not LITELLM_AVAILABLE:
+            return "LiteLLM is not installed. Install the API dependencies before using AI chat."
+        if not ModelHub.is_model_configured(model_id):
+            return f"Model '{model_id}' is not configured. Add its provider credentials or configure LiteLLM Proxy."
+        return None
 
     @staticmethod
     def list_supported_models() -> list[str]:

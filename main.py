@@ -2,17 +2,37 @@
 futureAgent 启动入口
 整合: FastAPI + LangGraph + LiteLLM + MCP + Casbin
 """
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from api.routes import router
+from config import settings
+from db.database import init_db
 import os
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    init_db()
+    yield
 
 app = FastAPI(
     title="futureAgent",
     description="模块化 AI Agent 框架 - 基于开源轮子拼装",
     version="0.1.0",
     swagger_ui_parameters={"tryItOutEnabled": True},
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    allow_headers=["Authorization", "Content-Type", "X-Workspace-ID"],
 )
 
 app.include_router(router, prefix="/api")
