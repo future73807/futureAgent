@@ -159,6 +159,13 @@ class AgentRun(SQLModel, table=True):
     """
 
     __tablename__ = "agent_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "idempotency_key",
+            name="uq_agent_runs_workspace_idempotency_key",
+        ),
+    )
 
     id: str = Field(default_factory=new_id, primary_key=True)
     workspace_id: str = Field(foreign_key="workspaces.id", index=True)
@@ -168,6 +175,9 @@ class AgentRun(SQLModel, table=True):
     requested_by: str = Field(foreign_key="users.id", index=True)
     model_id: str = Field(max_length=120)
     skill_name: str = Field(max_length=120)
+    idempotency_key: str | None = Field(default=None, max_length=96, index=True)
+    retry_of_id: str | None = Field(default=None, foreign_key="agent_runs.id", index=True)
+    attempt: int = Field(default=1)
     status: str = Field(default="running", max_length=24)  # running/succeeded/failed/cancelled
     output: str = Field(default="", max_length=100_000)
     error_message: str = Field(default="", max_length=4000)

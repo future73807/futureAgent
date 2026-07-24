@@ -31,8 +31,9 @@ Work mode is designed around a controlled delivery loop rather than a one-shot c
 3. Require a workspace owner or admin to approve the plan.
 4. Move individual steps through `pending`, `running`, `blocked`, and `done`.
 5. Record evidence, decisions, handoffs, or outcomes per step; all changes remain in the workspace audit trail.
-6. Run an approved task step through the selected model and skill, stream its output, and persist a reviewable `AgentRun` with the model, skill, output, terminal status, and audit events.
-7. Review a task-scoped activity timeline containing the task, plan, execution-step, AI-run, and attached-file events.
+6. Run an approved task step through the selected model and skill, stream its output, and persist a reviewable `AgentRun` with the model, skill, output, terminal status, retry lineage, and audit events.
+7. Apply server-enforced execution controls: per-workspace concurrency limits, bounded run time, duplicate-request protection, authorised cancellation, and auditable retry of failed or cancelled runs.
+8. Review a task-scoped activity timeline containing the task, plan, execution-step, AI-run, and attached-file events.
 
 The API controls who can approve and update each step. The UI only exposes the same permissions as the server; it does not trust a role sent from the browser.
 

@@ -42,7 +42,7 @@ class MigrationBaselineTests(unittest.TestCase):
                 with engine.connect() as connection:
                     self.assertEqual(
                         connection.exec_driver_sql("select version_num from alembic_version").scalar_one(),
-                        "20260725_01",
+                        "20260725_02",
                     )
             finally:
                 engine.dispose()

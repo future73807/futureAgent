@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     bootstrap_admin_password: str = "ChangeMe123!"
     upload_dir: str = str(BASE_DIR / "uploads")
     max_upload_mb: int = 20
+    # A governed work run must have bounded resource use.  These limits are
+    # deliberately applied server-side, rather than trusting a browser timer.
+    agent_run_timeout_seconds: int = 180
+    max_concurrent_agent_runs_per_workspace: int = 2
     storage_backend: str = "local"
     storage_s3_bucket: str = ""
     storage_s3_endpoint_url: str = ""

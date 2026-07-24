@@ -220,6 +220,8 @@ class TaskExecutionRequest(RequestModel):
     skill_name: str = Field(default="default", max_length=120)
     step_id: str | None = Field(default=None, max_length=64)
     mcp_servers: list[str] = Field(default_factory=list, max_length=20)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=96)
+    retry_of_id: str | None = Field(default=None, max_length=64)
 
 
 class PolicyRequest(RequestModel):
@@ -377,6 +379,8 @@ def _agent_run_data(run: AgentRun) -> dict[str, Any]:
         "requested_by": run.requested_by,
         "model_id": run.model_id,
         "skill_name": run.skill_name,
+        "retry_of_id": run.retry_of_id,
+        "attempt": run.attempt,
         "status": run.status,
         "output": run.output,
         "error_message": run.error_message,
@@ -1724,6 +1728,59 @@ def _task_execution_prompt(
     )
 
 
+def _can_manage_task_execution(
+    context: WorkspaceContext,
+    task: Task,
+    step: WorkPlanStep | None,
+) -> bool:
+    """Keep execution, cancellation, and retry authorisation identical."""
+    return bool(
+        context.user.is_platform_admin
+        or context.membership.role in {"owner", "admin"}
+        or (step and step.assignee_id == context.user.id)
+        or task.assignee_id == context.user.id
+        or task.reporter_id == context.user.id
+    )
+
+
+def _expire_stale_agent_runs(session: Session, workspace_id: str) -> None:
+    """Release slots left running after a worker crash or an abandoned stream."""
+    timeout_seconds = max(1, settings.agent_run_timeout_seconds)
+    cutoff = now_utc() - timedelta(seconds=timeout_seconds)
+    stale_runs = session.exec(
+        select(AgentRun).where(
+            AgentRun.workspace_id == workspace_id,
+            AgentRun.status == "running",
+            AgentRun.started_at < cutoff,
+        )
+    ).all()
+    if not stale_runs:
+        return
+    for stale_run in stale_runs:
+        stale_run.status = "failed"
+        stale_run.completed_at = now_utc()
+        stale_run.error_message = "The AI execution exceeded its allowed runtime and was stopped."
+        session.add(stale_run)
+        write_audit(
+            session,
+            actor_id=stale_run.requested_by,
+            workspace_id=workspace_id,
+            action="agent_run.timed_out",
+            target_type="agent_run",
+            target_id=stale_run.id,
+            metadata={"timeout_seconds": timeout_seconds},
+        )
+        record_agent_run("timed_out")
+    session.commit()
+
+
+def _run_cancelled(session: Session, run: AgentRun) -> bool:
+    """Refresh the row so a separate cancellation request is observed."""
+    session.expire(run)
+    session.refresh(run)
+    return run.status == "cancelled"
+
+
 @router.get("/v1/tasks/{task_id}/runs")
 def list_task_runs(
     task_id: str,
@@ -1741,6 +1798,41 @@ def list_task_runs(
     return {"runs": [_agent_run_data(run) for run in runs]}
 
 
+@router.post("/v1/tasks/{task_id}/runs/{run_id}/cancel")
+def cancel_task_run(
+    task_id: str,
+    run_id: str,
+    context: WorkspaceContext = Depends(get_workspace_context),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Request a durable cancellation; the stream stops on its next checkpoint."""
+    task = _task_or_404(session, context.workspace.id, task_id)
+    run = session.get(AgentRun, run_id)
+    if not run or run.workspace_id != context.workspace.id or run.task_id != task.id:
+        raise HTTPException(status_code=404, detail="AI execution not found")
+    step = session.get(WorkPlanStep, run.step_id) if run.step_id else None
+    if not _can_manage_task_execution(context, task, step):
+        raise HTTPException(status_code=403, detail="You cannot cancel this task execution")
+    if run.status != "running":
+        return {"run": _agent_run_data(run)}
+    run.status = "cancelled"
+    run.completed_at = now_utc()
+    run.error_message = "The AI execution was cancelled by an authorised workspace member."
+    session.add(run)
+    write_audit(
+        session,
+        actor_id=context.user.id,
+        workspace_id=context.workspace.id,
+        action="agent_run.cancelled",
+        target_type="agent_run",
+        target_id=run.id,
+        metadata={"task_id": task.id, "step_id": run.step_id},
+    )
+    session.commit()
+    record_agent_run("cancelled")
+    return {"run": _agent_run_data(run)}
+
+
 @router.post("/v1/tasks/{task_id}/execute")
 async def execute_task_with_agent(
     task_id: str,
@@ -1756,14 +1848,7 @@ async def execute_task_with_agent(
     step = session.get(WorkPlanStep, request.step_id) if request.step_id else None
     if step and step.plan_id != plan.id:
         raise HTTPException(status_code=404, detail="Work plan step not found")
-    can_execute = (
-        context.user.is_platform_admin
-        or context.membership.role in {"owner", "admin"}
-        or (step and step.assignee_id == context.user.id)
-        or task.assignee_id == context.user.id
-        or task.reporter_id == context.user.id
-    )
-    if not can_execute:
+    if not _can_manage_task_execution(context, task, step):
         raise HTTPException(status_code=403, detail="You cannot execute this task step")
 
     model_id = request.model_id or settings.default_model
@@ -1774,6 +1859,38 @@ async def execute_task_with_agent(
     effective_role = _authorize_agent_config(context, model_id, request.skill_name, request.mcp_servers)
     _ensure_model_ready(model_id)
 
+    _expire_stale_agent_runs(session, context.workspace.id)
+    if request.idempotency_key:
+        existing = session.exec(
+            select(AgentRun).where(
+                AgentRun.workspace_id == context.workspace.id,
+                AgentRun.idempotency_key == request.idempotency_key,
+            )
+        ).first()
+        if existing:
+            detail = "An AI execution with this request key is already running." if existing.status == "running" else "This AI execution request has already been recorded. Use a new retry request."
+            raise HTTPException(status_code=409, detail=detail)
+    active_runs = session.exec(
+        select(AgentRun).where(
+            AgentRun.workspace_id == context.workspace.id,
+            AgentRun.status == "running",
+        )
+    ).all()
+    max_concurrent = max(1, settings.max_concurrent_agent_runs_per_workspace)
+    if len(active_runs) >= max_concurrent:
+        raise HTTPException(
+            status_code=429,
+            detail=f"This workspace has reached its {max_concurrent}-run AI execution limit. Wait for a running execution to finish or cancel it.",
+        )
+
+    retry_parent: AgentRun | None = None
+    if request.retry_of_id:
+        retry_parent = session.get(AgentRun, request.retry_of_id)
+        if not retry_parent or retry_parent.workspace_id != context.workspace.id or retry_parent.task_id != task.id:
+            raise HTTPException(status_code=404, detail="The execution selected for retry was not found")
+        if retry_parent.status not in {"failed", "cancelled"}:
+            raise HTTPException(status_code=409, detail="Only failed or cancelled executions can be retried")
+
     run = AgentRun(
         workspace_id=context.workspace.id,
         task_id=task.id,
@@ -1782,6 +1899,9 @@ async def execute_task_with_agent(
         requested_by=context.user.id,
         model_id=model_id,
         skill_name=request.skill_name,
+        idempotency_key=request.idempotency_key or None,
+        retry_of_id=retry_parent.id if retry_parent else None,
+        attempt=(retry_parent.attempt + 1) if retry_parent else 1,
     )
     if step and step.status == "pending":
         step.status = "running"
@@ -1817,9 +1937,16 @@ async def execute_task_with_agent(
                 "event": "meta",
                 "data": json.dumps({"run": _agent_run_data(run)}, default=str),
             }
-            async for chunk in engine.run(user_role=effective_role, query=prompt, config=config):
-                collected.append(chunk)
-                yield {"event": "token", "data": chunk}
+            async with asyncio.timeout(max(1, settings.agent_run_timeout_seconds)):
+                async for chunk in engine.run(user_role=effective_role, query=prompt, config=config):
+                    if _run_cancelled(session, run):
+                        yield {"event": "cancelled", "data": json.dumps({"run": _agent_run_data(run)}, default=str)}
+                        return
+                    collected.append(chunk)
+                    yield {"event": "token", "data": chunk}
+            if _run_cancelled(session, run):
+                yield {"event": "cancelled", "data": json.dumps({"run": _agent_run_data(run)}, default=str)}
+                return
             run.status = "succeeded"
             run.output = "".join(collected)
             run.completed_at = now_utc()
@@ -1840,9 +1967,16 @@ async def execute_task_with_agent(
                 "data": json.dumps({"run": _agent_run_data(run)}, default=str),
             }
         except Exception as exc:
+            if _run_cancelled(session, run):
+                yield {"event": "cancelled", "data": json.dumps({"run": _agent_run_data(run)}, default=str)}
+                return
             run.status = "failed"
             run.output = "".join(collected)
-            run.error_message = "The AI execution did not complete. Check model routing and retry."
+            run.error_message = (
+                f"The AI execution exceeded its {max(1, settings.agent_run_timeout_seconds)}-second limit. Retry after checking the model route."
+                if isinstance(exc, TimeoutError)
+                else "The AI execution did not complete. Check model routing and retry."
+            )
             run.completed_at = now_utc()
             session.add(run)
             write_audit(
@@ -2360,10 +2494,15 @@ def public_settings(user: User = Depends(require_platform_admin)) -> dict[str, A
             "backend": settings.storage_backend,
             "s3_configured": bool(settings.storage_s3_bucket and settings.storage_s3_access_key_id and settings.storage_s3_secret_access_key),
         },
+        "database": {
+            "backend": "postgresql" if settings.database_url.lower().startswith(("postgresql", "postgresql+")) else "sqlite",
+        },
         "operations": {
             "migrations_on_startup": settings.run_migrations_on_startup,
             "metrics_protected": bool(settings.metrics_bearer_token),
             "local_mcp_tools_enabled": settings.enable_local_mcp_tools,
+            "agent_run_timeout_seconds": settings.agent_run_timeout_seconds,
+            "max_concurrent_agent_runs_per_workspace": settings.max_concurrent_agent_runs_per_workspace,
         },
     }
 

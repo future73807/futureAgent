@@ -46,6 +46,7 @@ import {
   PlusOutlined,
   ProjectOutlined,
   RobotOutlined,
+  StopOutlined,
   SendOutlined,
   SettingOutlined,
   TeamOutlined,
@@ -321,6 +322,9 @@ function TaskExecutionPanel({ taskId, plan, models, skills, canWrite, onPlanRefr
   const [stepId, setStepId] = useState('')
   const [running, setRunning] = useState(false)
   const [liveOutput, setLiveOutput] = useState('')
+  const [activeRunId, setActiveRunId] = useState('')
+  const executionAbortRef = useRef(null)
+  const cancellationRequestedRef = useRef(false)
   const loadRuns = useCallback(async () => {
     if (!taskId) return
     try { setRuns((await apiFetch(`/api/v1/tasks/${taskId}/runs`)).runs || []) } catch (error) { message.error(readableError(error)) }
@@ -332,21 +336,59 @@ function TaskExecutionPanel({ taskId, plan, models, skills, canWrite, onPlanRefr
     const activeStep = plan?.steps?.find((item) => item.status !== 'done')
     if (!stepId && activeStep) setStepId(activeStep.id)
   }, [modelId, models, plan, skillName, skills, stepId])
-  const execute = async () => {
+  useEffect(() => () => executionAbortRef.current?.abort(), [])
+  const execute = async (retryRun = null) => {
     if (!plan || !modelId || !skillName || running) return
-    setLiveOutput(''); setRunning(true)
+    const execution = retryRun ? {
+      modelId: retryRun.model_id,
+      skillName: retryRun.skill_name,
+      stepId: retryRun.step_id,
+      retryOfId: retryRun.id,
+    } : { modelId, skillName, stepId, retryOfId: null }
+    const abortController = new AbortController()
+    let terminalStatus = 'succeeded'
+    cancellationRequestedRef.current = false
+    executionAbortRef.current = abortController
+    setActiveRunId(''); setLiveOutput(''); setRunning(true)
     try {
-      await streamSSE(`/api/v1/tasks/${taskId}/execute`, { model_id: modelId, skill_name: skillName, step_id: stepId || null, mcp_servers: [] }, { onEvent: (event, data) => {
+      await streamSSE(`/api/v1/tasks/${taskId}/execute`, { model_id: execution.modelId, skill_name: execution.skillName, step_id: execution.stepId || null, mcp_servers: [], retry_of_id: execution.retryOfId, idempotency_key: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}` }, { signal: abortController.signal, onEvent: (event, data) => {
+        if (event === 'meta') {
+          try { setActiveRunId(JSON.parse(data)?.run?.id || '') } catch { /* The run list remains the source of truth. */ }
+        }
         if (event === 'token') setLiveOutput((previous) => previous + data)
+        if (event === 'cancelled') terminalStatus = 'cancelled'
         if (event === 'error') { let detail = data; try { detail = JSON.parse(data).detail || data } catch { /* Keep plain SSE errors. */ } throw new Error(detail) }
       } })
-      message.success('AI execution saved for review')
+      if (terminalStatus === 'cancelled') message.info('AI execution cancelled and saved to the audit trail')
+      else message.success('AI execution saved for review')
       await Promise.all([loadRuns(), onPlanRefresh?.()])
-    } catch (error) { message.error(readableError(error)); await loadRuns() } finally { setRunning(false) }
+    } catch (error) {
+      if (cancellationRequestedRef.current || error?.name === 'AbortError') message.info('AI execution cancelled and saved to the audit trail')
+      else message.error(readableError(error))
+      await loadRuns()
+    } finally {
+      if (executionAbortRef.current === abortController) executionAbortRef.current = null
+      cancellationRequestedRef.current = false
+      setActiveRunId('')
+      setRunning(false)
+    }
   }
-  const runItems = runs.map((run) => ({ key: run.id, label: `${run.status} · ${new Date(run.started_at).toLocaleString()}`, children: <Space direction="vertical" size="small" style={{ width: '100%' }}><Text type="secondary">{run.model_id} · {run.skill_name}</Text>{run.output ? <pre className="attachment-preview">{run.output}</pre> : <Text type="secondary">{run.error_message || 'Execution produced no saved output yet.'}</Text>}</Space> }))
+  const cancelRun = async (runId) => {
+    if (!runId) return
+    cancellationRequestedRef.current = true
+    try {
+      await apiFetch(`/api/v1/tasks/${taskId}/runs/${runId}/cancel`, { method: 'POST' })
+      if (runId === activeRunId) executionAbortRef.current?.abort()
+      await Promise.all([loadRuns(), onPlanRefresh?.()])
+      message.info('Cancellation recorded; no further model output will be accepted.')
+    } catch (error) {
+      cancellationRequestedRef.current = false
+      message.error(readableError(error))
+    }
+  }
+  const runItems = runs.map((run) => ({ key: run.id, label: `${run.status} · ${new Date(run.started_at).toLocaleString()}`, children: <Space direction="vertical" size="small" style={{ width: '100%' }}><Text type="secondary">{run.model_id} · {run.skill_name} · attempt {run.attempt || 1}</Text>{run.output ? <pre className="attachment-preview">{run.output}</pre> : <Text type="secondary">{run.error_message || 'Execution produced no saved output yet.'}</Text>}<Space>{['failed', 'cancelled'].includes(run.status) && canWrite && <Button size="small" onClick={() => execute(run)} disabled={running}>Retry with same configuration</Button>}{run.status === 'running' && canWrite && <Button size="small" danger onClick={() => cancelRun(run.id)} disabled={running && activeRunId && activeRunId !== run.id}>Cancel run</Button>}</Space></Space> }))
   const executable = Boolean(plan && ['approved', 'in_progress'].includes(plan.status) && canWrite && modelId && skillName)
-  return <Card className="work-results" title="AI execution" extra={<Button type="primary" icon={<RobotOutlined />} loading={running} disabled={!executable} onClick={execute}>Run selected step</Button>}>
+  return <Card className="work-results" title="AI execution" extra={<Space><Button type="primary" icon={<RobotOutlined />} loading={running} disabled={!executable} onClick={() => execute()}>Run selected step</Button>{running && activeRunId && <Button danger icon={<StopOutlined />} onClick={() => cancelRun(activeRunId)}>Cancel</Button>}</Space>}>
     <Space direction="vertical" size="small" style={{ width: '100%' }}><Text type="secondary">AI receives the approved task, selected plan step, and bounded text from attached context files. Results are saved for human review; execution never auto-approves a step.</Text><Flex gap={8} wrap="wrap"><Select value={stepId || undefined} onChange={setStepId} style={{ minWidth: 200 }} placeholder="Choose a plan step" options={(plan?.steps || []).filter((step) => step.status !== 'done').map((step) => ({ value: step.id, label: `${step.status} · ${step.title}` }))} /><Select value={modelId || undefined} onChange={setModelId} style={{ minWidth: 180 }} options={models.map((item) => ({ value: item.id, label: `${item.id}${item.ready ? '' : ' (not ready)'}`, disabled: !item.ready }))} /><Select value={skillName || undefined} onChange={setSkillName} style={{ minWidth: 150 }} options={skills.map((item) => ({ value: item.name, label: item.name }))} /></Flex>{liveOutput && <pre className="attachment-preview">{liveOutput}</pre>}{runItems.length ? <Tabs size="small" items={runItems} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No AI executions recorded for this task" />}</Space>
   </Card>
 }

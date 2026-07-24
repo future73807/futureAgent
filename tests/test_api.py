@@ -315,7 +315,7 @@ class ProductApiTests(unittest.TestCase):
             response = self.client.post(
                 f"/api/v1/tasks/{task_id}/execute",
                 headers=owner_headers,
-                json={"model_id": "gpt-4o-mini", "skill_name": "default", "step_id": step_id},
+                json={"model_id": "gpt-4o-mini", "skill_name": "default", "step_id": step_id, "idempotency_key": "release-note-first-run"},
             )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertIn("event: done", response.text)
@@ -324,11 +324,76 @@ class ProductApiTests(unittest.TestCase):
         self.assertEqual(runs.status_code, 200, runs.text)
         self.assertEqual(len(runs.json()["runs"]), 1)
         self.assertEqual(runs.json()["runs"][0]["status"], "succeeded")
+        self.assertEqual(runs.json()["runs"][0]["attempt"], 1)
         self.assertIn("acceptance evidence", runs.json()["runs"][0]["output"])
+        first_run_id = runs.json()["runs"][0]["id"]
+
+        from sqlmodel import Session
+        from db.models import AgentRun
+
+        with Session(database.engine) as session:
+            retry_parent = AgentRun(
+                workspace_id=self.owner_workspace,
+                task_id=task_id,
+                plan_id=approved.json()["plan"]["id"],
+                step_id=step_id,
+                requested_by=self.owner_id,
+                model_id="gpt-4o-mini",
+                skill_name="default",
+                status="failed",
+                error_message="Provider route was unavailable.",
+            )
+            session.add(retry_parent)
+            session.commit()
+            session.refresh(retry_parent)
+            retry_parent_id = retry_parent.id
+
+        with (
+            patch("api.routes.get_agent_engine", return_value=FakeEngine()),
+            patch("api.routes._ensure_model_ready"),
+        ):
+            duplicate = self.client.post(
+                f"/api/v1/tasks/{task_id}/execute",
+                headers=owner_headers,
+                json={"model_id": "gpt-4o-mini", "skill_name": "default", "step_id": step_id, "idempotency_key": "release-note-first-run"},
+            )
+            retry = self.client.post(
+                f"/api/v1/tasks/{task_id}/execute",
+                headers=owner_headers,
+                json={"model_id": "gpt-4o-mini", "skill_name": "default", "step_id": step_id, "retry_of_id": retry_parent_id, "idempotency_key": "release-note-retry-run"},
+            )
+        self.assertEqual(duplicate.status_code, 409, duplicate.text)
+        self.assertEqual(retry.status_code, 200, retry.text)
+        retry_runs = self.client.get(f"/api/v1/tasks/{task_id}/runs", headers=owner_headers).json()["runs"]
+        retry_run = next(run for run in retry_runs if run["retry_of_id"] == retry_parent_id)
+        self.assertEqual(retry_run["retry_of_id"], retry_parent_id)
+        self.assertEqual(retry_run["attempt"], 2)
+
+        with Session(database.engine) as session:
+            cancellable = AgentRun(
+                workspace_id=self.owner_workspace,
+                task_id=task_id,
+                plan_id=approved.json()["plan"]["id"],
+                step_id=step_id,
+                requested_by=self.owner_id,
+                model_id="gpt-4o-mini",
+                skill_name="default",
+            )
+            session.add(cancellable)
+            session.commit()
+            session.refresh(cancellable)
+            cancellable_id = cancellable.id
+        cancelled = self.client.post(
+            f"/api/v1/tasks/{task_id}/runs/{cancellable_id}/cancel",
+            headers=owner_headers,
+        )
+        self.assertEqual(cancelled.status_code, 200, cancelled.text)
+        self.assertEqual(cancelled.json()["run"]["status"], "cancelled")
 
         activity = self.client.get(f"/api/v1/tasks/{task_id}/activity", headers=owner_headers)
         self.assertEqual(activity.status_code, 200, activity.text)
-        self.assertIn("agent_run.completed", {event["action"] for event in activity.json()["events"]})
+        actions = {event["action"] for event in activity.json()["events"]}
+        self.assertTrue({"agent_run.completed", "agent_run.cancelled"}.issubset(actions))
 
     def test_office_preview_extractors_return_bounded_text(self):
         from api.routes import _extract_docx_text, _extract_xlsx_text
