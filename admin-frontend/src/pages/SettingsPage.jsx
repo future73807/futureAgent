@@ -29,6 +29,11 @@ export default function SettingsPage() {
             <Descriptions.Item label="Ollama">{state(settings.providers.ollama)}</Descriptions.Item>
             <Descriptions.Item label="PostgreSQL">{settings.postgres_host}</Descriptions.Item>
             <Descriptions.Item label="Langfuse">{state(settings.observability.langfuse)}</Descriptions.Item>
+            <Descriptions.Item label="Attachment storage">{settings.storage?.backend || '-'}</Descriptions.Item>
+            <Descriptions.Item label="S3 connection">{state(settings.storage?.s3_configured)}</Descriptions.Item>
+            <Descriptions.Item label="Startup migrations">{state(settings.operations?.migrations_on_startup)}</Descriptions.Item>
+            <Descriptions.Item label="Metrics protected">{state(settings.operations?.metrics_protected)}</Descriptions.Item>
+            <Descriptions.Item label="Local MCP file tools">{state(settings.operations?.local_mcp_tools_enabled)}</Descriptions.Item>
             <Descriptions.Item label="MCP 服务" span={2}>{(settings.mcp_servers || []).join(', ') || '无'}</Descriptions.Item>
           </Descriptions>
         )}

@@ -15,6 +15,7 @@ export default function ModelsPage() {
   const { message } = App.useApp()
   const [models, setModels] = useState([])
   const [loading, setLoading] = useState(false)
+  const [probing, setProbing] = useState('')
   const litellmUrl = import.meta.env.VITE_LITELLM_UI_URL || serviceUrl(4000, '/ui')
 
   const load = async () => {
@@ -25,10 +26,23 @@ export default function ModelsPage() {
   }
   useEffect(() => { load() }, [])
 
+  const probe = async (model) => {
+    setProbing(model.id)
+    try {
+      const result = await apiFetch(`/api/v1/models/${encodeURIComponent(model.id)}/probe`, { method: 'POST' })
+      message.success(`Verified ${result.model_id}: ${result.sample}`)
+    } catch (error) {
+      message.error(error.message)
+    } finally {
+      setProbing('')
+    }
+  }
+
   const columns = [
     { title: '模型 ID', dataIndex: 'id', render: (value) => <span className="code-text">{value}</span> },
     { title: '提供商', dataIndex: 'provider', render: (value) => <Tag color="blue">{value}</Tag> },
     { title: '调用路由', key: 'status', render: (_, model) => routeStatus(model) },
+    { title: '真实验证', key: 'probe', render: (_, model) => <Button size="small" loading={probing === model.id} disabled={!model.ready || Boolean(probing)} onClick={() => probe(model)}>执行探测</Button> },
   ]
 
   return (

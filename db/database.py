@@ -3,6 +3,7 @@ from collections.abc import Generator
 from datetime import timedelta
 
 from sqlmodel import Session, SQLModel, create_engine, select
+from sqlalchemy import inspect
 
 from config import settings
 from db.models import Membership, User, Workspace, now_utc
@@ -24,9 +25,56 @@ def get_session() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    SQLModel.metadata.create_all(engine)
+    if settings.run_migrations_on_startup:
+        _upgrade_schema()
+    elif settings.environment.lower() == "production":
+        raise RuntimeError(
+            "Production startup requires RUN_MIGRATIONS_ON_STARTUP=true; "
+            "do not use metadata.create_all as a migration mechanism."
+        )
+    else:
+        # Local development and unit tests can start from an empty schema.
+        # Deployments use Alembic migrations instead (see migrations/).
+        SQLModel.metadata.create_all(engine)
     _migrate_legacy_development_admin()
     _seed_development_admin()
+
+
+def _upgrade_schema() -> None:
+    """Apply the checked-in Alembic history before the API accepts traffic."""
+    from alembic import command
+    from alembic.config import Config
+
+    from config import BASE_DIR
+
+    alembic_config = Config(str(BASE_DIR / "alembic.ini"))
+    alembic_config.set_main_option("sqlalchemy.url", settings.database_url)
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    if "alembic_version" not in existing_tables:
+        if _matches_schema(inspector, set(SQLModel.metadata.tables)):
+            # A controlled transition for installations that already include
+            # every current model table. No DDL is needed; record the head.
+            command.stamp(alembic_config, "head")
+            return
+        legacy_tables = set(SQLModel.metadata.tables) - {"agent_runs"}
+        if _matches_schema(inspector, legacy_tables):
+            # The pre-Alembic product schema is known and complete. Stamp that
+            # immutable baseline, then apply the additive AgentRun revision.
+            command.stamp(alembic_config, "20260725_00")
+    command.upgrade(alembic_config, "head")
+
+
+def _matches_schema(inspector, expected_tables: set[str]) -> bool:
+    existing_tables = set(inspector.get_table_names())
+    if not expected_tables or not expected_tables.issubset(existing_tables):
+        return False
+    return all(
+        {column.name for column in SQLModel.metadata.tables[table_name].columns}.issubset(
+            {column["name"] for column in inspector.get_columns(table_name)}
+        )
+        for table_name in expected_tables
+    )
 
 
 def _development_bootstrap_email() -> str:

@@ -37,6 +37,16 @@ class Settings(BaseSettings):
     bootstrap_admin_password: str = "ChangeMe123!"
     upload_dir: str = str(BASE_DIR / "uploads")
     max_upload_mb: int = 20
+    storage_backend: str = "local"
+    storage_s3_bucket: str = ""
+    storage_s3_endpoint_url: str = ""
+    storage_s3_region: str = "us-east-1"
+    storage_s3_access_key_id: str = ""
+    storage_s3_secret_access_key: str = ""
+    storage_s3_prefix: str = "futureagent"
+    storage_s3_addressing_style: str = "auto"
+    run_migrations_on_startup: bool = False
+    metrics_bearer_token: str = ""
     cors_origins_csv: str = "http://localhost:5173,http://localhost:5174"
 
     # ===== MCP 配置 =====
@@ -44,6 +54,7 @@ class Settings(BaseSettings):
     mcp_hostnames_csv: str = "localhost"
     mcp_servers_json: str = ""
     mcp_connect_timeout: float = 5.0
+    enable_local_mcp_tools: bool = False
 
     # ===== 数据库配置 =====
     postgres_dsn: PostgresDsn = (

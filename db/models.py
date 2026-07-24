@@ -150,6 +150,31 @@ class ChatMessage(SQLModel, table=True):
     created_at: datetime = Field(default_factory=now_utc)
 
 
+class AgentRun(SQLModel, table=True):
+    """A durable, task-scoped AI execution attempt.
+
+    Conversations are useful for exploratory chat.  A Work-mode run is
+    different: it must remain tied to a governed task and preserve the model,
+    requested step, output, and terminal state for later review.
+    """
+
+    __tablename__ = "agent_runs"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    workspace_id: str = Field(foreign_key="workspaces.id", index=True)
+    task_id: str = Field(foreign_key="tasks.id", index=True)
+    plan_id: str | None = Field(default=None, foreign_key="work_plans.id", index=True)
+    step_id: str | None = Field(default=None, foreign_key="work_plan_steps.id", index=True)
+    requested_by: str = Field(foreign_key="users.id", index=True)
+    model_id: str = Field(max_length=120)
+    skill_name: str = Field(max_length=120)
+    status: str = Field(default="running", max_length=24)  # running/succeeded/failed/cancelled
+    output: str = Field(default="", max_length=100_000)
+    error_message: str = Field(default="", max_length=4000)
+    started_at: datetime = Field(default_factory=now_utc)
+    completed_at: datetime | None = Field(default=None)
+
+
 class Attachment(SQLModel, table=True):
     __tablename__ = "attachments"
 

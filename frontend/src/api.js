@@ -73,9 +73,7 @@ export async function uploadAttachment(file, target) {
 }
 
 export async function downloadAttachment(attachment) {
-  const response = await fetch(attachment.download_url, { headers: requestHeaders(), credentials: 'include' })
-  if (!response.ok) throw await errorFrom(response)
-  const blob = await response.blob()
+  const blob = await getAttachmentBlob(attachment)
   const link = document.createElement('a')
   link.href = URL.createObjectURL(blob)
   link.download = attachment.original_name || 'download'
@@ -83,6 +81,12 @@ export async function downloadAttachment(attachment) {
   link.click()
   link.remove()
   URL.revokeObjectURL(link.href)
+}
+
+export async function getAttachmentBlob(attachment) {
+  const response = await fetch(attachment.download_url, { headers: requestHeaders(), credentials: 'include' })
+  if (!response.ok) throw await errorFrom(response)
+  return response.blob()
 }
 
 export async function streamSSE(path, body, handlers = {}, retried = false) {

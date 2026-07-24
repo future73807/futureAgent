@@ -4,11 +4,15 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+from zipfile import ZipFile
 
 from fastapi.testclient import TestClient
 from sqlmodel import SQLModel, create_engine
 
 import db.database as database
+from config import settings
 from main import app
 
 
@@ -16,6 +20,10 @@ class ProductApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.original_upload_dir = settings.upload_dir
+        cls.original_storage_backend = settings.storage_backend
+        settings.upload_dir = str(Path(cls.temp_dir.name) / "attachments")
+        settings.storage_backend = "local"
         database.engine = create_engine(
             f"sqlite:///{Path(cls.temp_dir.name, 'product-test.db').as_posix()}",
             connect_args={"check_same_thread": False},
@@ -55,6 +63,8 @@ class ProductApiTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.client.__exit__(None, None, None)
         database.engine.dispose()
+        settings.upload_dir = cls.original_upload_dir
+        settings.storage_backend = cls.original_storage_backend
         cls.temp_dir.cleanup()
 
     @classmethod
@@ -217,6 +227,132 @@ class ProductApiTests(unittest.TestCase):
             json={"query": "Verify the preflight", "model_id": "gpt-4o-mini"},
         )
         self.assertEqual(response.status_code, 503, response.text)
+
+    def test_platform_admin_can_record_a_real_model_probe_result(self):
+        from sqlmodel import Session
+        from db.models import User
+
+        with Session(database.engine) as session:
+            owner = session.get(User, self.owner_id)
+            owner.is_platform_admin = True
+            session.add(owner)
+            session.commit()
+
+        async def fake_generate(*_args, **_kwargs):
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="futureAgent model verification"))])
+
+        with (
+            patch("api.routes._ensure_model_ready"),
+            patch("api.routes.ModelHub.generate", fake_generate),
+        ):
+            result = self.client.post(
+                "/api/v1/models/gpt-4o-mini/probe",
+                headers=self.auth_headers(self.owner_token, self.owner_workspace),
+            )
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()["status"], "verified")
+        audits = self.client.get("/api/v1/admin/audit-events", headers=self.auth_headers(self.owner_token, self.owner_workspace))
+        self.assertTrue(any(event["action"] == "model.probed" for event in audits.json()["events"]))
+
+    def test_liveness_readiness_and_local_metrics_are_available(self):
+        live = self.client.get("/api/v1/health/live")
+        self.assertEqual(live.status_code, 200, live.text)
+        ready = self.client.get("/api/v1/health/ready")
+        self.assertEqual(ready.status_code, 200, ready.text)
+        self.assertEqual(ready.json()["checks"], {"database": "ok", "storage": "ok"})
+        metrics = self.client.get("/api/metrics")
+        self.assertEqual(metrics.status_code, 200, metrics.text)
+        self.assertIn(b"futureagent_http_requests_total", metrics.content)
+
+    def test_task_execution_persists_a_reviewable_run_and_activity(self):
+        owner_headers = self.auth_headers(self.owner_token, self.owner_workspace)
+        project = self.client.post(
+            "/api/v1/projects",
+            headers=owner_headers,
+            json={"name": "Agent execution", "description": "Run a governed agent step", "color": "#5B5BD6"},
+        )
+        self.assertEqual(project.status_code, 201, project.text)
+        task = self.client.post(
+            "/api/v1/tasks",
+            headers=owner_headers,
+            json={"project_id": project.json()["project"]["id"], "title": "Draft release note"},
+        )
+        self.assertEqual(task.status_code, 201, task.text)
+        task_id = task.json()["task"]["id"]
+        plan = self.client.put(
+            f"/api/v1/tasks/{task_id}/plan",
+            headers=owner_headers,
+            json={"objective": "Produce a reviewable release note", "steps": [{"title": "Draft release note", "instructions": "Summarise the verified change."}]},
+        )
+        self.assertEqual(plan.status_code, 200, plan.text)
+        approved = self.client.post(f"/api/v1/tasks/{task_id}/plan/approve", headers=owner_headers)
+        self.assertEqual(approved.status_code, 200, approved.text)
+        step_id = approved.json()["plan"]["steps"][0]["id"]
+
+        class FakeSkillManager:
+            @staticmethod
+            def get_skill(name):
+                return object() if name == "default" else None
+
+        class FakeMcpManager:
+            servers = {}
+
+        class FakeEngine:
+            skill_manager = FakeSkillManager()
+            mcp_manager = FakeMcpManager()
+
+            @staticmethod
+            def validate_permissions(*_args, **_kwargs):
+                return None
+
+            async def run(self, **_kwargs):
+                yield "Release note draft with acceptance evidence."
+
+        with (
+            patch("api.routes.get_agent_engine", return_value=FakeEngine()),
+            patch("api.routes._ensure_model_ready"),
+        ):
+            response = self.client.post(
+                f"/api/v1/tasks/{task_id}/execute",
+                headers=owner_headers,
+                json={"model_id": "gpt-4o-mini", "skill_name": "default", "step_id": step_id},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("event: done", response.text)
+
+        runs = self.client.get(f"/api/v1/tasks/{task_id}/runs", headers=owner_headers)
+        self.assertEqual(runs.status_code, 200, runs.text)
+        self.assertEqual(len(runs.json()["runs"]), 1)
+        self.assertEqual(runs.json()["runs"][0]["status"], "succeeded")
+        self.assertIn("acceptance evidence", runs.json()["runs"][0]["output"])
+
+        activity = self.client.get(f"/api/v1/tasks/{task_id}/activity", headers=owner_headers)
+        self.assertEqual(activity.status_code, 200, activity.text)
+        self.assertIn("agent_run.completed", {event["action"] for event in activity.json()["events"]})
+
+    def test_office_preview_extractors_return_bounded_text(self):
+        from api.routes import _extract_docx_text, _extract_xlsx_text
+
+        with tempfile.TemporaryDirectory() as directory:
+            docx_path = Path(directory) / "brief.docx"
+            with ZipFile(docx_path, "w") as archive:
+                archive.writestr(
+                    "word/document.xml",
+                    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Commercial brief</w:t></w:r></w:p></w:body></w:document>',
+                )
+            self.assertEqual(_extract_docx_text(docx_path), "Commercial brief")
+
+            xlsx_path = Path(directory) / "sheet.xlsx"
+            with ZipFile(xlsx_path, "w") as archive:
+                archive.writestr(
+                    "xl/sharedStrings.xml",
+                    '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>Metric</t></si><si><t>Ready</t></si></sst>',
+                )
+                archive.writestr(
+                    "xl/worksheets/sheet1.xml",
+                    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c t="s"><v>0</v></c><c t="s"><v>1</v></c></row></sheetData></worksheet>',
+                )
+            self.assertEqual(_extract_xlsx_text(xlsx_path), "Metric\tReady")
 
     def test_platform_admin_views_are_server_protected(self):
         member_denied = self.client.get(

@@ -8,11 +8,17 @@ membership on the server.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+import secrets
+import tempfile
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Annotated, Any, AsyncGenerator, Literal
+from urllib.parse import quote
+from xml.etree import ElementTree
+from zipfile import BadZipFile, ZipFile
 
 from fastapi import (
     APIRouter,
@@ -20,15 +26,17 @@ from fastapi import (
     Depends,
     File,
     Form,
+    Header,
     HTTPException,
     Query,
     Response,
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from sse_starlette.sse import EventSourceResponse
+from starlette.background import BackgroundTask
 from sqlmodel import Session, select
 
 from api.dependencies import (
@@ -44,9 +52,12 @@ from config import settings
 from core.agent_engine import AgentEngine
 from core.mcp_manager import MCPManager
 from core.model_hub import ModelHub
+from core.observability import metrics_payload, record_agent_run, record_attachment_upload
 from core.skill_manager import Skill, SkillManager
+from core.storage import ObjectNotFound, StorageError, attachment_object_key, get_storage
 from db.database import get_session
 from db.models import (
+    AgentRun,
     Attachment,
     AuditEvent,
     ChatMessage,
@@ -84,6 +95,8 @@ ALLOWED_UPLOAD_EXTENSIONS = {
     ".jpeg",
     ".webp",
 }
+PREVIEW_TEXT_LIMIT = 100_000
+PREVIEW_ARCHIVE_MEMBER_LIMIT = 2_000_000
 
 
 class RequestModel(BaseModel):
@@ -197,6 +210,15 @@ class ChatCompletionRequest(RequestModel):
 
 class AgentRequest(ChatCompletionRequest):
     skill_name: str = Field(default="default", max_length=120)
+    mcp_servers: list[str] = Field(default_factory=list, max_length=20)
+
+
+class TaskExecutionRequest(RequestModel):
+    """Request a governed AI attempt against an approved Work-mode plan."""
+
+    model_id: str = Field(default="", max_length=120)
+    skill_name: str = Field(default="default", max_length=120)
+    step_id: str | None = Field(default=None, max_length=64)
     mcp_servers: list[str] = Field(default_factory=list, max_length=20)
 
 
@@ -343,6 +365,23 @@ def _message_data(message: ChatMessage) -> dict[str, Any]:
         "content": message.content,
         "tool_trace": _safe_json_list(message.tool_trace_json),
         "created_at": message.created_at,
+    }
+
+
+def _agent_run_data(run: AgentRun) -> dict[str, Any]:
+    return {
+        "id": run.id,
+        "task_id": run.task_id,
+        "plan_id": run.plan_id,
+        "step_id": run.step_id,
+        "requested_by": run.requested_by,
+        "model_id": run.model_id,
+        "skill_name": run.skill_name,
+        "status": run.status,
+        "output": run.output,
+        "error_message": run.error_message,
+        "started_at": run.started_at,
+        "completed_at": run.completed_at,
     }
 
 
@@ -498,6 +537,17 @@ def _authorize_agent_config(context: WorkspaceContext, model_id: str, skill_name
     return role
 
 
+def _validate_mcp_server_selection(engine: AgentEngine, mcp_servers: list[str]) -> None:
+    unknown_servers = [name for name in mcp_servers if name not in engine.mcp_manager.servers]
+    if unknown_servers:
+        raise HTTPException(status_code=404, detail=f"Unknown MCP server(s): {', '.join(unknown_servers)}")
+    if "local_tools" in mcp_servers and not settings.enable_local_mcp_tools:
+        raise HTTPException(
+            status_code=403,
+            detail="Local MCP filesystem tools are disabled for this deployment. Configure an isolated workspace-aware connector before enabling them.",
+        )
+
+
 def _set_refresh_cookie(response: Response, token: str) -> None:
     response.set_cookie(
         key="futureagent_refresh",
@@ -597,6 +647,49 @@ async def health() -> dict[str, Any]:
         "environment": settings.environment,
         "authentication": "jwt",
     }
+
+
+@router.get("/v1/health/live")
+async def liveness() -> dict[str, str]:
+    """Process-only probe: it stays green while dependencies recover."""
+    return {"status": "ok"}
+
+
+@router.get("/v1/health/ready")
+def readiness(session: Session = Depends(get_session)) -> JSONResponse:
+    """Readiness probe for the database and configured attachment backend."""
+    failures: list[str] = []
+    try:
+        session.exec(select(User.id).limit(1)).first()
+    except Exception:
+        failures.append("database")
+    try:
+        get_storage().check_ready()
+    except StorageError:
+        failures.append("storage")
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE if failures else status.HTTP_200_OK
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": "not_ready" if failures else "ready",
+            "service": "futureAgent",
+            "checks": {"database": "failed" if "database" in failures else "ok", "storage": "failed" if "storage" in failures else "ok"},
+        },
+    )
+
+
+@router.get("/metrics", include_in_schema=False)
+def metrics(authorization: Annotated[str | None, Header()] = None) -> Response:
+    """Return Prometheus metrics only with a configured bearer token in production."""
+    expected_token = settings.metrics_bearer_token
+    supplied_token = authorization.removeprefix("Bearer ").strip() if authorization else ""
+    if expected_token:
+        if not secrets.compare_digest(supplied_token, expected_token):
+            raise HTTPException(status_code=401, detail="Metrics authentication failed")
+    elif settings.environment.lower() == "production":
+        raise HTTPException(status_code=404, detail="Not found")
+    payload, content_type = metrics_payload()
+    return Response(content=payload, media_type=content_type)
 
 
 # ---------------------------------------------------------------------------
@@ -1169,6 +1262,15 @@ def list_task_activity(
             for step in session.exec(select(WorkPlanStep).where(WorkPlanStep.plan_id == plan.id)).all()
         )
     target_ids.update(
+        run.id
+        for run in session.exec(
+            select(AgentRun).where(
+                AgentRun.workspace_id == context.workspace.id,
+                AgentRun.task_id == task_id,
+            )
+        ).all()
+    )
+    target_ids.update(
         attachment.id
         for attachment in session.exec(
             select(Attachment).where(
@@ -1519,9 +1621,7 @@ async def agent_chat(
     engine = get_agent_engine()
     if not engine.skill_manager.get_skill(request.skill_name):
         raise HTTPException(status_code=404, detail=f"Skill '{request.skill_name}' not found")
-    unknown_servers = [name for name in request.mcp_servers if name not in engine.mcp_manager.servers]
-    if unknown_servers:
-        raise HTTPException(status_code=404, detail=f"Unknown MCP server(s): {', '.join(unknown_servers)}")
+    _validate_mcp_server_selection(engine, request.mcp_servers)
     effective_role = _authorize_agent_config(context, model_id, request.skill_name, request.mcp_servers)
     _ensure_model_ready(model_id)
     conversation = _create_conversation_for_chat(
@@ -1582,6 +1682,185 @@ async def agent_chat(
     return EventSourceResponse(stream(), ping=15, headers={"X-Accel-Buffering": "no"})
 
 
+def _task_execution_prompt(
+    session: Session,
+    workspace_id: str,
+    task: Task,
+    plan: WorkPlan,
+    step: WorkPlanStep | None,
+) -> str:
+    """Build bounded task context without exposing another workspace's data."""
+    attachments = session.exec(
+        select(Attachment)
+        .where(
+            Attachment.workspace_id == workspace_id,
+            Attachment.task_id == task.id,
+        )
+        .order_by(Attachment.created_at.desc())
+        .limit(12)
+    ).all()
+    excerpts: list[str] = []
+    remaining = 20_000
+    for attachment in attachments:
+        if not attachment.extracted_text or remaining <= 0:
+            continue
+        excerpt = attachment.extracted_text[:remaining]
+        excerpts.append(f"[Attached file: {attachment.original_name}]\n{excerpt}")
+        remaining -= len(excerpt)
+    current_step = (
+        f"Step: {step.title}\nInstructions: {step.instructions or 'No additional instructions.'}"
+        if step
+        else "Step: Produce the next useful, reviewable deliverable for this plan."
+    )
+    context_files = "\n\n".join(excerpts) or "No text context files were attached to this task."
+    return (
+        "You are carrying out governed work inside a team workspace. "
+        "Use only the task context below. Return a concise, reviewable deliverable with "
+        "what you did, concrete evidence, assumptions, and the recommended next action. "
+        "Do not claim that an external action happened unless a tool result proves it.\n\n"
+        f"Task: {task.title}\nDescription: {task.description or 'No description provided.'}\n"
+        f"Objective: {plan.objective or 'No objective provided.'}\n{current_step}\n\n"
+        f"Task context files:\n{context_files}"
+    )
+
+
+@router.get("/v1/tasks/{task_id}/runs")
+def list_task_runs(
+    task_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    context: WorkspaceContext = Depends(get_workspace_context),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    _task_or_404(session, context.workspace.id, task_id)
+    runs = session.exec(
+        select(AgentRun)
+        .where(AgentRun.workspace_id == context.workspace.id, AgentRun.task_id == task_id)
+        .order_by(AgentRun.started_at.desc())
+        .limit(limit)
+    ).all()
+    return {"runs": [_agent_run_data(run) for run in runs]}
+
+
+@router.post("/v1/tasks/{task_id}/execute")
+async def execute_task_with_agent(
+    task_id: str,
+    request: TaskExecutionRequest,
+    context: WorkspaceContext = Depends(get_workspace_context),
+    session: Session = Depends(get_session),
+):
+    """Run an approved plan step and persist a reviewable execution record."""
+    task = _task_or_404(session, context.workspace.id, task_id)
+    plan = session.exec(select(WorkPlan).where(WorkPlan.task_id == task.id)).first()
+    if not plan or plan.status not in {"approved", "in_progress"}:
+        raise HTTPException(status_code=409, detail="Approve the work plan before starting an AI execution")
+    step = session.get(WorkPlanStep, request.step_id) if request.step_id else None
+    if step and step.plan_id != plan.id:
+        raise HTTPException(status_code=404, detail="Work plan step not found")
+    can_execute = (
+        context.user.is_platform_admin
+        or context.membership.role in {"owner", "admin"}
+        or (step and step.assignee_id == context.user.id)
+        or task.assignee_id == context.user.id
+        or task.reporter_id == context.user.id
+    )
+    if not can_execute:
+        raise HTTPException(status_code=403, detail="You cannot execute this task step")
+
+    model_id = request.model_id or settings.default_model
+    engine = get_agent_engine()
+    if not engine.skill_manager.get_skill(request.skill_name):
+        raise HTTPException(status_code=404, detail=f"Skill '{request.skill_name}' not found")
+    _validate_mcp_server_selection(engine, request.mcp_servers)
+    effective_role = _authorize_agent_config(context, model_id, request.skill_name, request.mcp_servers)
+    _ensure_model_ready(model_id)
+
+    run = AgentRun(
+        workspace_id=context.workspace.id,
+        task_id=task.id,
+        plan_id=plan.id,
+        step_id=step.id if step else None,
+        requested_by=context.user.id,
+        model_id=model_id,
+        skill_name=request.skill_name,
+    )
+    if step and step.status == "pending":
+        step.status = "running"
+        step.updated_at = now_utc()
+        plan.status = "in_progress"
+        plan.updated_at = now_utc()
+        session.add(step)
+        session.add(plan)
+    session.add(run)
+    session.flush()
+    write_audit(
+        session,
+        actor_id=context.user.id,
+        workspace_id=context.workspace.id,
+        action="agent_run.started",
+        target_type="agent_run",
+        target_id=run.id,
+        metadata={"task_id": task.id, "step_id": run.step_id, "model_id": model_id},
+    )
+    session.commit()
+    prompt = _task_execution_prompt(session, context.workspace.id, task, plan, step)
+    config = {
+        "model_id": model_id,
+        "skill_name": request.skill_name,
+        "mcp_servers": request.mcp_servers,
+        "thread_id": f"task-run-{run.id}",
+    }
+
+    async def stream() -> AsyncGenerator[dict[str, str], None]:
+        collected: list[str] = []
+        try:
+            yield {
+                "event": "meta",
+                "data": json.dumps({"run": _agent_run_data(run)}, default=str),
+            }
+            async for chunk in engine.run(user_role=effective_role, query=prompt, config=config):
+                collected.append(chunk)
+                yield {"event": "token", "data": chunk}
+            run.status = "succeeded"
+            run.output = "".join(collected)
+            run.completed_at = now_utc()
+            session.add(run)
+            write_audit(
+                session,
+                actor_id=context.user.id,
+                workspace_id=context.workspace.id,
+                action="agent_run.completed",
+                target_type="agent_run",
+                target_id=run.id,
+                metadata={"status": run.status, "step_id": run.step_id},
+            )
+            session.commit()
+            record_agent_run("succeeded")
+            yield {
+                "event": "done",
+                "data": json.dumps({"run": _agent_run_data(run)}, default=str),
+            }
+        except Exception as exc:
+            run.status = "failed"
+            run.output = "".join(collected)
+            run.error_message = "The AI execution did not complete. Check model routing and retry."
+            run.completed_at = now_utc()
+            session.add(run)
+            write_audit(
+                session,
+                actor_id=context.user.id,
+                workspace_id=context.workspace.id,
+                action="agent_run.failed",
+                target_type="agent_run",
+                target_id=run.id,
+                metadata={"step_id": run.step_id},
+            )
+            session.commit()
+            record_agent_run("failed")
+            yield _sse_error(exc)
+
+    return EventSourceResponse(stream(), ping=15, headers={"X-Accel-Buffering": "no"})
+
+
 @router.post("/v1/attachments", status_code=status.HTTP_201_CREATED)
 async def upload_attachment(
     file: UploadFile = File(...),
@@ -1604,58 +1883,79 @@ async def upload_attachment(
     if not task_id and not conversation_id:
         raise HTTPException(status_code=422, detail="Attach the file to a task or a conversation")
 
-    upload_dir = Path(settings.upload_dir)
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    stored_name = f"{new_id()}{extension}"
-    destination = upload_dir / stored_name
     byte_count = 0
     preview = bytearray()
     limit = settings.max_upload_mb * 1024 * 1024
+    buffered_upload = tempfile.SpooledTemporaryFile(max_size=4 * 1024 * 1024, mode="w+b")
     try:
-        with destination.open("wb") as output:
-            while chunk := await file.read(1024 * 1024):
-                byte_count += len(chunk)
-                if byte_count > limit:
-                    raise HTTPException(status_code=413, detail=f"File exceeds the {settings.max_upload_mb} MB limit")
-                output.write(chunk)
-                if len(preview) < 100_000:
-                    preview.extend(chunk[: 100_000 - len(preview)])
+        while chunk := await file.read(1024 * 1024):
+            byte_count += len(chunk)
+            if byte_count > limit:
+                raise HTTPException(status_code=413, detail=f"File exceeds the {settings.max_upload_mb} MB limit")
+            buffered_upload.write(chunk)
+            if len(preview) < PREVIEW_TEXT_LIMIT:
+                preview.extend(chunk[: PREVIEW_TEXT_LIMIT - len(preview)])
     except Exception:
-        destination.unlink(missing_ok=True)
+        buffered_upload.close()
         raise
     finally:
         await file.close()
 
-    extracted_text = ""
-    if extension in {".txt", ".md", ".csv", ".json"}:
-        extracted_text = bytes(preview).decode("utf-8", errors="replace")[:100_000]
-    attachment = Attachment(
-        workspace_id=context.workspace.id,
-        uploaded_by=context.user.id,
-        task_id=task_id,
-        conversation_id=conversation_id,
-        original_name=original_name,
-        stored_name=stored_name,
-        content_type=file.content_type or "application/octet-stream",
-        size_bytes=byte_count,
-        extracted_text=extracted_text,
-    )
-    session.add(attachment)
-    session.flush()
-    write_audit(
-        session,
-        actor_id=context.user.id,
-        workspace_id=context.workspace.id,
-        action="attachment.uploaded",
-        target_type="attachment",
-        target_id=attachment.id,
-        metadata={"name": original_name, "size_bytes": byte_count},
-    )
-    session.commit()
+    stored_name = attachment_object_key(context.workspace.id, f"{new_id()}{extension}")
+    stored = False
+    try:
+        storage = get_storage()
+        buffered_upload.seek(0)
+        storage.put_stream(
+            stored_name,
+            buffered_upload,
+            content_type=file.content_type or "application/octet-stream",
+        )
+        stored = True
+        buffered_upload.seek(0)
+        extracted_text = _extract_attachment_text(buffered_upload, extension, bytes(preview))
+        attachment = Attachment(
+            workspace_id=context.workspace.id,
+            uploaded_by=context.user.id,
+            task_id=task_id,
+            conversation_id=conversation_id,
+            original_name=original_name,
+            stored_name=stored_name,
+            content_type=file.content_type or "application/octet-stream",
+            size_bytes=byte_count,
+            extracted_text=extracted_text,
+        )
+        session.add(attachment)
+        session.flush()
+        write_audit(
+            session,
+            actor_id=context.user.id,
+            workspace_id=context.workspace.id,
+            action="attachment.uploaded",
+            target_type="attachment",
+            target_id=attachment.id,
+            metadata={"name": original_name, "size_bytes": byte_count},
+        )
+        session.commit()
+    except StorageError as exc:
+        raise HTTPException(status_code=503, detail="Attachment storage is unavailable") from exc
+    except Exception:
+        session.rollback()
+        if stored:
+            try:
+                storage.delete(stored_name)
+            except StorageError:
+                pass
+        raise
+    finally:
+        buffered_upload.close()
+
+    record_attachment_upload(settings.storage_backend.strip().lower())
     return {"attachment": _attachment_data(attachment)}
 
 
 def _attachment_data(attachment: Attachment) -> dict[str, Any]:
+    preview_kind = _attachment_preview_kind(attachment)
     return {
         "id": attachment.id,
         "workspace_id": attachment.workspace_id,
@@ -1668,8 +1968,92 @@ def _attachment_data(attachment: Attachment) -> dict[str, Any]:
         "created_at": attachment.created_at,
         "download_url": f"/api/v1/attachments/{attachment.id}/download",
         "preview_url": f"/api/v1/attachments/{attachment.id}/preview",
-        "preview_available": bool(attachment.extracted_text),
+        "preview_available": preview_kind != "none",
+        "preview_kind": preview_kind,
     }
+
+
+def _attachment_preview_kind(attachment: Attachment) -> str:
+    extension = Path(attachment.original_name).suffix.lower()
+    if attachment.content_type.startswith("image/") or extension in {".png", ".jpg", ".jpeg", ".webp"}:
+        return "image"
+    if extension == ".pdf":
+        return "pdf"
+    if attachment.extracted_text:
+        return "text"
+    return "none"
+
+
+def _bounded_zip_member(zip_file: ZipFile, member_name: str) -> bytes:
+    try:
+        info = zip_file.getinfo(member_name)
+    except KeyError:
+        return b""
+    if info.file_size > PREVIEW_ARCHIVE_MEMBER_LIMIT:
+        return b""
+    with zip_file.open(info) as source:
+        return source.read(PREVIEW_ARCHIVE_MEMBER_LIMIT + 1)[:PREVIEW_ARCHIVE_MEMBER_LIMIT]
+
+
+def _xml_local_name(node: ElementTree.Element) -> str:
+    return node.tag.rsplit("}", 1)[-1] if isinstance(node.tag, str) else ""
+
+
+def _extract_docx_text(source: Path | Any) -> str:
+    try:
+        if hasattr(source, "seek"):
+            source.seek(0)
+        with ZipFile(source) as archive:
+            raw = _bounded_zip_member(archive, "word/document.xml")
+        if not raw:
+            return ""
+        root = ElementTree.fromstring(raw)
+        return "".join(
+            node.text or "" for node in root.iter() if _xml_local_name(node) == "t"
+        )[:PREVIEW_TEXT_LIMIT]
+    except (BadZipFile, ElementTree.ParseError, OSError):
+        return ""
+
+
+def _extract_xlsx_text(source: Path | Any) -> str:
+    try:
+        if hasattr(source, "seek"):
+            source.seek(0)
+        with ZipFile(source) as archive:
+            shared_root = ElementTree.fromstring(_bounded_zip_member(archive, "xl/sharedStrings.xml") or b"<sst/>")
+            shared_strings = [
+                "".join(node.itertext())
+                for node in shared_root.iter()
+                if _xml_local_name(node) == "si"
+            ]
+            sheet_root = ElementTree.fromstring(_bounded_zip_member(archive, "xl/worksheets/sheet1.xml") or b"<worksheet/>")
+        rows: list[str] = []
+        for row in (node for node in sheet_root.iter() if _xml_local_name(node) == "row"):
+            values: list[str] = []
+            for cell in (node for node in row.iter() if _xml_local_name(node) == "c"):
+                value_node = next((node for node in cell.iter() if _xml_local_name(node) == "v"), None)
+                value = value_node.text if value_node is not None and value_node.text else ""
+                if cell.attrib.get("t") == "s" and value.isdigit():
+                    index = int(value)
+                    value = shared_strings[index] if index < len(shared_strings) else ""
+                values.append(value)
+            if values:
+                rows.append("\t".join(values))
+            if sum(len(item) + 1 for item in rows) >= PREVIEW_TEXT_LIMIT:
+                break
+        return "\n".join(rows)[:PREVIEW_TEXT_LIMIT]
+    except (BadZipFile, ElementTree.ParseError, OSError):
+        return ""
+
+
+def _extract_attachment_text(source: Path | Any, extension: str, first_bytes: bytes) -> str:
+    if extension in {".txt", ".md", ".csv", ".json"}:
+        return first_bytes.decode("utf-8", errors="replace")[:PREVIEW_TEXT_LIMIT]
+    if extension == ".docx":
+        return _extract_docx_text(source)
+    if extension == ".xlsx":
+        return _extract_xlsx_text(source)
+    return ""
 
 
 @router.get("/v1/attachments")
@@ -1697,14 +2081,24 @@ def download_attachment(
     attachment_id: str,
     context: WorkspaceContext = Depends(get_workspace_context),
     session: Session = Depends(get_session),
-) -> FileResponse:
+) -> StreamingResponse:
     attachment = session.get(Attachment, attachment_id)
     if not attachment or attachment.workspace_id != context.workspace.id:
         raise HTTPException(status_code=404, detail="Attachment not found")
-    file_path = Path(settings.upload_dir) / attachment.stored_name
-    if not file_path.is_file():
-        raise HTTPException(status_code=404, detail="The attachment file is unavailable")
-    return FileResponse(file_path, media_type=attachment.content_type, filename=attachment.original_name)
+    try:
+        stream = get_storage().open_stream(attachment.stored_name)
+    except ObjectNotFound as exc:
+        raise HTTPException(status_code=404, detail="The attachment file is unavailable") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=503, detail="Attachment storage is unavailable") from exc
+    safe_filename = re.sub(r'[\\"\r\n]+', "_", attachment.original_name) or "attachment"
+    disposition = f"attachment; filename=\"{safe_filename}\"; filename*=UTF-8''{quote(attachment.original_name)}"
+    return StreamingResponse(
+        stream,
+        media_type=attachment.content_type,
+        headers={"Content-Disposition": disposition},
+        background=BackgroundTask(stream.close),
+    )
 
 
 @router.get("/v1/attachments/{attachment_id}/preview")
@@ -1713,20 +2107,24 @@ def preview_attachment(
     context: WorkspaceContext = Depends(get_workspace_context),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    """Return a bounded text preview for workspace-owned text attachments.
-
-    Binary artifacts remain downloadable but are intentionally not parsed in
-    the API process.  This keeps the MVP's preview feature useful without
-    pretending to render untrusted office files or PDFs server-side.
-    """
+    """Return a bounded, authenticated preview descriptor for a task file."""
     attachment = session.get(Attachment, attachment_id)
     if not attachment or attachment.workspace_id != context.workspace.id:
         raise HTTPException(status_code=404, detail="Attachment not found")
+    attachment_data = _attachment_data(attachment)
+    preview_kind = attachment_data["preview_kind"]
+    messages = {
+        "image": "Image preview is rendered in the browser after an authenticated download.",
+        "pdf": "PDF preview is rendered in the browser after an authenticated download.",
+        "text": None,
+        "none": "Preview is available for text, Markdown, CSV, JSON, Word, Excel, image, and PDF uploads.",
+    }
     return {
-        "attachment": _attachment_data(attachment),
+        "attachment": attachment_data,
         "text": attachment.extracted_text,
-        "preview_available": bool(attachment.extracted_text),
-        "message": None if attachment.extracted_text else "Preview is available for text, Markdown, CSV, and JSON uploads.",
+        "preview_kind": preview_kind,
+        "preview_available": preview_kind != "none",
+        "message": messages[preview_kind],
     }
 
 
@@ -1759,6 +2157,63 @@ def list_models(
             for model_id in models
         ],
     }
+
+
+@router.post("/v1/models/{model_id:path}/probe")
+async def probe_model(
+    model_id: str,
+    user: User = Depends(require_platform_admin),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Perform one real, bounded inference to validate an operator's route."""
+    if model_id not in ModelHub.list_supported_models():
+        raise HTTPException(status_code=404, detail="Unsupported model")
+    _ensure_model_ready(model_id)
+    try:
+        response = await asyncio.wait_for(
+            ModelHub().generate(
+                model_id=model_id,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": "Reply with exactly: futureAgent model verification",
+                    }
+                ],
+                temperature=0,
+                stream=False,
+            ),
+            timeout=30,
+        )
+        choices = getattr(response, "choices", [])
+        content = choices[0].message.content if choices else ""
+        sample = AgentEngine._content_to_text(content)[:240] or str(content)[:240]
+        if not sample:
+            raise RuntimeError("Model returned an empty verification response")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        write_audit(
+            session,
+            actor_id=user.id,
+            action="model.probe_failed",
+            target_type="model",
+            target_id=model_id,
+        )
+        session.commit()
+        raise HTTPException(
+            status_code=502,
+            detail="The configured model route did not return a verification response.",
+        ) from exc
+    write_audit(
+        session,
+        actor_id=user.id,
+        action="model.probed",
+        target_type="model",
+        target_id=model_id,
+        metadata={"sample_length": len(sample)},
+    )
+    session.commit()
+    return {"model_id": model_id, "status": "verified", "sample": sample}
 
 
 @router.get("/v1/skills")
@@ -1901,6 +2356,15 @@ def public_settings(user: User = Depends(require_platform_admin)) -> dict[str, A
         "litellm": {"enabled": bool(settings.litellm_proxy_url), "url": settings.litellm_proxy_url},
         "observability": {"langfuse": bool(settings.langfuse_public_key and settings.langfuse_secret_key)},
         "uploads": {"max_upload_mb": settings.max_upload_mb},
+        "storage": {
+            "backend": settings.storage_backend,
+            "s3_configured": bool(settings.storage_s3_bucket and settings.storage_s3_access_key_id and settings.storage_s3_secret_access_key),
+        },
+        "operations": {
+            "migrations_on_startup": settings.run_migrations_on_startup,
+            "metrics_protected": bool(settings.metrics_bearer_token),
+            "local_mcp_tools_enabled": settings.enable_local_mcp_tools,
+        },
     }
 
 

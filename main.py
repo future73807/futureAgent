@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from api.routes import router
 from config import settings
+from core.observability import install_observability
 from db.database import init_db
 import os
 
@@ -34,6 +35,7 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["Authorization", "Content-Type", "X-Workspace-ID"],
 )
+install_observability(app)
 
 app.include_router(router, prefix="/api")
 

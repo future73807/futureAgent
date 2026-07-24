@@ -57,6 +57,7 @@ import {
   applyAuthSession,
   clearAuthSession,
   downloadAttachment,
+  getAttachmentBlob,
   getAccessToken,
   getWorkspaceId,
   refreshAccessToken,
@@ -252,6 +253,7 @@ function TaskResultsPanel({ taskId, canWrite, members, refreshKey }) {
   const [events, setEvents] = useState([])
   const [preview, setPreview] = useState(null)
   const [loading, setLoading] = useState(false)
+  const previewUrlRef = useRef('')
   const activityLabels = {
     'task.created': 'Task created',
     'task.updated': 'Task updated',
@@ -259,6 +261,9 @@ function TaskResultsPanel({ taskId, canWrite, members, refreshKey }) {
     'work_plan.approved': 'Work plan approved',
     'work_plan.step_updated': 'Execution step updated',
     'attachment.uploaded': 'File attached',
+    'agent_run.started': 'AI execution started',
+    'agent_run.completed': 'AI execution completed',
+    'agent_run.failed': 'AI execution needs attention',
   }
   const loadResults = useCallback(async () => {
     if (!taskId) { setAttachments([]); setEvents([]); return }
@@ -273,6 +278,7 @@ function TaskResultsPanel({ taskId, canWrite, members, refreshKey }) {
     } catch (error) { message.error(readableError(error)) } finally { setLoading(false) }
   }, [message, taskId])
   useEffect(() => { setPreview(null); loadResults() }, [loadResults, refreshKey])
+  useEffect(() => () => { if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current) }, [])
   const attach = async ({ file, onSuccess, onError }) => {
     try {
       await uploadAttachment(file, { task_id: taskId })
@@ -282,7 +288,15 @@ function TaskResultsPanel({ taskId, canWrite, members, refreshKey }) {
     } catch (error) { message.error(readableError(error)); onError?.(error) }
   }
   const showPreview = async (attachment) => {
-    try { setPreview(await apiFetch(attachment.preview_url)) } catch (error) { message.error(readableError(error)) }
+    try {
+      const data = await apiFetch(attachment.preview_url)
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current)
+      previewUrlRef.current = ''
+      if (data.preview_kind === 'image' || data.preview_kind === 'pdf') {
+        previewUrlRef.current = URL.createObjectURL(await getAttachmentBlob(attachment))
+      }
+      setPreview({ ...data, objectUrl: previewUrlRef.current })
+    } catch (error) { message.error(readableError(error)) }
   }
   const download = async (attachment) => {
     try { await downloadAttachment(attachment); message.success('Download started') } catch (error) { message.error(readableError(error)) }
@@ -293,12 +307,51 @@ function TaskResultsPanel({ taskId, canWrite, members, refreshKey }) {
     const status = event.metadata?.status ? ` · ${event.metadata.status}` : ''
     return <List.Item><List.Item.Meta title={activityLabels[event.action] || event.action} description={`${actor} · ${new Date(event.created_at).toLocaleString()}${status}`} /></List.Item>
   }} />
+  const previewContent = !preview ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Select a task file to preview" /> : <Space direction="vertical" size="small" style={{ width: '100%' }}><Text strong>{preview.attachment.original_name}</Text>{preview.preview_kind === 'image' ? <img className="artifact-image-preview" src={preview.objectUrl} alt={preview.attachment.original_name} /> : preview.preview_kind === 'pdf' ? <iframe className="artifact-pdf-preview" title={preview.attachment.original_name} src={preview.objectUrl} /> : preview.preview_available ? <pre className="attachment-preview">{preview.text}</pre> : <Text type="secondary">{preview.message}</Text>}</Space>
   return <Card className="work-results" title="Results & files" extra={canWrite && <Upload showUploadList={false} customRequest={attach}><Button size="small" icon={<PaperClipOutlined />}>Add context / deliverable</Button></Upload>}>
-    <Tabs size="small" items={[{ key: 'files', label: `Files (${attachments.length})`, children: files }, { key: 'preview', label: 'Preview', children: preview ? <Space direction="vertical" size="small" style={{ width: '100%' }}><Text strong>{preview.attachment.original_name}</Text>{preview.preview_available ? <pre className="attachment-preview">{preview.text}</pre> : <Text type="secondary">{preview.message}</Text>}</Space> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Select a text file to preview" /> }, { key: 'activity', label: `Activity (${events.length})`, children: activity }]} />
+    <Tabs size="small" items={[{ key: 'files', label: `Files (${attachments.length})`, children: files }, { key: 'preview', label: 'Preview', children: previewContent }, { key: 'activity', label: `Activity (${events.length})`, children: activity }]} />
   </Card>
 }
 
-function WorkModePage({ tasks, members, workspaceRole, profile, onRefresh }) {
+function TaskExecutionPanel({ taskId, plan, models, skills, canWrite, onPlanRefresh }) {
+  const { message } = AntApp.useApp()
+  const [runs, setRuns] = useState([])
+  const [modelId, setModelId] = useState('')
+  const [skillName, setSkillName] = useState('')
+  const [stepId, setStepId] = useState('')
+  const [running, setRunning] = useState(false)
+  const [liveOutput, setLiveOutput] = useState('')
+  const loadRuns = useCallback(async () => {
+    if (!taskId) return
+    try { setRuns((await apiFetch(`/api/v1/tasks/${taskId}/runs`)).runs || []) } catch (error) { message.error(readableError(error)) }
+  }, [message, taskId])
+  useEffect(() => { loadRuns() }, [loadRuns])
+  useEffect(() => {
+    if (!modelId && models.length) setModelId(models.find((item) => item.ready)?.id || models[0].id)
+    if (!skillName && skills.length) setSkillName(skills[0].name)
+    const activeStep = plan?.steps?.find((item) => item.status !== 'done')
+    if (!stepId && activeStep) setStepId(activeStep.id)
+  }, [modelId, models, plan, skillName, skills, stepId])
+  const execute = async () => {
+    if (!plan || !modelId || !skillName || running) return
+    setLiveOutput(''); setRunning(true)
+    try {
+      await streamSSE(`/api/v1/tasks/${taskId}/execute`, { model_id: modelId, skill_name: skillName, step_id: stepId || null, mcp_servers: [] }, { onEvent: (event, data) => {
+        if (event === 'token') setLiveOutput((previous) => previous + data)
+        if (event === 'error') { let detail = data; try { detail = JSON.parse(data).detail || data } catch { /* Keep plain SSE errors. */ } throw new Error(detail) }
+      } })
+      message.success('AI execution saved for review')
+      await Promise.all([loadRuns(), onPlanRefresh?.()])
+    } catch (error) { message.error(readableError(error)); await loadRuns() } finally { setRunning(false) }
+  }
+  const runItems = runs.map((run) => ({ key: run.id, label: `${run.status} · ${new Date(run.started_at).toLocaleString()}`, children: <Space direction="vertical" size="small" style={{ width: '100%' }}><Text type="secondary">{run.model_id} · {run.skill_name}</Text>{run.output ? <pre className="attachment-preview">{run.output}</pre> : <Text type="secondary">{run.error_message || 'Execution produced no saved output yet.'}</Text>}</Space> }))
+  const executable = Boolean(plan && ['approved', 'in_progress'].includes(plan.status) && canWrite && modelId && skillName)
+  return <Card className="work-results" title="AI execution" extra={<Button type="primary" icon={<RobotOutlined />} loading={running} disabled={!executable} onClick={execute}>Run selected step</Button>}>
+    <Space direction="vertical" size="small" style={{ width: '100%' }}><Text type="secondary">AI receives the approved task, selected plan step, and bounded text from attached context files. Results are saved for human review; execution never auto-approves a step.</Text><Flex gap={8} wrap="wrap"><Select value={stepId || undefined} onChange={setStepId} style={{ minWidth: 200 }} placeholder="Choose a plan step" options={(plan?.steps || []).filter((step) => step.status !== 'done').map((step) => ({ value: step.id, label: `${step.status} · ${step.title}` }))} /><Select value={modelId || undefined} onChange={setModelId} style={{ minWidth: 180 }} options={models.map((item) => ({ value: item.id, label: `${item.id}${item.ready ? '' : ' (not ready)'}`, disabled: !item.ready }))} /><Select value={skillName || undefined} onChange={setSkillName} style={{ minWidth: 150 }} options={skills.map((item) => ({ value: item.name, label: item.name }))} /></Flex>{liveOutput && <pre className="attachment-preview">{liveOutput}</pre>}{runItems.length ? <Tabs size="small" items={runItems} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No AI executions recorded for this task" />}</Space>
+  </Card>
+}
+
+function WorkModePage({ tasks, members, models, skills, workspaceRole, profile, onRefresh }) {
   const { message } = AntApp.useApp()
   const [taskId, setTaskId] = useState(tasks[0]?.id || '')
   const [plan, setPlan] = useState(null)
@@ -419,6 +472,7 @@ function WorkModePage({ tasks, members, workspaceRole, profile, onRefresh }) {
             </Card>
           )}
         </Spin>
+        <TaskExecutionPanel taskId={taskId} plan={plan} models={models} skills={skills} canWrite={canWrite} onPlanRefresh={loadPlan} />
         <TaskResultsPanel taskId={taskId} canWrite={canWrite} members={members} refreshKey={plan?.updated_at || ''} />
       </>}
       <Modal title="Record step result" open={Boolean(evidenceStep)} onCancel={() => setEvidenceStep(null)} onOk={() => evidenceForm.submit()} destroyOnClose>
@@ -531,7 +585,7 @@ function WorkspaceApp({ session, onLogout }) {
   const moveTask = async () => { await loadWorkspace() }
   const sideMenu = <Menu mode="inline" selectedKeys={[nav]} onClick={({ key }) => { setNav(key); setMobileNav(false) }} items={[{ key: 'chat', icon: <MessageOutlined />, label: 'AI workspace' }, { key: 'board', icon: <ProjectOutlined />, label: 'Project board' }, { key: 'work', icon: <AppstoreOutlined />, label: 'Work mode' }, { key: 'team', icon: <TeamOutlined />, label: 'Team' }]} />
   const layoutSider = <><div className="workspace-brand"><Avatar icon={<RobotOutlined />} className="brand-avatar" /><div><strong>futureAgent</strong><span>Team AI workspace</span></div></div><Select value={workspaceId || undefined} onChange={setActiveWorkspaceId} className="workspace-select" options={workspaces.map((item) => ({ value: item.id, label: item.name }))} />{sideMenu}<div className="sider-bottom"><Tag color={workspace?.role === 'owner' ? 'gold' : 'blue'}>{workspace?.role || 'member'}</Tag></div></>
-  const content = nav === 'chat' ? <ChatPage conversations={conversations} activeConversation={activeConversation} messages={messages} models={models} skills={skills} onNewConversation={newConversation} onSelectConversation={setActiveConversationId} onRefresh={loadWorkspace} workspaceRole={workspace?.role} /> : nav === 'board' ? <BoardPage projects={projects} tasks={tasks} members={members} onRefresh={moveTask} openTask={(task) => setTaskDrawer(task)} workspaceRole={workspace?.role} /> : nav === 'work' ? <WorkModePage tasks={tasks} members={members} workspaceRole={workspace?.role} profile={profile} onRefresh={loadWorkspace} /> : <TeamPage workspace={workspace} members={members} workspaceRole={workspace?.role} onRefresh={loadWorkspace} />
+  const content = nav === 'chat' ? <ChatPage conversations={conversations} activeConversation={activeConversation} messages={messages} models={models} skills={skills} onNewConversation={newConversation} onSelectConversation={setActiveConversationId} onRefresh={loadWorkspace} workspaceRole={workspace?.role} /> : nav === 'board' ? <BoardPage projects={projects} tasks={tasks} members={members} onRefresh={moveTask} openTask={(task) => setTaskDrawer(task)} workspaceRole={workspace?.role} /> : nav === 'work' ? <WorkModePage tasks={tasks} members={members} models={models} skills={skills} workspaceRole={workspace?.role} profile={profile} onRefresh={loadWorkspace} /> : <TeamPage workspace={workspace} members={members} workspaceRole={workspace?.role} onRefresh={loadWorkspace} />
   return <Layout className="workspace-layout">{screens.lg ? <Sider width={258} theme="light" className="workspace-sider">{layoutSider}</Sider> : <Drawer placement="left" open={mobileNav} onClose={() => setMobileNav(false)} width={280} styles={{ body: { padding: 0 } }}>{layoutSider}</Drawer>}<Layout><Header className="workspace-header"><Space>{!screens.lg && <Button type="text" icon={<MenuOutlined />} onClick={() => setMobileNav(true)} />}<Badge status="success" text="Workspace data protected" /></Space><Dropdown menu={{ items: [{ key: 'profile', label: profile?.email, disabled: true }, { type: 'divider' }, { key: 'logout', icon: <LogoutOutlined />, label: 'Sign out', onClick: onLogout }] }}><Button type="text"><Space><Avatar size="small" icon={<UserOutlined />} />{profile?.display_name}</Space></Button></Dropdown></Header><Content className="workspace-content">{loading ? <div className="loading-page"><Spin size="large" /></div> : content}</Content></Layout><Drawer title="Task details" open={Boolean(taskDrawer)} onClose={() => setTaskDrawer(null)} width={460}>{taskDrawer && <Space direction="vertical" size="middle" style={{ width: '100%' }}><Title level={4}>{taskDrawer.title}</Title><Paragraph>{taskDrawer.description || 'No description yet.'}</Paragraph><Descriptions bordered size="small" column={1}><Descriptions.Item label="Status"><Tag>{taskDrawer.status}</Tag></Descriptions.Item><Descriptions.Item label="Priority"><Tag>{taskDrawer.priority}</Tag></Descriptions.Item><Descriptions.Item label="Due date">{taskDrawer.due_date || '-'}</Descriptions.Item></Descriptions><Button type="primary" icon={<AppstoreOutlined />} onClick={() => { setNav('work'); setTaskDrawer(null) }}>Open in Work mode</Button></Space>}</Drawer></Layout>
 }
 
