@@ -42,7 +42,7 @@ class ModelHub:
     ):
         """LiteLLM 统一调用接口"""
         if not LITELLM_AVAILABLE:
-            raise ImportError("LiteLLM not installed. Run: pip install litellm")
+            raise ImportError("未安装 LiteLLM，请先安装 API 依赖。")
         request_model = model_id
         if settings.litellm_proxy_url:
             # LiteLLM Proxy 暴露 OpenAI 兼容接口；openai/ 前缀让本地 LiteLLM
@@ -188,9 +188,9 @@ class ModelHub:
         if settings.litellm_proxy_url.strip():
             return None
         if not LITELLM_AVAILABLE:
-            return "LiteLLM is not installed. Install the API dependencies before using AI chat."
+            return "未安装 LiteLLM，请先安装 API 依赖后再使用 AI 对话。"
         if not ModelHub.is_model_configured(model_id):
-            return f"Model '{model_id}' is not configured. Add its provider credentials or configure LiteLLM Proxy."
+            return f"模型“{model_id}”尚未配置。请添加供应商凭据或配置 LiteLLM 内部网关。"
         return None
 
     @staticmethod

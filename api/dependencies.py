@@ -75,6 +75,8 @@ def write_audit(
     target_type: str = "",
     target_id: str = "",
     metadata: dict | None = None,
+    visibility: str = "workspace",
+    owner_user_id: str | None = None,
 ) -> None:
     session.add(
         AuditEvent(
@@ -84,5 +86,7 @@ def write_audit(
             target_type=target_type,
             target_id=target_id,
             metadata_json=json.dumps(metadata or {}, ensure_ascii=False),
+            visibility=visibility,
+            owner_user_id=owner_user_id,
         )
     )

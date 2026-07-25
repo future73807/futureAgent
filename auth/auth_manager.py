@@ -34,7 +34,7 @@ class AuthManager:
         if not self.enforcer.enforce(user_role, resource, action):
             raise HTTPException(
                 status_code=403,
-                detail=f"Permission denied: role={user_role}, resource={resource}, action={action}",
+                detail=f"权限不足：角色={user_role}，资源={resource}，操作={action}",
             )
 
     def is_allowed(self, user_role: str, resource: str, action: str) -> bool:

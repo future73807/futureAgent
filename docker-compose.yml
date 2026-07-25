@@ -16,9 +16,11 @@ services:
       MCP_SERVERS_JSON: '{"local_tools":"http://mcp:8050/mcp"}'
       MCP_SERVER_PORT: 8050
       ENABLE_LOCAL_MCP_TOOLS: "false"
-      LITELLM_PROXY_URL: http://litellm:4000
-      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-futureagent}
-      ENVIRONMENT: production
+      # 默认直连已配置的供应商；不启动独立 LiteLLM 代理服务。
+      LITELLM_PROXY_URL: ""
+      # 默认 Compose 仅用于本地 HTTP 开发。生产环境必须经由 HTTPS 入口，
+      # 并显式设置 ENVIRONMENT=production，确保续期 Cookie 只经 HTTPS 传输。
+      ENVIRONMENT: ${ENVIRONMENT:-development}
       RUN_MIGRATIONS_ON_STARTUP: "true"
       STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
       STORAGE_S3_BUCKET: ${STORAGE_S3_BUCKET:-}
@@ -32,8 +34,6 @@ services:
       postgres:
         condition: service_healthy
       mcp:
-        condition: service_started
-      litellm:
         condition: service_started
     volumes:
       - futureagent_uploads:/app/uploads
@@ -73,7 +73,9 @@ services:
       POSTGRES_PASSWORD: password
       POSTGRES_DB: postgres
     ports:
-      - "5432:5432"
+      # Windows 环境中 5432/5433 可能被本地 PostgreSQL 或系统端口保留占用；
+      # 容器内仍使用 PostgreSQL 标准端口 5432，本机直连使用 25432。
+      - "25432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -85,31 +87,6 @@ services:
       - futureagent-net
     restart: unless-stopped
 
-  # ===== LiteLLM Proxy 与模型配置后台 =====
-  litellm:
-    image: ghcr.io/berriai/litellm:main-latest
-    container_name: futureagent-litellm
-    command: ["--config", "/app/config.yaml", "--port", "4000"]
-    ports:
-      - "4000:4000"
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      DATABASE_URL: postgresql://postgres:password@postgres:5432/postgres
-      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-futureagent}
-      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:-futureagent-salt-change-me}
-      OLLAMA_BASE_URL: http://host.docker.internal:11434
-    volumes:
-      - ./litellm_config.yaml:/app/config.yaml:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - futureagent-net
-    restart: unless-stopped
-
-
   # ===== 用户端（React + Ant Design X） =====
   user-frontend:
     build:
@@ -117,7 +94,8 @@ services:
       dockerfile: Dockerfile
     container_name: futureagent-user-frontend
     ports:
-      - "5173:80"
+      # 当前 Windows 将 5173/5174 所在端口段保留，改用可访问的本地端口。
+      - "8081:80"
     depends_on:
       - api
     networks:
@@ -131,7 +109,7 @@ services:
       dockerfile: Dockerfile
     container_name: futureagent-admin-frontend
     ports:
-      - "5174:80"
+      - "8082:80"
     depends_on:
       - api
     networks:

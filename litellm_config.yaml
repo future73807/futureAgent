@@ -1,4 +1,4 @@
-# LiteLLM Proxy 配置文件
+# 可选 LiteLLM 私有网关配置文件；默认 Compose 不会加载此文件。
 model_list:
   - model_name: gpt-4o
     litellm_params:
@@ -50,8 +50,8 @@ litellm_settings:
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
   salt_key: os.environ/LITELLM_SALT_KEY
-  enable_ui: True
-  ui_path: /ui
+  # 运营入口统一在 futureAgent 管理后台；LiteLLM 仅保留为内部模型网关。
+  enable_ui: False
 
 environment_variables:
   LITELLM_LOG: ERROR

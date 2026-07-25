@@ -25,7 +25,7 @@ export function clearAuthSession() {
 }
 
 async function errorFrom(response) {
-  let detail = `Request failed (${response.status})`
+  let detail = `请求失败（${response.status}）`
   try {
     const payload = await response.json()
     const candidate = payload?.detail ?? payload?.message ?? detail
@@ -76,7 +76,7 @@ export async function downloadAttachment(attachment) {
   const blob = await getAttachmentBlob(attachment)
   const link = document.createElement('a')
   link.href = URL.createObjectURL(blob)
-  link.download = attachment.original_name || 'download'
+  link.download = attachment.original_name || '附件下载'
   document.body.appendChild(link)
   link.click()
   link.remove()
@@ -102,7 +102,7 @@ export async function streamSSE(path, body, handlers = {}, retried = false) {
     return streamSSE(path, body, handlers, true)
   }
   if (!response.ok) throw await errorFrom(response)
-  if (!response.body) throw new Error('This browser does not support streaming responses')
+  if (!response.body) throw new Error('当前浏览器不支持流式响应')
 
   const reader = response.body.getReader()
   const decoder = new TextDecoder()

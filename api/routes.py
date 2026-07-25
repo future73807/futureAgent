@@ -60,6 +60,12 @@ from db.models import (
     AgentRun,
     Attachment,
     AuditEvent,
+    BusinessAlert,
+    BusinessAlertRule,
+    BusinessAssistantMessage,
+    BusinessBossTask,
+    BusinessDataSource,
+    BusinessRecord,
     ChatMessage,
     Conversation,
     Membership,
@@ -191,7 +197,7 @@ class WorkPlanStepUpdateRequest(RequestModel):
 
 
 class ConversationCreateRequest(RequestModel):
-    title: str = Field(default="New conversation", min_length=1, max_length=240)
+    title: str = Field(default="新对话", min_length=1, max_length=240)
     project_id: str | None = Field(default=None, max_length=64)
     model_id: str = Field(default="", max_length=120)
     skill_name: str = Field(default="default", max_length=120)
@@ -252,7 +258,7 @@ def _sse_error(exc: Exception) -> dict[str, str]:
         # Provider exceptions can contain implementation details.  The request
         # itself is recorded in the conversation and the user gets a stable,
         # actionable error instead of an accidental secret disclosure.
-        detail = "The AI service could not complete this request. Please retry later."
+        detail = "AI 服务未能完成本次请求，请稍后重试。"
     return {"event": "error", "data": json.dumps({"detail": detail}, ensure_ascii=False)}
 
 
@@ -440,6 +446,11 @@ def _audit_data(event: AuditEvent) -> dict[str, Any]:
     }
 
 
+def _audit_visible_to_user(event: AuditEvent, user: User) -> bool:
+    """Private operating-agent audit metadata never grants admin bypass."""
+    return event.visibility != "private" or event.owner_user_id == user.id
+
+
 def _unique_workspace_slug(session: Session, name: str) -> str:
     base = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:60]
     if not base:
@@ -460,7 +471,7 @@ def _membership_for_workspace(session: Session, user: User, workspace_id: str) -
         )
     ).first()
     if not membership and not user.is_platform_admin:
-        raise HTTPException(status_code=403, detail="You do not have access to this workspace")
+        raise HTTPException(status_code=403, detail="没有该工作区的访问权限")
     if membership:
         return membership
     # Platform administrators may operate a workspace without a membership.
@@ -470,14 +481,14 @@ def _membership_for_workspace(session: Session, user: User, workspace_id: str) -
 def _workspace_or_404(session: Session, workspace_id: str) -> Workspace:
     workspace = session.get(Workspace, workspace_id)
     if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+        raise HTTPException(status_code=404, detail="工作区不存在")
     return workspace
 
 
 def _require_workspace_manager(session: Session, user: User, workspace_id: str) -> Membership:
     membership = _membership_for_workspace(session, user, workspace_id)
     if not user.is_platform_admin and membership.role not in {"owner", "admin"}:
-        raise HTTPException(status_code=403, detail="Workspace administrator permission required")
+        raise HTTPException(status_code=403, detail="需要工作区管理员权限")
     return membership
 
 
@@ -491,20 +502,20 @@ def _member_or_422(session: Session, workspace_id: str, user_id: str | None) -> 
         )
     ).first()
     if not member:
-        raise HTTPException(status_code=422, detail="Assignee must belong to the workspace")
+        raise HTTPException(status_code=422, detail="负责人必须属于当前工作区")
 
 
 def _project_or_404(session: Session, workspace_id: str, project_id: str) -> Project:
     project = session.get(Project, project_id)
     if not project or project.workspace_id != workspace_id:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(status_code=404, detail="项目不存在")
     return project
 
 
 def _task_or_404(session: Session, workspace_id: str, task_id: str) -> Task:
     task = session.get(Task, task_id)
     if not task or task.workspace_id != workspace_id:
-        raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(status_code=404, detail="任务不存在")
     return task
 
 
@@ -515,13 +526,13 @@ def _conversation_or_404(
 ) -> Conversation:
     conversation = session.get(Conversation, conversation_id)
     if not conversation or conversation.workspace_id != context.workspace.id:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+        raise HTTPException(status_code=404, detail="对话不存在")
     if (
         conversation.owner_id != context.user.id
         and not context.user.is_platform_admin
         and context.membership.role not in {"owner", "admin"}
     ):
-        raise HTTPException(status_code=403, detail="You cannot access this conversation")
+        raise HTTPException(status_code=403, detail="没有该对话的访问权限")
     return conversation
 
 
@@ -544,11 +555,11 @@ def _authorize_agent_config(context: WorkspaceContext, model_id: str, skill_name
 def _validate_mcp_server_selection(engine: AgentEngine, mcp_servers: list[str]) -> None:
     unknown_servers = [name for name in mcp_servers if name not in engine.mcp_manager.servers]
     if unknown_servers:
-        raise HTTPException(status_code=404, detail=f"Unknown MCP server(s): {', '.join(unknown_servers)}")
+        raise HTTPException(status_code=404, detail=f"未知 MCP 服务：{', '.join(unknown_servers)}")
     if "local_tools" in mcp_servers and not settings.enable_local_mcp_tools:
         raise HTTPException(
             status_code=403,
-            detail="Local MCP filesystem tools are disabled for this deployment. Configure an isolated workspace-aware connector before enabling them.",
+            detail="当前部署未启用本地 MCP 文件工具。启用前请配置按工作区隔离的连接器。",
         )
 
 
@@ -572,6 +583,20 @@ def _clear_refresh_cookie(response: Response) -> None:
         secure=settings.environment.lower() == "production",
         samesite="lax",
     )
+
+
+def _refresh_session_expired(expires_at: Any) -> bool:
+    """Compare refresh expirations safely across SQLite and PostgreSQL.
+
+    The application stores UTC timestamps. PostgreSQL can return a naive
+    ``timestamp without time zone`` value for existing rows, while ``now_utc``
+    is timezone-aware. Treat those legacy/database values as UTC so a valid
+    refresh token cannot trigger a server error during comparison.
+    """
+    current_time = now_utc()
+    if getattr(expires_at, "tzinfo", None) is None:
+        expires_at = expires_at.replace(tzinfo=current_time.tzinfo)
+    return expires_at <= current_time
 
 
 def _issue_auth_payload(session: Session, user: User, response: Response) -> dict[str, Any]:
@@ -621,12 +646,12 @@ def _create_conversation_for_chat(
     if conversation_id:
         conversation = _conversation_or_404(session, context, conversation_id)
         if conversation.archived:
-            raise HTTPException(status_code=409, detail="Conversation is archived")
+            raise HTTPException(status_code=409, detail="对话已归档")
         return conversation
     conversation = Conversation(
         workspace_id=context.workspace.id,
         owner_id=context.user.id,
-        title=(title_hint[:60] or "New conversation"),
+        title=(title_hint[:60] or "新对话"),
         model_id=model_id,
         skill_name=skill_name,
     )
@@ -689,9 +714,9 @@ def metrics(authorization: Annotated[str | None, Header()] = None) -> Response:
     supplied_token = authorization.removeprefix("Bearer ").strip() if authorization else ""
     if expected_token:
         if not secrets.compare_digest(supplied_token, expected_token):
-            raise HTTPException(status_code=401, detail="Metrics authentication failed")
+            raise HTTPException(status_code=401, detail="指标接口认证失败")
     elif settings.environment.lower() == "production":
-        raise HTTPException(status_code=404, detail="Not found")
+        raise HTTPException(status_code=404, detail="资源不存在")
     payload, content_type = metrics_payload()
     return Response(content=payload, media_type=content_type)
 
@@ -709,7 +734,7 @@ def register(
 ) -> dict[str, Any]:
     email = str(request.email).lower()
     if session.exec(select(User).where(User.email == email)).first():
-        raise HTTPException(status_code=409, detail="An account with this email already exists")
+        raise HTTPException(status_code=409, detail="该邮箱已注册账号")
     user = User(
         email=email,
         display_name=request.display_name,
@@ -717,7 +742,7 @@ def register(
     )
     session.add(user)
     session.flush()
-    workspace_name = request.workspace_name or f"{request.display_name}'s workspace"
+    workspace_name = request.workspace_name or f"{request.display_name}的工作区"
     workspace = Workspace(
         name=workspace_name,
         slug=_unique_workspace_slug(session, workspace_name),
@@ -751,9 +776,9 @@ def login(
         select(User).where(User.email == str(request.email).lower())
     ).first()
     if not user or not verify_password(request.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+        raise HTTPException(status_code=401, detail="邮箱或密码不正确")
     if not user.is_active:
-        raise HTTPException(status_code=403, detail="This account has been disabled")
+        raise HTTPException(status_code=403, detail="该账号已被停用")
     write_audit(session, actor_id=user.id, action="auth.login", target_type="user", target_id=user.id)
     payload = _issue_auth_payload(session, user, response)
     session.commit()
@@ -767,21 +792,21 @@ def refresh_access_token(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     if not refresh_token:
-        raise HTTPException(status_code=401, detail="No refresh session")
+        raise HTTPException(status_code=401, detail="续期会话不存在")
     payload = decode_token(refresh_token, expected_type="refresh")
     refresh_session = session.get(RefreshSession, payload["jti"])
     if (
         not refresh_session
         or refresh_session.user_id != payload["sub"]
         or refresh_session.revoked
-        or refresh_session.expires_at <= now_utc()
+        or _refresh_session_expired(refresh_session.expires_at)
     ):
         _clear_refresh_cookie(response)
-        raise HTTPException(status_code=401, detail="Refresh session has expired")
+        raise HTTPException(status_code=401, detail="续期会话已过期")
     user = session.get(User, refresh_session.user_id)
     if not user or not user.is_active:
         _clear_refresh_cookie(response)
-        raise HTTPException(status_code=401, detail="Account is unavailable")
+        raise HTTPException(status_code=401, detail="账号当前不可用")
     refresh_session.revoked = True
     write_audit(session, actor_id=user.id, action="auth.token_refreshed", target_type="user", target_id=user.id)
     result = _issue_auth_payload(session, user, response)
@@ -935,19 +960,19 @@ def add_member(
 ) -> dict[str, Any]:
     _require_workspace_manager(session, user, workspace_id)
     if request.role not in MEMBERSHIP_ROLES - {"owner"}:
-        raise HTTPException(status_code=422, detail="Role must be admin, member, or viewer")
+        raise HTTPException(status_code=422, detail="角色只能是管理员、成员或只读成员")
     member_user = session.exec(
         select(User).where(User.email == str(request.email).lower())
     ).first()
     if not member_user:
-        raise HTTPException(status_code=404, detail="The invited user must register first")
+        raise HTTPException(status_code=404, detail="受邀用户需要先完成注册")
     if session.exec(
         select(Membership).where(
             Membership.workspace_id == workspace_id,
             Membership.user_id == member_user.id,
         )
     ).first():
-        raise HTTPException(status_code=409, detail="This user is already a member")
+        raise HTTPException(status_code=409, detail="该用户已经是工作区成员")
     membership = Membership(workspace_id=workspace_id, user_id=member_user.id, role=request.role)
     session.add(membership)
     write_audit(
@@ -973,12 +998,12 @@ def update_member(
 ) -> dict[str, Any]:
     _require_workspace_manager(session, user, workspace_id)
     if request.role not in MEMBERSHIP_ROLES - {"owner"}:
-        raise HTTPException(status_code=422, detail="Role must be admin, member, or viewer")
+        raise HTTPException(status_code=422, detail="角色只能是管理员、成员或只读成员")
     membership = session.get(Membership, member_id)
     if not membership or membership.workspace_id != workspace_id:
-        raise HTTPException(status_code=404, detail="Member not found")
+        raise HTTPException(status_code=404, detail="成员不存在")
     if membership.role == "owner":
-        raise HTTPException(status_code=409, detail="Transfer ownership before changing the owner role")
+        raise HTTPException(status_code=409, detail="请先转移所有权，再修改所有者角色")
     membership.role = request.role
     write_audit(
         session,
@@ -1005,9 +1030,9 @@ def remove_member(
     _require_workspace_manager(session, user, workspace_id)
     membership = session.get(Membership, member_id)
     if not membership or membership.workspace_id != workspace_id:
-        raise HTTPException(status_code=404, detail="Member not found")
+        raise HTTPException(status_code=404, detail="成员不存在")
     if membership.role == "owner":
-        raise HTTPException(status_code=409, detail="Transfer ownership before removing the owner")
+        raise HTTPException(status_code=409, detail="请先转移所有权，再移除所有者")
     session.delete(membership)
     write_audit(
         session,
@@ -1032,10 +1057,71 @@ def transfer_workspace_ownership(
     workspace = _workspace_or_404(session, workspace_id)
     current_membership = _membership_for_workspace(session, user, workspace_id)
     if not user.is_platform_admin and current_membership.role != "owner":
-        raise HTTPException(status_code=403, detail="Only the workspace owner can transfer ownership")
+        raise HTTPException(status_code=403, detail="只有工作区所有者可以转移所有权")
     target_membership = session.get(Membership, request.member_id)
     if not target_membership or target_membership.workspace_id != workspace_id:
-        raise HTTPException(status_code=404, detail="Target member not found")
+        raise HTTPException(status_code=404, detail="目标成员不存在")
+    # Boss/private operating-agent data must never silently cross an ownership
+    # boundary.  A deliberate archival/handover workflow can be added later;
+    # this MVP blocks the transfer instead of exposing the old owner's private
+    # assistant history, sources, alerts or tasks to the new owner.
+    has_private_business_data = any(
+        (
+            session.exec(
+                select(BusinessDataSource.id).where(
+                    BusinessDataSource.workspace_id == workspace_id,
+                    BusinessDataSource.data_scope != "company",
+                ).limit(1)
+            ).first(),
+            session.exec(
+                select(BusinessRecord.id).where(
+                    BusinessRecord.workspace_id == workspace_id,
+                    BusinessRecord.data_scope != "company",
+                ).limit(1)
+            ).first(),
+            session.exec(
+                select(BusinessAlertRule.id).where(
+                    BusinessAlertRule.workspace_id == workspace_id,
+                    BusinessAlertRule.data_scope != "company",
+                ).limit(1)
+            ).first(),
+            session.exec(
+                select(BusinessAlert.id).where(
+                    BusinessAlert.workspace_id == workspace_id,
+                    BusinessAlert.data_scope != "company",
+                ).limit(1)
+            ).first(),
+            session.exec(
+                select(BusinessAssistantMessage.id).where(
+                    BusinessAssistantMessage.workspace_id == workspace_id,
+                    BusinessAssistantMessage.owner_user_id == workspace.owner_id,
+                ).limit(1)
+            ).first(),
+            session.exec(
+                select(BusinessBossTask.id).where(
+                    BusinessBossTask.workspace_id == workspace_id,
+                    BusinessBossTask.boss_user_id == workspace.owner_id,
+                ).limit(1)
+            ).first(),
+        )
+    )
+    if has_private_business_data:
+        write_audit(
+            session,
+            actor_id=user.id,
+            workspace_id=workspace_id,
+            action="workspace.owner_transfer_blocked_private_business_data",
+            target_type="workspace",
+            target_id=workspace_id,
+            metadata={"reason": "private_business_data_requires_archival_or_handover"},
+            visibility="private",
+            owner_user_id=workspace.owner_id,
+        )
+        session.commit()
+        raise HTTPException(
+            status_code=409,
+            detail="工作区存在老板或私事经营数据；请先完成归档或受控交接后再转移所有权",
+        )
     old_owner = session.exec(
         select(Membership).where(
             Membership.workspace_id == workspace_id,
@@ -1150,7 +1236,7 @@ def list_tasks(
         statement = statement.where(Task.project_id == project_id)
     if task_status:
         if task_status not in TASK_STATUSES:
-            raise HTTPException(status_code=422, detail="Unknown task status")
+            raise HTTPException(status_code=422, detail="未知的任务状态")
         statement = statement.where(Task.status == task_status)
     if assignee_id:
         statement = statement.where(Task.assignee_id == assignee_id)
@@ -1166,7 +1252,7 @@ def create_task(
 ) -> dict[str, Any]:
     require_workspace_role(context, "owner", "admin", "member")
     if request.status not in TASK_STATUSES or request.priority not in TASK_PRIORITIES:
-        raise HTTPException(status_code=422, detail="Invalid task status or priority")
+        raise HTTPException(status_code=422, detail="任务状态或优先级无效")
     _project_or_404(session, context.workspace.id, request.project_id)
     _member_or_422(session, context.workspace.id, request.assignee_id)
     task = Task(
@@ -1206,9 +1292,9 @@ def update_task(
     require_workspace_role(context, "owner", "admin", "member")
     task = _task_or_404(session, context.workspace.id, task_id)
     if request.status is not None and request.status not in TASK_STATUSES:
-        raise HTTPException(status_code=422, detail="Invalid task status")
+        raise HTTPException(status_code=422, detail="任务状态无效")
     if request.priority is not None and request.priority not in TASK_PRIORITIES:
-        raise HTTPException(status_code=422, detail="Invalid task priority")
+        raise HTTPException(status_code=422, detail="任务优先级无效")
     if "assignee_id" in request.model_fields_set:
         _member_or_422(session, context.workspace.id, request.assignee_id)
         task.assignee_id = request.assignee_id
@@ -1292,7 +1378,13 @@ def list_task_activity(
         .order_by(AuditEvent.created_at.desc())
         .limit(limit)
     ).all()
-    return {"events": [_audit_data(event) for event in events]}
+    return {
+        "events": [
+            _audit_data(event)
+            for event in events
+            if _audit_visible_to_user(event, context.user)
+        ]
+    }
 
 
 @router.put("/v1/tasks/{task_id}/plan")
@@ -1306,7 +1398,7 @@ def upsert_work_plan(
     task = _task_or_404(session, context.workspace.id, task_id)
     plan = session.exec(select(WorkPlan).where(WorkPlan.task_id == task.id)).first()
     if plan and plan.status != "draft" and context.membership.role not in {"owner", "admin"} and not context.user.is_platform_admin:
-        raise HTTPException(status_code=403, detail="An approved plan can only be revised by a workspace manager")
+        raise HTTPException(status_code=403, detail="已批准的计划只能由工作区管理员修改")
     if not plan:
         plan = WorkPlan(
             workspace_id=context.workspace.id,
@@ -1334,7 +1426,7 @@ def upsert_work_plan(
         if item.id:
             step = existing.get(item.id)
             if not step:
-                raise HTTPException(status_code=422, detail="A plan step does not belong to this plan")
+                raise HTTPException(status_code=422, detail="计划步骤不属于当前计划")
             supplied_ids.add(step.id)
             step.title = item.title
             step.instructions = item.instructions
@@ -1376,9 +1468,9 @@ def approve_work_plan(
     _task_or_404(session, context.workspace.id, task_id)
     plan = session.exec(select(WorkPlan).where(WorkPlan.task_id == task_id)).first()
     if not plan:
-        raise HTTPException(status_code=404, detail="Work plan not found")
+        raise HTTPException(status_code=404, detail="工作计划不存在")
     if not session.exec(select(WorkPlanStep.id).where(WorkPlanStep.plan_id == plan.id)).first():
-        raise HTTPException(status_code=422, detail="A work plan needs at least one step before approval")
+        raise HTTPException(status_code=422, detail="工作计划至少需要一个步骤才能批准")
     plan.status = "approved"
     plan.approved_by = context.user.id
     plan.approved_at = now_utc()
@@ -1408,7 +1500,7 @@ def update_work_plan_step(
     plan = session.exec(select(WorkPlan).where(WorkPlan.task_id == task.id)).first()
     step = session.get(WorkPlanStep, step_id)
     if not plan or not step or step.plan_id != plan.id:
-        raise HTTPException(status_code=404, detail="Work plan step not found")
+        raise HTTPException(status_code=404, detail="工作计划步骤不存在")
     can_update = (
         context.user.is_platform_admin
         or context.membership.role in {"owner", "admin"}
@@ -1417,10 +1509,10 @@ def update_work_plan_step(
         or task.reporter_id == context.user.id
     )
     if not can_update:
-        raise HTTPException(status_code=403, detail="You cannot update this plan step")
+        raise HTTPException(status_code=403, detail="没有更新该计划步骤的权限")
     if request.status is not None:
         if request.status not in STEP_STATUSES:
-            raise HTTPException(status_code=422, detail="Invalid work plan step status")
+            raise HTTPException(status_code=422, detail="工作计划步骤状态无效")
         step.status = request.status
     if request.output_summary is not None:
         step.output_summary = request.output_summary
@@ -1624,7 +1716,7 @@ async def agent_chat(
     model_id = request.model_id or settings.default_model
     engine = get_agent_engine()
     if not engine.skill_manager.get_skill(request.skill_name):
-        raise HTTPException(status_code=404, detail=f"Skill '{request.skill_name}' not found")
+        raise HTTPException(status_code=404, detail=f"技能“{request.skill_name}”不存在")
     _validate_mcp_server_selection(engine, request.mcp_servers)
     effective_role = _authorize_agent_config(context, model_id, request.skill_name, request.mcp_servers)
     _ensure_model_ready(model_id)
@@ -1759,7 +1851,7 @@ def _expire_stale_agent_runs(session: Session, workspace_id: str) -> None:
     for stale_run in stale_runs:
         stale_run.status = "failed"
         stale_run.completed_at = now_utc()
-        stale_run.error_message = "The AI execution exceeded its allowed runtime and was stopped."
+        stale_run.error_message = "AI 执行超过允许时长，已被停止。"
         session.add(stale_run)
         write_audit(
             session,
@@ -1809,15 +1901,15 @@ def cancel_task_run(
     task = _task_or_404(session, context.workspace.id, task_id)
     run = session.get(AgentRun, run_id)
     if not run or run.workspace_id != context.workspace.id or run.task_id != task.id:
-        raise HTTPException(status_code=404, detail="AI execution not found")
+        raise HTTPException(status_code=404, detail="AI 执行记录不存在")
     step = session.get(WorkPlanStep, run.step_id) if run.step_id else None
     if not _can_manage_task_execution(context, task, step):
-        raise HTTPException(status_code=403, detail="You cannot cancel this task execution")
+        raise HTTPException(status_code=403, detail="没有取消该任务 AI 执行的权限")
     if run.status != "running":
         return {"run": _agent_run_data(run)}
     run.status = "cancelled"
     run.completed_at = now_utc()
-    run.error_message = "The AI execution was cancelled by an authorised workspace member."
+    run.error_message = "AI 执行已被有权限的工作区成员取消。"
     session.add(run)
     write_audit(
         session,
@@ -1844,17 +1936,17 @@ async def execute_task_with_agent(
     task = _task_or_404(session, context.workspace.id, task_id)
     plan = session.exec(select(WorkPlan).where(WorkPlan.task_id == task.id)).first()
     if not plan or plan.status not in {"approved", "in_progress"}:
-        raise HTTPException(status_code=409, detail="Approve the work plan before starting an AI execution")
+        raise HTTPException(status_code=409, detail="请先批准工作计划，再启动 AI 执行")
     step = session.get(WorkPlanStep, request.step_id) if request.step_id else None
     if step and step.plan_id != plan.id:
-        raise HTTPException(status_code=404, detail="Work plan step not found")
+        raise HTTPException(status_code=404, detail="工作计划步骤不存在")
     if not _can_manage_task_execution(context, task, step):
-        raise HTTPException(status_code=403, detail="You cannot execute this task step")
+        raise HTTPException(status_code=403, detail="没有执行该任务步骤的权限")
 
     model_id = request.model_id or settings.default_model
     engine = get_agent_engine()
     if not engine.skill_manager.get_skill(request.skill_name):
-        raise HTTPException(status_code=404, detail=f"Skill '{request.skill_name}' not found")
+        raise HTTPException(status_code=404, detail=f"技能“{request.skill_name}”不存在")
     _validate_mcp_server_selection(engine, request.mcp_servers)
     effective_role = _authorize_agent_config(context, model_id, request.skill_name, request.mcp_servers)
     _ensure_model_ready(model_id)
@@ -1868,7 +1960,7 @@ async def execute_task_with_agent(
             )
         ).first()
         if existing:
-            detail = "An AI execution with this request key is already running." if existing.status == "running" else "This AI execution request has already been recorded. Use a new retry request."
+            detail = "该请求标识对应的 AI 执行正在运行。" if existing.status == "running" else "该 AI 执行请求已被记录，请创建新的重试请求。"
             raise HTTPException(status_code=409, detail=detail)
     active_runs = session.exec(
         select(AgentRun).where(
@@ -1880,16 +1972,16 @@ async def execute_task_with_agent(
     if len(active_runs) >= max_concurrent:
         raise HTTPException(
             status_code=429,
-            detail=f"This workspace has reached its {max_concurrent}-run AI execution limit. Wait for a running execution to finish or cancel it.",
+            detail=f"当前工作区已达到 {max_concurrent} 个 AI 执行的并发上限，请等待运行结束或取消正在运行的执行。",
         )
 
     retry_parent: AgentRun | None = None
     if request.retry_of_id:
         retry_parent = session.get(AgentRun, request.retry_of_id)
         if not retry_parent or retry_parent.workspace_id != context.workspace.id or retry_parent.task_id != task.id:
-            raise HTTPException(status_code=404, detail="The execution selected for retry was not found")
+            raise HTTPException(status_code=404, detail="要重试的 AI 执行记录不存在")
         if retry_parent.status not in {"failed", "cancelled"}:
-            raise HTTPException(status_code=409, detail="Only failed or cancelled executions can be retried")
+            raise HTTPException(status_code=409, detail="只有执行失败或已取消的记录可以重试")
 
     run = AgentRun(
         workspace_id=context.workspace.id,
@@ -1973,9 +2065,9 @@ async def execute_task_with_agent(
             run.status = "failed"
             run.output = "".join(collected)
             run.error_message = (
-                f"The AI execution exceeded its {max(1, settings.agent_run_timeout_seconds)}-second limit. Retry after checking the model route."
+                f"AI 执行超过 {max(1, settings.agent_run_timeout_seconds)} 秒限制，请检查模型路由后重试。"
                 if isinstance(exc, TimeoutError)
-                else "The AI execution did not complete. Check model routing and retry."
+                else "AI 执行未完成，请检查模型路由后重试。"
             )
             run.completed_at = now_utc()
             session.add(run)
@@ -2005,17 +2097,17 @@ async def upload_attachment(
 ) -> dict[str, Any]:
     require_workspace_role(context, "owner", "admin", "member")
     if not file.filename:
-        raise HTTPException(status_code=422, detail="A file name is required")
+        raise HTTPException(status_code=422, detail="必须提供文件名")
     original_name = Path(file.filename).name
     extension = Path(original_name).suffix.lower()
     if extension not in ALLOWED_UPLOAD_EXTENSIONS:
-        raise HTTPException(status_code=415, detail="This file type is not allowed")
+        raise HTTPException(status_code=415, detail="不允许上传该文件类型")
     if task_id:
         _task_or_404(session, context.workspace.id, task_id)
     if conversation_id:
         _conversation_or_404(session, context, conversation_id)
     if not task_id and not conversation_id:
-        raise HTTPException(status_code=422, detail="Attach the file to a task or a conversation")
+        raise HTTPException(status_code=422, detail="请将文件关联到任务或对话")
 
     byte_count = 0
     preview = bytearray()
@@ -2025,7 +2117,7 @@ async def upload_attachment(
         while chunk := await file.read(1024 * 1024):
             byte_count += len(chunk)
             if byte_count > limit:
-                raise HTTPException(status_code=413, detail=f"File exceeds the {settings.max_upload_mb} MB limit")
+                raise HTTPException(status_code=413, detail=f"文件超过 {settings.max_upload_mb} MB 大小限制")
             buffered_upload.write(chunk)
             if len(preview) < PREVIEW_TEXT_LIMIT:
                 preview.extend(chunk[: PREVIEW_TEXT_LIMIT - len(preview)])
@@ -2072,7 +2164,7 @@ async def upload_attachment(
         )
         session.commit()
     except StorageError as exc:
-        raise HTTPException(status_code=503, detail="Attachment storage is unavailable") from exc
+        raise HTTPException(status_code=503, detail="附件存储当前不可用") from exc
     except Exception:
         session.rollback()
         if stored:
@@ -2218,13 +2310,13 @@ def download_attachment(
 ) -> StreamingResponse:
     attachment = session.get(Attachment, attachment_id)
     if not attachment or attachment.workspace_id != context.workspace.id:
-        raise HTTPException(status_code=404, detail="Attachment not found")
+        raise HTTPException(status_code=404, detail="附件不存在")
     try:
         stream = get_storage().open_stream(attachment.stored_name)
     except ObjectNotFound as exc:
-        raise HTTPException(status_code=404, detail="The attachment file is unavailable") from exc
+        raise HTTPException(status_code=404, detail="附件文件当前不可用") from exc
     except StorageError as exc:
-        raise HTTPException(status_code=503, detail="Attachment storage is unavailable") from exc
+        raise HTTPException(status_code=503, detail="附件存储当前不可用") from exc
     safe_filename = re.sub(r'[\\"\r\n]+', "_", attachment.original_name) or "attachment"
     disposition = f"attachment; filename=\"{safe_filename}\"; filename*=UTF-8''{quote(attachment.original_name)}"
     return StreamingResponse(
@@ -2244,14 +2336,14 @@ def preview_attachment(
     """Return a bounded, authenticated preview descriptor for a task file."""
     attachment = session.get(Attachment, attachment_id)
     if not attachment or attachment.workspace_id != context.workspace.id:
-        raise HTTPException(status_code=404, detail="Attachment not found")
+        raise HTTPException(status_code=404, detail="附件不存在")
     attachment_data = _attachment_data(attachment)
     preview_kind = attachment_data["preview_kind"]
     messages = {
-        "image": "Image preview is rendered in the browser after an authenticated download.",
-        "pdf": "PDF preview is rendered in the browser after an authenticated download.",
+        "image": "图片将在通过权限校验的下载后由浏览器预览。",
+        "pdf": "PDF 将在通过权限校验的下载后由浏览器预览。",
         "text": None,
-        "none": "Preview is available for text, Markdown, CSV, JSON, Word, Excel, image, and PDF uploads.",
+        "none": "文本、Markdown、CSV、JSON、Word、Excel、图片和 PDF 文件支持受控预览。",
     }
     return {
         "attachment": attachment_data,
@@ -2301,7 +2393,7 @@ async def probe_model(
 ) -> dict[str, Any]:
     """Perform one real, bounded inference to validate an operator's route."""
     if model_id not in ModelHub.list_supported_models():
-        raise HTTPException(status_code=404, detail="Unsupported model")
+        raise HTTPException(status_code=404, detail="不支持的模型")
     _ensure_model_ready(model_id)
     try:
         response = await asyncio.wait_for(
@@ -2322,7 +2414,7 @@ async def probe_model(
         content = choices[0].message.content if choices else ""
         sample = AgentEngine._content_to_text(content)[:240] or str(content)[:240]
         if not sample:
-            raise RuntimeError("Model returned an empty verification response")
+            raise RuntimeError("模型未返回验证响应")
     except HTTPException:
         raise
     except Exception as exc:
@@ -2336,7 +2428,7 @@ async def probe_model(
         session.commit()
         raise HTTPException(
             status_code=502,
-            detail="The configured model route did not return a verification response.",
+            detail="已配置的模型路由没有返回验证响应。",
         ) from exc
     write_audit(
         session,
@@ -2385,10 +2477,10 @@ def update_skill(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     if skill_name != skill.name:
-        raise HTTPException(status_code=400, detail="Skill path and body names must match")
+        raise HTTPException(status_code=400, detail="技能路径名称必须与请求内容名称一致")
     manager = SkillManager()
     if skill_name == "default" or not manager.get_skill(skill_name):
-        raise HTTPException(status_code=404, detail=f"Editable Skill '{skill_name}' not found")
+        raise HTTPException(status_code=404, detail=f"可编辑技能“{skill_name}”不存在")
     saved = manager.save_skill(skill, overwrite=True)
     write_audit(session, actor_id=user.id, action="skill.updated", target_type="skill", target_id=saved.name)
     session.commit()
@@ -2406,7 +2498,7 @@ def delete_skill(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not deleted:
-        raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
+        raise HTTPException(status_code=404, detail=f"技能“{skill_name}”不存在")
     write_audit(session, actor_id=user.id, action="skill.deleted", target_type="skill", target_id=skill_name)
     session.commit()
     return None
@@ -2443,7 +2535,7 @@ def add_policy(
 ) -> dict[str, Any]:
     auth = AuthManager()
     if not auth.add_policy(policy.role, policy.resource, policy.action):
-        raise HTTPException(status_code=409, detail="Policy already exists")
+        raise HTTPException(status_code=409, detail="权限策略已存在")
     write_audit(
         session,
         actor_id=user.id,
@@ -2463,7 +2555,7 @@ def delete_policy(
 ) -> None:
     auth = AuthManager()
     if not auth.remove_policy(policy.role, policy.resource, policy.action):
-        raise HTTPException(status_code=404, detail="Policy not found")
+        raise HTTPException(status_code=404, detail="权限策略不存在")
     write_audit(
         session,
         actor_id=user.id,
@@ -2563,9 +2655,9 @@ def admin_update_user(
 ) -> dict[str, Any]:
     target = session.get(User, user_id)
     if not target:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=404, detail="用户不存在")
     if target.id == admin.id and request.is_active is False:
-        raise HTTPException(status_code=409, detail="You cannot disable your own account")
+        raise HTTPException(status_code=409, detail="不能停用自己的账号")
     for field in ("display_name", "is_active", "is_platform_admin"):
         if field in request.model_fields_set:
             setattr(target, field, getattr(request, field))
@@ -2613,7 +2705,13 @@ def list_workspace_audit_events(
         .order_by(AuditEvent.created_at.desc())
         .limit(limit)
     ).all()
-    return {"events": [_audit_data(event) for event in events]}
+    return {
+        "events": [
+            _audit_data(event)
+            for event in events
+            if _audit_visible_to_user(event, context.user)
+        ]
+    }
 
 
 @router.get("/v1/admin/audit-events")
@@ -2623,4 +2721,17 @@ def admin_list_audit_events(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     events = session.exec(select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(limit)).all()
-    return {"events": [_audit_data(event) for event in events]}
+    return {
+        "events": [
+            _audit_data(event)
+            for event in events
+            if _audit_visible_to_user(event, user)
+        ]
+    }
+
+
+# Keep the operating-agent module isolated from the general project/task API
+# while mounting it below the same authenticated /api/v1 boundary.
+from api.business_routes import router as business_router
+
+router.include_router(business_router, prefix="/v1/business")

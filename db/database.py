@@ -19,6 +19,30 @@ if settings.database_url.startswith("sqlite"):
 engine = create_engine(settings.database_url, **engine_options)
 
 
+# These tables were introduced after the initial governed-workspace and
+# AgentRun migrations.  They let a pre-20260725_03 installation without an
+# Alembic version table be stamped at the last schema it actually has, rather
+# than attempting to recreate its existing base tables.
+BUSINESS_AGENT_TABLES = {
+    "business_assistants",
+    "business_data_sources",
+    "business_records",
+    "business_alert_rules",
+    "business_alerts",
+    "business_daily_reports",
+    "business_boss_tasks",
+    "business_assistant_messages",
+}
+
+# Revision 20260725_03 adds both business tables and audit visibility columns.
+# A real 20260725_02 installation has every prior table but naturally lacks
+# those two new audit columns, so bootstrap detection must ignore only them
+# while deciding where to stamp an unversioned legacy database.
+PRE_BUSINESS_MISSING_COLUMNS = {
+    "audit_events": {"visibility", "owner_user_id"},
+}
+
+
 def get_session() -> Generator[Session, None, None]:
     with Session(engine) as session:
         yield session
@@ -57,22 +81,43 @@ def _upgrade_schema() -> None:
             # every current model table. No DDL is needed; record the head.
             command.stamp(alembic_config, "head")
             return
-        legacy_tables = set(SQLModel.metadata.tables) - {"agent_runs"}
-        if _matches_schema(inspector, legacy_tables):
-            # The pre-Alembic product schema is known and complete. Stamp that
-            # immutable baseline, then apply the additive AgentRun revision.
-            command.stamp(alembic_config, "20260725_00")
+        pre_business_tables = set(SQLModel.metadata.tables) - BUSINESS_AGENT_TABLES
+        if _matches_schema(
+            inspector,
+            pre_business_tables,
+            ignored_columns=PRE_BUSINESS_MISSING_COLUMNS,
+        ):
+            # The immediately preceding commercial schema has all governed
+            # AgentRun columns but not the operating-agent tables.
+            command.stamp(alembic_config, "20260725_02")
+        else:
+            legacy_tables = pre_business_tables - {"agent_runs"}
+            if _matches_schema(
+                inspector,
+                legacy_tables,
+                ignored_columns=PRE_BUSINESS_MISSING_COLUMNS,
+            ):
+                # The pre-Alembic product schema is known and complete. Stamp
+                # that immutable baseline, then apply additive revisions.
+                command.stamp(alembic_config, "20260725_00")
     command.upgrade(alembic_config, "head")
 
 
-def _matches_schema(inspector, expected_tables: set[str]) -> bool:
+def _matches_schema(
+    inspector,
+    expected_tables: set[str],
+    *,
+    ignored_columns: dict[str, set[str]] | None = None,
+) -> bool:
     existing_tables = set(inspector.get_table_names())
     if not expected_tables or not expected_tables.issubset(existing_tables):
         return False
+    ignored_columns = ignored_columns or {}
     return all(
-        {column.name for column in SQLModel.metadata.tables[table_name].columns}.issubset(
-            {column["name"] for column in inspector.get_columns(table_name)}
-        )
+        (
+            {column.name for column in SQLModel.metadata.tables[table_name].columns}
+            - ignored_columns.get(table_name, set())
+        ).issubset({column["name"] for column in inspector.get_columns(table_name)})
         for table_name in expected_tables
     )
 
@@ -119,14 +164,14 @@ def _seed_development_admin() -> None:
 
         admin = User(
             email=_development_bootstrap_email(),
-            display_name="Workspace Admin",
+            display_name="平台管理员",
             password_hash=hash_password(settings.bootstrap_admin_password),
             is_platform_admin=True,
         )
         session.add(admin)
         session.flush()
         workspace = Workspace(
-            name="My Workspace",
+            name="我的工作区",
             slug="my-workspace",
             owner_id=admin.id,
         )

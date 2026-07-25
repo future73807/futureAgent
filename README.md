@@ -1,88 +1,169 @@
 # futureAgent
 
-futureAgent is a small, deployable team AI workspace. It has three separately deployable surfaces:
+futureAgent 是面向团队协作的 AI 工作空间：把对话、项目任务、执行计划、交付文件与审计记录放在同一个有权限边界的工作区中。它不是只靠浏览器临时状态演示的原型；身份、工作区、任务、计划、文件和审计记录均由 API 持久化并在服务端校验。
 
-- **User workspace** — React + `@ant-design/x`, on port `5173` in development.
-- **Model gateway** — LiteLLM, on port `4000` in Docker Compose.
-- **Platform administration** — React + Ant Design, on port `5174` in development.
+## 产品组成
 
-This repository is no longer a client-side role-selection demo. Identity, workspaces, conversations, plans, tasks, files, and audit events are persisted by the API and protected on the server.
+默认 Docker Compose 部署由两个前端和一个 API 服务组成，运营入口只有用户端和管理员后台：
 
-## What is implemented
+| 服务 | 技术与用途 | 本地端口 |
+| --- | --- | --- |
+| 用户端 | React + `@ant-design/x`，用于对话、项目、任务、工作模式和文件交付 | `8081` |
+| 管理员后台 | React + Ant Design，统一管理用户、工作区、模型状态、技能、MCP、权限与运行设置 | `8082` |
+| API 服务与模型调用层 | FastAPI API 使用 LiteLLM Python 库调用由部署环境配置的模型供应商；模型运营统一在管理员后台 | `8000` |
 
-### Workspace product
+### LiteLLM 与模型中心
 
-- Email/password registration, sign-in, sign-out, access-token refresh, and `GET /api/v1/auth/me`.
-- Short-lived access token in browser session storage; refresh token in an HttpOnly cookie.
-- Multiple workspaces, member roles (`owner`, `admin`, `member`, `viewer`), ownership transfer, and server-side workspace boundaries via `X-Workspace-ID`.
-- Persistent project board with projects, tasks, assignees, labels, priority, and workflow status.
-- Task-board search and status filters for finding active work without losing its project context.
-- Persistent AI conversations and workspace-scoped attachment uploads/downloads.
-- Task-scoped input and deliverable files with authenticated downloads and bounded previews for text, Markdown, CSV, JSON, Word, Excel, image, and PDF files.
-- Tenant-scoped attachment object keys, an atomic local-storage driver for development, and an S3-compatible driver for MinIO or managed object storage.
-- Workspace audit events for sensitive and business actions.
+LiteLLM 没有被移除：它作为 API 内的统一模型调用库，负责对接不同供应商。模型运营已收拢到管理员后台的“模型中心”，可查看模型路由来源、配置状态，并发起有审计记录的真实响应探测。管理员后台不会让浏览器录入或读取供应商密钥；密钥只能由部署环境或密钥管理系统提供，绝不能写入浏览器、README、接口响应或审计日志。
 
-### Work mode
+默认 Compose 不运行独立 LiteLLM 代理或控制台，因此没有 LiteLLM 的本地访问地址、登录账号或密码。这避免产生第三个运营后台和一套额外状态服务。若未来需要复杂的多供应商路由，可在私有网络中部署经过验证、固定版本的 LiteLLM 网关，并通过部署配置提供其内部地址与密钥；网关只作为 API 的内部依赖，不应成为运营人员的第二个后台。
 
-Work mode is designed around a controlled delivery loop rather than a one-shot chat:
+## 本地访问地址、账号与密码
 
-1. Draft a task-specific execution plan, either from scratch or from delivery, investigation, and incident-response templates.
-2. Assign steps and record acceptance instructions.
-3. Require a workspace owner or admin to approve the plan.
-4. Move individual steps through `pending`, `running`, `blocked`, and `done`.
-5. Record evidence, decisions, handoffs, or outcomes per step; all changes remain in the workspace audit trail.
-6. Run an approved task step through the selected model and skill, stream its output, and persist a reviewable `AgentRun` with the model, skill, output, terminal status, retry lineage, and audit events.
-7. Apply server-enforced execution controls: per-workspace concurrency limits, bounded run time, duplicate-request protection, authorised cancellation, and auditable retry of failed or cancelled runs.
-8. Review a task-scoped activity timeline containing the task, plan, execution-step, AI-run, and attached-file events.
+以下信息仅适用于仓库默认的 Docker Compose 本地开发环境。启动后可用 `docker compose ps` 核对端口映射。请勿将任何默认凭据用于生产环境。
 
-The API controls who can approve and update each step. The UI only exposes the same permissions as the server; it does not trust a role sent from the browser.
+> Windows 上如 `127.0.0.1` 或 `localhost` 访问 Docker 端口出现 Docker `502`、连接被其他本机进程占用，或本机 IPv4 转发异常，请改用同端口的 IPv6 回环地址：例如 API 使用 `http://[::1]:8000`、用户端使用 `http://[::1]:8081`、管理员后台使用 `http://[::1]:8082`。这只是本机访问备用地址，不代表生产环境应直接暴露这些端口。
 
-## WorkBuddy reference boundary
+| 项目 | 地址或默认凭据 | 说明 |
+| --- | --- | --- |
+| 统一入口（Nginx） | `http://localhost/` | 默认展示用户端，并将 `/api` 反向代理到 API；等价于 `http://localhost:80/`。 |
+| 用户端 | `http://localhost:8081/` | 普通用户在这里自行注册；没有预置普通用户账号。 |
+| 管理员后台 | `http://localhost:8082/` | 平台运营人员入口。 |
+| 默认平台管理员 | 邮箱：`admin@futureagent.dev`；密码：`ChangeMe123!` | 仅在未用部署变量覆盖 `BOOTSTRAP_ADMIN_EMAIL` 与 `BOOTSTRAP_ADMIN_PASSWORD` 时有效；首次启动会创建或提升该账号。 |
+| 普通用户账号 | 无预置账号、无默认密码 | 从用户端注册后，系统创建其首个工作区并将其设为所有者。 |
+| API 基地址 | `http://127.0.0.1:8000` | 供前端代理、自动化和运维检查使用；没有独立登录页面。 |
+| 中文接口目录 | `http://127.0.0.1:8000/docs` | 服务端根据当前 OpenAPI 动态生成的中文接口目录，按功能分组展示认证要求、参数、请求体和响应。 |
+| 完整中文接口目录 | `http://127.0.0.1:8000/redoc` | 兼容原 ReDoc 地址；展示全部接口及完整数据模型、JSON Schema。 |
+| OpenAPI 描述 | `http://127.0.0.1:8000/openapi.json` | 供接口工具导入；不含任何密钥。 |
+| API 存活检查 | `http://127.0.0.1:8000/api/v1/health/live` | 仅检查 API 进程。 |
+| API 就绪检查 | `http://127.0.0.1:8000/api/v1/health/ready` | 检查数据库和附件存储；正常时返回 `200`。 |
+| PostgreSQL | 地址：`127.0.0.1:25432`；用户：`postgres`；密码：`password`；数据库：`postgres` | 容器内仍使用 `5432`；本机映射采用 `25432`，避开当前 Windows 已占用的 PostgreSQL 端口。仅默认 Compose 配置使用；生产必须替换，并限制对宿主机的暴露。 |
+| MCP 服务 | `http://127.0.0.1:8050/mcp` | 无独立登录入口；默认不向智能助手开启本地文件系统工具。 |
+| 独立 LiteLLM 服务 | 默认不启动，因此无地址、账号或密码 | 模型状态、真实探测和审计在管理员后台的“模型中心”完成。 |
 
-The Work mode direction is informed by the publicly available Tencent WorkBuddy documentation, not by reverse engineering or undocumented claims. Those docs describe a task flow with natural-language tasks, contextual files, task states, continuing work, and a results area for artifacts, files, changes, and previews.
+`/docs` 和 `/redoc` 均为本项目服务端渲染的中文接口目录，不加载 Swagger UI、ReDoc 或第三方脚本；OpenAPI 文档通过 API 的 `8000` 端口直接访问。统一入口的 `/docs` 不会代理到 API 文档，而是由用户端处理。所有受保护 API 都需要先获取访问令牌，并按接口要求提供工作区标识。
 
-- [WorkBuddy overview](https://www.workbuddy.ai/docs/zh/workbuddy/Overview)
-- [Create a task and add context](https://www.workbuddy.ai/docs/zh/workbuddy/Create-Task)
-- [Task management](https://www.workbuddy.ai/docs/zh/workbuddy/Task-Management)
-- [Result viewing](https://www.workbuddy.ai/docs/zh/workbuddy/Results)
+生产部署前必须替换管理员密码、数据库凭据、JWT 密钥和所有供应商密钥；不要把任何真实供应商密钥提交到仓库。
 
-futureAgent implements the web-team-workspace equivalents: persistent tasks and conversations, attached task inputs and deliverables, governed plans, approvals, execution evidence, search/filtering, and bounded office/image/PDF previews. It deliberately does **not** claim the desktop-only ability to read arbitrary local folders or render every binary office format in the API process.
+## 已实现的业务能力
 
-### Administration and model operations
+### 用户端：React + `@ant-design/x`
 
-- Separate administrator UI with real platform-admin authentication.
-- Platform overview, user activation/admin controls, workspace overview, and global audit log.
-- Platform-admin-only management APIs for skills, MCP configuration, Casbin policies, and runtime settings.
-- LiteLLM model readiness preflight: in direct-provider mode, chat endpoints return a clear `503` before opening an SSE stream when LiteLLM or a usable provider credential is unavailable. A LiteLLM proxy route is deliberately displayed as “configured”, not as a verified model response.
-- Platform administrators can run a bounded, audited model probe from the model page. The probe reports success only after that request receives a real model response.
-- MCP server discovery, model/skill/MCP permission preflight, and a local-tools service for controlled container workspaces.
-- Liveness and readiness probes plus Prometheus-compatible HTTP, attachment, and task-run metrics. Metrics are disabled in production unless `METRICS_BEARER_TOKEN` is configured.
-- Checked-in Alembic database history. Production startup applies migrations rather than calling `metadata.create_all()`.
+用户端实际采用 React、Ant Design 和 `@ant-design/x` 的 `Bubble`、`Conversations`、`Sender`、`Welcome` 与 `XProvider` 组件，不是静态聊天界面。主要能力包括：
 
-## Architecture
+- 邮箱密码注册、登录、退出和安全续期；访问令牌短期保存在浏览器会话中，续期令牌由 HttpOnly Cookie 管理。
+- 多工作区、成员角色（所有者、管理员、成员、只读成员）和服务端工作区边界。
+- 项目看板：项目、任务、负责人、标签、优先级、工作流状态、搜索和筛选。
+- 持久化对话与工作区内附件上传、下载。
+- 任务输入与交付文件预览：文本、Markdown、CSV、JSON、Word、Excel、图片和 PDF 均有受控预览；下载和预览经过工作区权限校验。
+- 工作模式：从交付、调研、故障响应等模板创建任务计划，分配步骤、记录验收要求、审批计划、跟踪步骤状态、沉淀证据与交接。
+- 对已批准的计划步骤发起受控 AI 执行，流式展示输出并保存可复核的执行记录、模型、技能、输出、状态、重试谱系和审计事件。
 
-```text
-User workspace (5173) ─┐
-                       ├── FastAPI API (8000) ── SQLite for local development
-Admin workspace (5174) ┘                         └─ PostgreSQL in Compose
-                                      │
-                                      ├── LiteLLM gateway (4000)
-                                      └── MCP local-tools service (8050)
+### 工作模式与执行治理
+
+工作模式围绕“先计划、再审批、可追溯执行、人工复核”的交付闭环，而不是一次性对话：
+
+1. 为任务创建或套用执行计划。
+2. 指定步骤负责人和验收标准。
+3. 由工作区所有者或管理员批准计划。
+4. 将步骤推进为待执行、执行中、受阻或已完成，并记录证据和决策。
+5. 仅对已批准任务的已选步骤发起 AI 执行；输入上下文受到任务、步骤与附件文本范围约束。
+6. 服务端执行工作区并发限制、超时、幂等请求保护、授权取消、失败/取消后的可审计重试。
+7. 在任务活动时间线中查看任务、计划、执行步骤、AI 执行和附件事件。
+
+浏览器不会传入可被信任的角色；审批、步骤更新、取消与重试均由服务端按照登录用户和数据库成员关系校验。
+
+### 管理员后台
+
+- 平台概览、用户启停与平台管理员授权、工作区概览、全局审计轨迹。
+- 模型中心：展示模型路由、配置状态，并以真实请求探测验证模型；“路由已配置”不等于“模型可用”。供应商密钥不在管理页面编辑，而由部署环境或密钥管理系统注入。
+- 技能管理、MCP 服务发现和连通性检测、Casbin RBAC 权限策略与运行设置。
+- 健康检查、就绪检查、Prometheus 兼容指标、附件与任务执行指标。
+- Alembic 数据库迁移历史；生产启动应用迁移，而不是以 `metadata.create_all()` 替代迁移。
+
+### 经营/生产智能体（已授权接入简版）
+
+用户端新增“经营助手”工作台，采用 React + `@ant-design/x` 的聊天组件，并提供以下可实际运行的最小闭环：
+
+- **老板智能体**：仅当前工作区所有者可访问；汇总其可见的公司经营数据、预警与老板任务。
+- **私事员工智能体**：仅创建者（当前老板）可访问；只读取其私事范围记录，不混入公事数据。
+- **公事员工智能体**：工作区成员可访问；只基于当前工作区的已授权公事记录生成确定性摘要，每名成员的对话历史独立保存。
+- **数据源与接口接入**：可登记 OA、公司小程序、生产日报、企业机器人、系统导出或自有 API。API/Webhook 数据源创建时一次性给出接入地址与随机令牌；服务端只保存令牌摘要，列表、审计和后续响应均不会返回明文令牌。
+- **可追溯业务数据**：每条记录带数据源、外部标识、发生日期/时间和采集批次；同一数据源的外部标识重复提交不会重复入库。
+- **规则预警**：默认提供生产异常、订单风险、设备故障、交期风险、审批超时五类规则；成员可确认收到，工作区所有者或管理员才可结案，且全程保留审计追溯。
+- **生产日报**：按工作区和日期幂等汇总公司范围记录和未关闭预警，明确排除老板/私事范围数据；可由页面手工生成，也可由受控定时服务调用日报接口。
+- **老板任务闭环**：老板可指定负责人下达任务；负责人只能更新分配给自己的状态与进展，老板可持续跟踪。
+
+接入方通过已授权的服务端调用以下模式提交数据（令牌只在登记/轮换时获取一次，示例不包含真实令牌）：
+
+```http
+POST /api/v1/business/ingest/{source_id}
+X-Business-Ingest-Token: <一次性保存的令牌>
+Content-Type: application/json
+
+{
+  "external_id": "生产系统-20260725-001",
+  "record_type": "production_daily",
+  "title": "设备故障，故障停机",
+  "content": "来自已授权生产系统的业务记录",
+  "occurred_on": "2026-07-25"
+}
 ```
 
-The API owns authorization and data boundaries. Both frontend applications only call `/api` through their development proxy or the production Nginx route.
+完整中文接口说明见 [接口目录](http://127.0.0.1:8000/docs)；业务接口位于 `/api/v1/business/*`。数据源地址只作为配置元数据保存，系统不会根据该地址主动向外网发起请求。
 
-Attachments use a tenant-prefixed object key and are served through the API's workspace authorization checks. Development uses local storage; deployments can use an S3-compatible service such as MinIO or a managed object store.
+#### 微信、OA 和小程序的合规边界
 
-## Local development
+本项目不抓取个人微信或普通微信群历史消息，不绕过登录，不逆向“抓接口”。如需微信场景，应由客户提供企业微信/微信官方机器人或回调能力、业务系统开放 API、已授权导出，或受控中间件；并在上线前落实数据主体告知、授权、最小采集范围、保存期限与删除机制。当前简版实现的是上述受控接口接入链路，不声称已接通任何客户真实 OA、小程序或微信账号。
 
-### Prerequisites
+老板/私事范围的记录、助手历史、数据源、预警和相关审计元数据均按所有者隔离；平台管理员与同工作区管理员不会因此自动获得读取权限。所有权转移若检测到此类私密业务数据会被阻止，需先完成受控归档或交接，避免私密数据静默转移。
+
+## 参考边界
+
+工作模式的方向参考了公开的腾讯 WorkBuddy 文档中所描述的自然语言任务、上下文文件、任务状态、持续推进与结果区域；本项目没有逆向工程或声称拥有未公开功能。
+
+- [WorkBuddy 概览](https://www.workbuddy.ai/docs/zh/workbuddy/Overview)
+- [创建任务并添加上下文](https://www.workbuddy.ai/docs/zh/workbuddy/Create-Task)
+- [任务管理](https://www.workbuddy.ai/docs/zh/workbuddy/Task-Management)
+- [查看结果](https://www.workbuddy.ai/docs/zh/workbuddy/Results)
+
+futureAgent 已实现 Web 团队工作区对应的任务、对话、附件、计划审批、执行证据、搜索筛选和常见办公/图片/PDF 预览。它不会声称能够直接读取用户任意桌面目录，也不会在 API 进程内渲染所有二进制办公格式。
+
+## 架构
+
+```text
+用户端（8081，React + Ant Design X） ─┐
+                                      ├── FastAPI API（8000） ── PostgreSQL（Compose）
+管理后台（8082，React + Ant Design） ─┘             │
+                                                    ├── 通过 LiteLLM 库直连模型供应商
+                                                    └── MCP 本地工具服务（8050）
+```
+
+API 是授权和数据隔离边界。两个前端只通过开发代理或生产 Nginx 路由调用 `/api`。附件的对象键带有工作区前缀，并始终通过 API 权限检查后下载或预览；浏览器不会获得对象存储凭据或直连地址。
+
+开发环境使用本地附件存储；部署环境可切换到 S3 兼容对象存储（如 MinIO 或托管对象存储）。
+
+## 本地开发
+
+### 前置条件
 
 - Python 3.11+
 - Node.js 20+
 - npm
+- Docker Desktop（使用 Compose 时）
 
-### Start the API
+### 方式一：Docker Compose（推荐）
+
+```powershell
+docker compose up -d --build
+docker compose ps
+```
+
+Compose 会启动 API、PostgreSQL、MCP、用户端、管理后台和 Nginx。API 会在声明就绪前执行 Alembic 迁移；上传文件保存到命名 Docker 卷。默认 Compose 面向本地 HTTP 开发环境；生产部署必须配置 HTTPS 入口，并显式设置 `ENVIRONMENT=production`，以确保续期 Cookie 只经 HTTPS 发送。
+
+### 方式二：本机运行 API 与两个前端
+
+先启动 API：
 
 ```powershell
 Copy-Item .env.example .env
@@ -92,53 +173,38 @@ pip install -r requirements.txt
 python -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-### Start the two frontends
-
-Use separate terminals:
+然后分别在两个终端启动前端：
 
 ```powershell
 cd frontend
-npm install
-npm run dev
+npm.cmd install
+npm.cmd run dev
 ```
 
 ```powershell
 cd admin-frontend
-npm install
-npm run dev
+npm.cmd install
+npm.cmd run dev
 ```
 
-Open:
+本机运行时的访问地址如下：用户端 `http://localhost:5173/`、管理员后台 `http://localhost:5174/`、API `http://127.0.0.1:8000/`、中文接口目录 `http://127.0.0.1:8000/docs`。两个 Vite 前端会将 `/api` 请求代理到 API。不要同时运行 Compose 中的 API 和本机 API，因为两者都会占用 `8000` 端口。
 
-| Surface | Address |
-| --- | --- |
-| User workspace | http://localhost:5173 |
-| Admin workspace | http://localhost:5174 |
-| API health | http://127.0.0.1:8000/api/v1/health |
-| API documentation | http://127.0.0.1:8000/docs |
+普通用户首次注册会创建工作区并成为其所有者；管理员使用上方列出的本地默认平台管理员账号登录管理后台。
 
-Registration creates the first workspace and makes that user its owner. In development, the API can seed the configured bootstrap platform administrator; use it only for local verification and change all bootstrap credentials before deployment.
+## API 安全约定
 
-## API security contract
-
-Protected calls require:
+受保护请求需要携带：
 
 ```http
 Authorization: Bearer <access-token>
 X-Workspace-ID: <workspace-id>
 ```
 
-Roles are derived from the signed token and database membership. The API rejects the old `user_role` request field. Platform administration endpoints additionally require `is_platform_admin` on the authenticated user.
+角色来自签名令牌与数据库成员关系。API 会拒绝旧的 `user_role` 请求字段；平台管理接口还要求已认证用户具有 `is_platform_admin`。
 
-## Running with Docker Compose
+## 对象存储配置
 
-```powershell
-docker compose up --build
-```
-
-Compose provisions API, PostgreSQL, LiteLLM, MCP, user frontend, administrator frontend, and Nginx. The API applies Alembic migrations before declaring itself ready and retains local uploads in a named Docker volume. Before exposing it publicly, create a production `.env` with a long random `JWT_SECRET_KEY`, a distinct LiteLLM master key, real model-provider credentials, non-default PostgreSQL credentials, and a `METRICS_BEARER_TOKEN`.
-
-For S3 or MinIO, set these variables in that deployment and restart the API:
+需要使用 S3 或 MinIO 时，在部署环境中配置以下变量并重启 API：
 
 ```dotenv
 STORAGE_BACKEND=s3
@@ -150,35 +216,35 @@ STORAGE_S3_SECRET_ACCESS_KEY=...
 STORAGE_S3_PREFIX=futureagent
 ```
 
-The API remains the authorization boundary for file download and preview; it does not give browser clients an object-store URL or credential.
+即便使用对象存储，文件下载和预览仍以 API 为权限边界。
 
-## Verification
+## 验证命令
 
 ```powershell
 python -m unittest discover -s tests -v
 
 cd frontend
-npm run build
+npm.cmd run build
 
 cd ..\admin-frontend
-npm run build
+npm.cmd run build
 
 cd ..
 docker compose config --quiet
 ```
 
-The API tests cover authentication boundaries, workspace isolation, project/task creation, work-plan approval and step evidence, task-level agent-run persistence, conversations, tenant-scoped attachment storage, previews, audit events, operational probes, metrics, and model-unavailable preflight behavior. The migration is also executed against an empty SQLite database in verification.
+测试覆盖身份和工作区边界、项目/任务创建、计划审批与步骤证据、任务级 AI 执行记录、对话、工作区附件存储和预览、审计事件、运行探针、指标及模型不可用预检；迁移也会在空 SQLite 数据库上验证。
 
-## Production boundary
+## 上线前必须完成的事项
 
-This is a commercial MVP foundation, not a claim of complete production certification. The following remain required before a public production launch:
+这是一套可持续完善的商业 MVP 基础，不等同于已完成全部生产认证。公开上线前必须完成以下工作：
 
-- Configure and validate a real LiteLLM provider. A configured proxy route is not proof that an upstream model can answer; validate each intended model before public launch. Without a proxy, missing or placeholder provider credentials deliberately return `503`.
-- Use PostgreSQL plus a managed S3-compatible object store with malware scanning, lifecycle retention, backups, TLS, external metric scraping/alerting, and rate limits. The included local backend is for development or a deliberately single-node deployment.
-- Review the initial Alembic baseline against an existing database before its first deployment, then generate and review a new migration for every schema change.
-- The built-in MCP file server is a container-mounted workspace, not arbitrary user-desktop access. It is disabled for agent execution by default. Do not share one writable MCP volume across tenants; use an isolated MCP deployment per tenant/workspace or a workspace-aware desktop connector before enabling file-writing tools for multi-tenant production.
-- Replace development bootstrap credentials, rotate secrets, restrict CORS to deployed domains, and run browser E2E tests against the target environment.
+- 为每个计划使用的模型配置真实供应商并在“模型中心”取得真实响应验证；存在供应商凭据并不能证明上游模型可用。未配置或使用占位凭据时，接口会明确返回 `503`。
+- 使用 PostgreSQL 与托管 S3 兼容对象存储，并配置恶意文件扫描、生命周期管理、备份、TLS、外部指标采集/告警和限流。
+- 在现有数据库首次部署前审查初始 Alembic 基线；每次结构变更都生成并审查新的迁移。
+- 内置 MCP 文件服务只操作容器挂载的工作区，并非任意用户桌面目录。默认不为智能助手启用本地文件工具；多租户生产环境必须使用按工作区隔离的 MCP 或桌面连接器。
+- 替换所有本地默认凭据、轮换密钥、将 CORS 限制到已部署域名，并对目标环境运行浏览器端到端测试。
 
-## License
+## 许可证
 
 MIT

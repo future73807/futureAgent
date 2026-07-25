@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     storage_s3_addressing_style: str = "auto"
     run_migrations_on_startup: bool = False
     metrics_bearer_token: str = ""
-    cors_origins_csv: str = "http://localhost:5173,http://localhost:5174"
+    cors_origins_csv: str = "http://localhost:5173,http://localhost:5174,http://localhost:8081,http://localhost:8082"
 
     # ===== MCP 配置 =====
     mcp_server_port: int = 8050

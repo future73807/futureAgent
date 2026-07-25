@@ -26,7 +26,7 @@ class MCPManager:
     async def connect(self, server_name: str):
         """连接到指定 MCP Server"""
         if server_name not in self.servers:
-            raise ValueError(f"MCP server '{server_name}' is not configured")
+            raise ValueError(f"MCP 服务“{server_name}”尚未配置")
         async with self._open_transport(self.servers[server_name]) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
@@ -48,7 +48,7 @@ class MCPManager:
         unique_names = list(dict.fromkeys(server_names))
         unknown = [name for name in unique_names if name not in self.servers]
         if unknown:
-            raise ValueError(f"Unknown MCP server(s): {', '.join(unknown)}")
+            raise ValueError(f"未知 MCP 服务：{', '.join(unknown)}")
 
         async with AsyncExitStack() as stack:
             sessions = []
@@ -163,11 +163,13 @@ class MCPManager:
                 async with self.connect(name) as session:
                     tools = await self.list_tools(session)
             return {"name": name, "url": url, "status": "online", "tools": tools}
-        except Exception as exc:
+        except Exception:
+            # 连接库异常可能包含内部主机名、鉴权头或上游实现细节；这些信息
+            # 不应通过管理员界面直接暴露。保留统一提示，详情由部署日志处理。
             return {
                 "name": name,
                 "url": url,
                 "status": "offline",
                 "tools": [],
-                "error": str(exc),
+                "error": "服务探测失败，请检查地址、网络或鉴权配置。",
             }

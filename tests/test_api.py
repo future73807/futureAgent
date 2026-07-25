@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -13,6 +14,7 @@ from sqlmodel import SQLModel, create_engine
 
 import db.database as database
 from config import settings
+from db.models import now_utc
 from main import app
 
 
@@ -90,6 +92,28 @@ class ProductApiTests(unittest.TestCase):
             headers=self.auth_headers(self.member_token),
         )
         self.assertEqual(member_admin.status_code, 403)
+
+    def test_refresh_session_rotates_and_handles_naive_database_timestamps(self):
+        from api.routes import _refresh_session_expired
+
+        self.assertFalse(
+            _refresh_session_expired((now_utc() + timedelta(minutes=5)).replace(tzinfo=None))
+        )
+        self.assertTrue(
+            _refresh_session_expired((now_utc() - timedelta(minutes=5)).replace(tzinfo=None))
+        )
+
+        login = self.client.post(
+            "/api/v1/auth/login",
+            json={"email": "owner@example.com", "password": "StrongPass123!"},
+        )
+        self.assertEqual(login.status_code, 200, login.text)
+        refreshed = self.client.post("/api/v1/auth/refresh")
+        self.assertEqual(refreshed.status_code, 200, refreshed.text)
+        logout = self.client.post("/api/v1/auth/logout")
+        self.assertEqual(logout.status_code, 204, logout.text)
+        expired = self.client.post("/api/v1/auth/refresh")
+        self.assertEqual(expired.status_code, 401, expired.text)
 
     def test_workspace_isolation_project_task_and_work_plan_flow(self):
         owner_headers = self.auth_headers(self.owner_token, self.owner_workspace)

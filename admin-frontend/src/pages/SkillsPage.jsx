@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import { App, Button, Card, Input, Modal, Popconfirm, Space, Table, Tag, Typography } from 'antd'
-import { apiFetch } from '../api.js'
+import { apiFetch, toUserErrorMessage } from '../api.js'
 
 const { Title, Text } = Typography
 const emptySkill = { name: '', description: '', system_prompt: '', allowed_tool_names: [] }
@@ -18,7 +18,7 @@ export default function SkillsPage() {
   const load = async () => {
     setLoading(true)
     try { setSkills((await apiFetch('/api/v1/skills')).skills || []) }
-    catch (error) { message.error(error.message) }
+    catch (error) { message.error(toUserErrorMessage(error, '加载技能列表失败，请稍后重试。')) }
     finally { setLoading(false) }
   }
   useEffect(() => { load() }, [])
@@ -31,21 +31,21 @@ export default function SkillsPage() {
   }
 
   const save = async () => {
-    if (!draft.name || !draft.description || !draft.system_prompt) return message.warning('请完整填写 Skill')
+    if (!draft.name || !draft.description || !draft.system_prompt) return message.warning('请完整填写技能信息')
     const payload = { ...draft, allowed_tool_names: tools.split(',').map((item) => item.trim()).filter(Boolean) }
     try {
       await apiFetch(editing ? `/api/v1/skills/${draft.name}` : '/api/v1/skills', {
         method: editing ? 'PUT' : 'POST', body: JSON.stringify(payload),
       })
-      message.success(editing ? 'Skill 已更新' : 'Skill 已创建')
+      message.success(editing ? '技能已更新' : '技能已创建')
       setOpen(false)
       load()
-    } catch (error) { message.error(error.message) }
+    } catch (error) { message.error(toUserErrorMessage(error, editing ? '更新技能失败，请检查内容后重试。' : '创建技能失败，请检查内容后重试。')) }
   }
 
   const remove = async (name) => {
-    try { await apiFetch(`/api/v1/skills/${name}`, { method: 'DELETE' }); message.success('Skill 已删除'); load() }
-    catch (error) { message.error(error.message) }
+    try { await apiFetch(`/api/v1/skills/${name}`, { method: 'DELETE' }); message.success('技能已删除'); load() }
+    catch (error) { message.error(toUserErrorMessage(error, '删除技能失败，请稍后重试。')) }
   }
 
   const columns = [
@@ -57,7 +57,7 @@ export default function SkillsPage() {
       render: (_, skill) => skill.name === 'default' ? <Tag>内置</Tag> : (
         <Space>
           <Button type="link" icon={<EditOutlined />} onClick={() => showEditor(skill)}>编辑</Button>
-          <Popconfirm title="删除这个 Skill？" onConfirm={() => remove(skill.name)}><Button danger type="link" icon={<DeleteOutlined />}>删除</Button></Popconfirm>
+          <Popconfirm title="删除这个技能？" onConfirm={() => remove(skill.name)} okText="确认" cancelText="取消"><Button danger type="link" icon={<DeleteOutlined />}>删除</Button></Popconfirm>
         </Space>
       ),
     },
@@ -66,11 +66,11 @@ export default function SkillsPage() {
   return (
     <div>
       <div className="page-heading">
-        <div><Title level={2}>Skill 管理</Title><Text type="secondary">维护系统提示词与工具白名单，配置持久化到 YAML</Text></div>
-        <Space><Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button><Button type="primary" icon={<PlusOutlined />} onClick={() => showEditor(null)}>新建 Skill</Button></Space>
+        <div><Title level={2}>技能管理</Title><Text type="secondary">维护系统提示词与工具白名单，配置持久化到 YAML</Text></div>
+        <Space><Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button><Button type="primary" icon={<PlusOutlined />} onClick={() => showEditor(null)}>新建技能</Button></Space>
       </div>
-      <Card className="admin-card"><Table rowKey="name" columns={columns} dataSource={skills} loading={loading} pagination={false} /></Card>
-      <Modal title={editing ? '编辑 Skill' : '新建 Skill'} open={open} onCancel={() => setOpen(false)} onOk={save} width={680}>
+      <Card className="admin-card"><Table rowKey="name" columns={columns} dataSource={skills} loading={loading} pagination={false} locale={{ emptyText: '暂无数据' }} /></Card>
+      <Modal title={editing ? '编辑技能' : '新建技能'} open={open} onCancel={() => setOpen(false)} onOk={save} okText="确认" cancelText="取消" width={680}>
         <div className="form-stack">
           <div><label>名称</label><Input disabled={editing} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="my_skill" /></div>
           <div><label>描述</label><Input value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></div>

@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from auth.auth_manager import AuthManager
@@ -78,7 +79,7 @@ class ModelReadinessTests(unittest.TestCase):
         ):
             self.assertFalse(ModelHub.is_model_configured("gpt-4o-mini"))
             self.assertEqual(ModelHub.configuration_source("gpt-4o-mini"), "missing")
-            self.assertIn("not configured", ModelHub.readiness_error("gpt-4o-mini"))
+            self.assertIn("尚未配置", ModelHub.readiness_error("gpt-4o-mini"))
 
 
 class AgentStreamingTests(unittest.IsolatedAsyncioTestCase):
@@ -102,6 +103,23 @@ class AgentStreamingTests(unittest.IsolatedAsyncioTestCase):
             ):
                 chunks.append(chunk)
             self.assertEqual("".join(chunks), "hello")
+
+
+class McpProbeSafetyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_probe_hides_transport_exception_details(self):
+        manager = MCPManager({})
+
+        @asynccontextmanager
+        async def unavailable(_server_name):
+            raise RuntimeError("internal-hostname and secret-like-detail")
+            yield None
+
+        with patch.object(manager, "connect", unavailable):
+            result = await manager._probe_server("local_tools", "http://internal/mcp")
+
+        self.assertEqual(result["status"], "offline")
+        self.assertEqual(result["error"], "服务探测失败，请检查地址、网络或鉴权配置。")
+        self.assertNotIn("internal-hostname", result["error"])
 
 
 if __name__ == "__main__":

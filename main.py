@@ -4,10 +4,12 @@ futureAgent 启动入口
 """
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
+from api.docs_catalog import render_api_catalog
+from api.openapi import API_TITLE, build_openapi_schema
 from api.routes import router
 from config import settings
 from core.observability import install_observability
@@ -21,12 +23,21 @@ async def lifespan(_: FastAPI):
     yield
 
 app = FastAPI(
-    title="futureAgent",
-    description="模块化 AI Agent 框架 - 基于开源轮子拼装",
+    title=API_TITLE,
+    description="面向 futureAgent 的中文开放接口文档。",
     version="0.1.0",
-    swagger_ui_parameters={"tryItOutEnabled": True},
+    docs_url=None,
+    redoc_url=None,
+    openapi_url="/openapi.json",
     lifespan=lifespan,
 )
+
+
+def custom_openapi() -> dict:
+    return build_openapi_schema(app)
+
+
+app.openapi = custom_openapi
 
 app.add_middleware(
     CORSMiddleware,
@@ -38,6 +49,41 @@ app.add_middleware(
 install_observability(app)
 
 app.include_router(router, prefix="/api")
+
+
+def _root_path(request: Request, path: str) -> str:
+    return f"{request.scope.get('root_path', '').rstrip('/')}{path}"
+
+
+def _documentation_response(request: Request, *, detailed: bool) -> HTMLResponse:
+    content = render_api_catalog(
+        app.openapi(),
+        openapi_url=_root_path(request, app.openapi_url or "/openapi.json"),
+        compact_catalog_url=_root_path(request, "/docs"),
+        detailed_catalog_url=_root_path(request, "/redoc"),
+        detailed=detailed,
+    )
+    return HTMLResponse(
+        content=content,
+        headers={
+            "Content-Language": "zh-CN",
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.get("/docs", include_in_schema=False)
+async def api_documentation_catalog(request: Request) -> HTMLResponse:
+    """提供由当前 OpenAPI schema 生成的中文接口目录。"""
+    return _documentation_response(request, detailed=False)
+
+
+@app.get("/redoc", include_in_schema=False)
+async def complete_api_documentation_catalog(request: Request) -> HTMLResponse:
+    """提供含完整 JSON Schema 的中文接口目录。"""
+    return _documentation_response(request, detailed=True)
 
 # 挂载静态文件目录
 static_dir = os.path.join(os.path.dirname(__file__), "static")

@@ -50,7 +50,7 @@ class SkillManager:
         """写入 YAML 并注册 Skill。"""
         path = self._skill_path(skill.name)
         if path.exists() and not overwrite:
-            raise FileExistsError(f"Skill '{skill.name}' already exists")
+            raise FileExistsError(f"技能“{skill.name}”已存在")
         path.write_text(
             yaml.safe_dump(
                 skill.model_dump(),
@@ -65,7 +65,7 @@ class SkillManager:
     def delete_skill(self, skill_name: str) -> bool:
         """删除持久化 Skill；内置 default 不允许删除。"""
         if skill_name == "default":
-            raise ValueError("内置 default Skill 不能删除")
+            raise ValueError("内置默认技能不能删除")
         if skill_name not in self.skills_db:
             return False
         path = self._skill_path(skill_name)
@@ -106,7 +106,7 @@ class SkillManager:
         """
         skill = self.skills_db.get(skill_name)
         if not skill:
-            raise ValueError(f"Skill '{skill_name}' not found")
+            raise ValueError(f"技能“{skill_name}”不存在")
 
         # 如果没有配置白名单，则允许使用所有工具
         if not skill.allowed_tool_names:
