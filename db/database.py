@@ -7,6 +7,17 @@ from sqlalchemy import inspect
 
 from config import settings
 from db.models import Membership, User, Workspace, now_utc
+from db.report_models import (  # 汇报智能体模型
+    ReportAssistant,
+    ReportDataSource,
+    ReportRecord,
+    KnowledgeBase,
+    ReportAlertRule,
+    ReportAlert,
+    ReportDailyReport,
+    ReportWeeklyReport,
+    ReportAssistantMessage,
+)
 
 LEGACY_BOOTSTRAP_ADMIN_EMAIL = "admin@futureagent.local"
 DEVELOPMENT_BOOTSTRAP_ADMIN_EMAIL = "admin@futureagent.dev"
@@ -32,6 +43,19 @@ BUSINESS_AGENT_TABLES = {
     "business_daily_reports",
     "business_boss_tasks",
     "business_assistant_messages",
+}
+
+# 汇报智能体表
+REPORT_AGENT_TABLES = {
+    "report_assistants",
+    "report_data_sources",
+    "report_records",
+    "knowledge_bases",
+    "report_alert_rules",
+    "report_alerts",
+    "report_daily_reports",
+    "report_weekly_reports",
+    "report_assistant_messages",
 }
 
 # Revision 20260725_03 adds both business tables and audit visibility columns.

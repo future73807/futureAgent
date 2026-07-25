@@ -1,6 +1,6 @@
 """
 futureAgent 启动入口
-整合: FastAPI + LangGraph + LiteLLM + MCP + Casbin
+整合: FastAPI + LangGraph + LiteLLM + MCP + Casbin + 汇报智能体
 """
 from contextlib import asynccontextmanager
 
@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from api.docs_catalog import render_api_catalog
 from api.openapi import API_TITLE, build_openapi_schema
 from api.routes import router
+from api.report_routes import router as report_router
 from config import settings
 from core.observability import install_observability
 from db.database import init_db
@@ -49,6 +50,7 @@ app.add_middleware(
 install_observability(app)
 
 app.include_router(router, prefix="/api")
+app.include_router(report_router, prefix="/api/v1/report")
 
 
 def _root_path(request: Request, path: str) -> str:

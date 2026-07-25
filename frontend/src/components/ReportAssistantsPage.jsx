@@ -1,0 +1,412 @@
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import AntApp from 'antd/es/app'
+import Alert from 'antd/es/alert'
+import Avatar from 'antd/es/avatar'
+import Badge from 'antd/es/badge'
+import Button from 'antd/es/button'
+import Card from 'antd/es/card'
+import Descriptions from 'antd/es/descriptions'
+import Empty from 'antd/es/empty'
+import Flex from 'antd/es/flex'
+import Form from 'antd/es/form'
+import Input from 'antd/es/input'
+import List from 'antd/es/list'
+import Modal from 'antd/es/modal'
+import Progress from 'antd/es/progress'
+import Select from 'antd/es/select'
+import Space from 'antd/es/space'
+import Spin from 'antd/es/spin'
+import Statistic from 'antd/es/statistic'
+import Tag from 'antd/es/tag'
+import Tabs from 'antd/es/tabs'
+import Typography from 'antd/es/typography'
+import Upload from 'antd/es/upload'
+import { AppstoreOutlined, CheckCircleOutlined, ClockCircleOutlined, MessageOutlined, PlusOutlined, ProjectOutlined, RobotOutlined, FileTextOutlined, BookOutlined, UploadOutlined } from '@ant-design/icons'
+import Bubble from '@ant-design/x/es/bubble'
+import Sender from '@ant-design/x/es/sender'
+import Welcome from '@ant-design/x/es/welcome'
+import XProvider from '@ant-design/x/es/x-provider'
+import zhCN from 'antd/es/locale/zh_CN'
+import { apiFetch } from '../api.js'
+
+const { Title, Text, Paragraph } = Typography
+
+const sourceStatus = {
+  connected: { label: '已连接', color: 'success' },
+  active: { label: '运行中', color: 'processing' },
+  pending: { label: '待授权', color: 'warning' },
+  error: { label: '需处理', color: 'error' },
+  disabled: { label: '已停用', color: 'default' },
+}
+
+const alertSeverity = {
+  critical: { label: '紧急', color: 'red' },
+  high: { label: '高', color: 'volcano' },
+  warning: { label: '中', color: 'gold' },
+  medium: { label: '中', color: 'gold' },
+  low: { label: '低', color: 'blue' },
+}
+
+function pickArray(payload, keys = []) {
+  if (Array.isArray(payload?.items)) return payload.items
+  for (const key of keys) if (Array.isArray(payload?.[key])) return payload[key]
+  return []
+}
+
+function readableError(error) {
+  const text = String(error?.message || '').trim()
+  return /[\u3400-\u9fff]/.test(text) ? text : '请求暂未完成，请稍后重试。'
+}
+
+function apiNotAvailable(error) {
+  const text = String(error?.message || '').toLowerCase()
+  return /(^|\D)(404|405|501)(\D|$)|not found|not implemented|未找到|未部署|路由不存在/.test(text)
+}
+
+function formatDate(value) {
+  if (!value) return '暂无时间'
+  const date = new Date(value)
+  return Number.isNaN(date.valueOf()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false })
+}
+
+function compactText(value, fallback = '暂无说明') {
+  const text = String(value || '').trim()
+  return text || fallback
+}
+
+function withCitations(content, citations) {
+  const labels = (Array.isArray(citations) ? citations : []).map((item) => {
+    if (typeof item === 'string') return item.trim()
+    const label = String(item?.title || item?.record_title || item?.source_name || item?.source || item?.record_id || '').trim()
+    const recordId = String(item?.id || '').trim()
+    return label ? (recordId ? `${label}（记录 ID：${recordId}）` : label) : (recordId ? `记录 ID：${recordId}` : '')
+  }).filter(Boolean).slice(0, 3)
+  return labels.length ? `${content}\n\n来源：${labels.join('、')}` : content
+}
+
+function answerFrom(payload) {
+  const candidate = payload?.reply ?? payload?.answer ?? payload?.content ?? payload?.assistant_message?.content ?? payload?.message?.content
+  const content = typeof candidate === 'string' && candidate.trim() ? candidate.trim() : '助手已收到请求，但当前没有可展示的结果。请检查已授权数据源后重试。'
+  return withCitations(content, payload?.assistant_message?.citations || payload?.citations)
+}
+
+function statusMeta(value, mapping, fallback = { label: '待确认', color: 'default' }) {
+  return mapping[String(value || '').toLowerCase()] || fallback
+}
+
+function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '' }) {
+  const { message } = AntApp.useApp()
+  const canManage = ['owner', 'admin'].includes(workspaceRole)
+  const canWrite = workspaceRole !== 'viewer'
+  const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
+  const [apiUnavailable, setApiUnavailable] = useState(false)
+  const [loadError, setLoadError] = useState('')
+  const [dashboard, setDashboard] = useState({})
+  const [sources, setSources] = useState([])
+  const [alerts, setAlerts] = useState([])
+  const [reports, setReports] = useState([])
+  const [weeklyReports, setWeeklyReports] = useState([])
+  const [knowledgeBases, setKnowledgeBases] = useState([])
+  const [chatMessages, setChatMessages] = useState([])
+  const [chatInput, setChatInput] = useState('')
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [historyNotice, setHistoryNotice] = useState('')
+  const [sending, setSending] = useState(false)
+  const [sourceOpen, setSourceOpen] = useState(false)
+  const [kbOpen, setKbOpen] = useState(false)
+  const [kbUploading, setKbUploading] = useState(false)
+  const [ingestCredential, setIngestCredential] = useState(null)
+  const [sourceForm] = Form.useForm()
+  const [kbForm] = Form.useForm()
+
+  const loadReport = useCallback(async ({ quiet = false } = {}) => {
+    if (quiet) setRefreshing(true)
+    else setLoading(true)
+    setLoadError('')
+    try {
+      const dashboardPayload = await apiFetch('/api/v1/report/dashboard')
+      const [sourcesPayload, alertsPayload, reportsPayload, weeklyReportsPayload, kbPayload] = await Promise.all([
+        apiFetch('/api/v1/report/data-sources'),
+        apiFetch('/api/v1/report/alerts'),
+        apiFetch('/api/v1/report/daily-reports'),
+        apiFetch('/api/v1/report/weekly-reports'),
+        apiFetch('/api/v1/report/knowledge-bases'),
+      ])
+      setDashboard(dashboardPayload || {})
+      setSources(pickArray(sourcesPayload, ['data_sources', 'sources']))
+      setAlerts(pickArray(alertsPayload, ['alerts']))
+      setReports(pickArray(reportsPayload, ['daily_reports', 'reports']))
+      setWeeklyReports(pickArray(weeklyReportsPayload, ['weekly_reports']))
+      setKnowledgeBases(pickArray(kbPayload, ['knowledge_bases']))
+      setApiUnavailable(false)
+    } catch (error) {
+      if (apiNotAvailable(error)) {
+        setApiUnavailable(true)
+        setLoadError('汇报智能体服务尚未部署或当前账号没有该模块权限。页面没有展示任何模拟数据。')
+      } else {
+        setLoadError(readableError(error))
+      }
+    } finally {
+      setLoading(false)
+      setRefreshing(false)
+    }
+  }, [])
+
+  useEffect(() => { loadReport() }, [loadReport])
+
+  useEffect(() => {
+    let current = true
+    setHistoryLoading(true)
+    setHistoryNotice('')
+    apiFetch('/api/v1/report/messages').then((payload) => {
+      if (!current) return
+      const history = pickArray(payload, ['messages']).map((item, index) => ({
+        key: item.id || `history-${index}`,
+        role: item.role === 'user' ? 'user' : 'assistant',
+        content: withCitations(compactText(item.content || item.text || item.message, '（空消息）'), item.citations),
+      }))
+      setChatMessages(history)
+    }).catch((error) => {
+      if (!current) return
+      setHistoryNotice(apiNotAvailable(error) ? '当前环境尚未启用历史消息接口；本次对话结果仍由服务端按权限处理。' : '暂时无法加载历史记录，请稍后重试。')
+    }).finally(() => {
+      if (current) setHistoryLoading(false)
+    })
+    return () => { current = false }
+  }, [])
+
+  const counts = {
+    sources: Number(dashboard?.source_count ?? dashboard?.data_source_count ?? sources.length ?? 0),
+    activeAlerts: Number(dashboard?.active_alert_count ?? dashboard?.alert_count ?? alerts.filter((item) => !['acknowledged', 'closed', 'resolved'].includes(String(item.status || '').toLowerCase())).length ?? 0),
+    reports: Number(dashboard?.report_count ?? dashboard?.daily_report_count ?? reports.length ?? 0),
+    weeklyReports: Number(dashboard?.weekly_report_count ?? weeklyReports.length ?? 0),
+    knowledgeBases: Number(dashboard?.knowledge_base_count ?? knowledgeBases.length ?? 0),
+  }
+
+  const sendQuestion = async (value) => {
+    const query = String(value || '').trim()
+    if (!query || sending) return
+    const userMessage = { key: `local-user-${Date.now()}`, role: 'user', content: query }
+    const assistantKey = `local-assistant-${Date.now()}`
+    setChatMessages((previous) => [...previous, userMessage, { key: assistantKey, role: 'assistant', content: '', loading: true }])
+    setChatInput('')
+    setSending(true)
+    try {
+      const payload = await apiFetch('/api/v1/report/chat', { method: 'POST', body: JSON.stringify({ message: query }) })
+      setChatMessages((previous) => previous.map((item) => item.key === assistantKey ? { ...item, content: answerFrom(payload), loading: false } : item))
+    } catch (error) {
+      const fallback = apiNotAvailable(error) ? '对话服务尚未部署，未发送或保存本次内容。' : readableError(error)
+      setChatMessages((previous) => previous.map((item) => item.key === assistantKey ? { ...item, content: fallback, loading: false, error: true } : item))
+      message.warning(fallback)
+    } finally {
+      setSending(false)
+    }
+  }
+
+  const createSource = async (values) => {
+    try {
+      const payload = await apiFetch('/api/v1/report/data-sources', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: values.name,
+          source_type: values.source_type,
+          connection_mode: values.connection_mode,
+          access_scope: values.access_scope,
+        }),
+      })
+      message.success('数据源已登记。请在管理端完成接口授权后再接入数据。')
+      setSourceOpen(false)
+      sourceForm.resetFields()
+      const ingestToken = payload?.ingest_token || payload?.token
+      if (ingestToken) setIngestCredential({
+        name: values.name,
+        url: payload?.ingest_url || payload?.source?.ingest_url || '',
+        token: ingestToken,
+      })
+      loadReport({ quiet: true })
+    } catch (error) {
+      message.error(readableError(error))
+    }
+  }
+
+  const createKnowledgeBase = async (values) => {
+    try {
+      await apiFetch('/api/v1/report/knowledge-bases', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: values.title,
+          description: values.description || '',
+          content: values.content || '',
+        }),
+      })
+      message.success('知识库文档已创建。')
+      setKbOpen(false)
+      kbForm.resetFields()
+      loadReport({ quiet: true })
+    } catch (error) {
+      message.error(readableError(error))
+    }
+  }
+
+  const uploadKnowledgeBase = async (file) => {
+    setKbUploading(true)
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+      const title = file.name.replace(/\.[^/.]+$/, '')
+      formData.append('title', title)
+      await apiFetch('/api/v1/report/knowledge-bases/upload', { method: 'POST', body: formData })
+      message.success('知识库文件已上传。')
+      loadReport({ quiet: true })
+    } catch (error) {
+      message.error(readableError(error))
+    } finally {
+      setKbUploading(false)
+    }
+    return false
+  }
+
+  const acknowledgeAlert = async (alert) => {
+    try {
+      await apiFetch(`/api/v1/report/alerts/${alert.id}/acknowledge`, { method: 'POST', body: JSON.stringify({}) })
+      message.success('预警已确认，处理记录已保留。')
+      loadReport({ quiet: true })
+    } catch (error) {
+      message.error(readableError(error))
+    }
+  }
+
+  const generateReport = async () => {
+    try {
+      await apiFetch('/api/v1/report/daily-reports/generate', { method: 'POST', body: JSON.stringify({}) })
+      message.success('生产日报已生成，请人工复核后再分发。')
+      loadReport({ quiet: true })
+    } catch (error) {
+      message.error(readableError(error))
+    }
+  }
+
+  const generateWeeklyReport = async () => {
+    try {
+      const today = new Date()
+      const weekStart = new Date(today)
+      weekStart.setDate(today.getDate() - today.getDay())
+      const weekEnd = new Date(weekStart)
+      weekEnd.setDate(weekStart.getDate() + 6)
+      await apiFetch('/api/v1/report/weekly-reports/generate', {
+        method: 'POST',
+        body: JSON.stringify({
+          week_start_date: weekStart.toISOString().split('T')[0],
+          week_end_date: weekEnd.toISOString().split('T')[0],
+        }),
+      })
+      message.success('周报已生成，请人工复核后再分发。')
+      loadReport({ quiet: true })
+    } catch (error) {
+      message.error(readableError(error))
+    }
+  }
+
+  const copyCredential = async (value, label) => {
+    if (!value) return
+    try {
+      await navigator.clipboard.writeText(value)
+      message.success(`${label}已复制，请存入受控密钥管理系统。`)
+    } catch {
+      message.warning(`无法自动复制${label}，请手动复制并妥善保管。`)
+    }
+  }
+
+  const sourceContent = apiUnavailable ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="汇报智能体服务尚未部署，未显示任何数据源。" /> : sources.length ? <List className="business-list" dataSource={sources.slice(0, 5)} renderItem={(source) => {
+    const status = statusMeta(source.status || (source.connected ? 'connected' : 'pending'), sourceStatus)
+    return <List.Item><List.Item.Meta avatar={<Avatar size="small" icon={<AppstoreOutlined />} />} title={<Space size={6} wrap><Text strong>{compactText(source.name, '未命名数据源')}</Text><Badge status={status.color} text={status.label} /></Space>} description={<span>{compactText(source.source_type || source.type, '待确认类型')} · {source.connection_mode || '受控接入'} · {source.last_sync_at ? `最近同步 ${formatDate(source.last_sync_at)}` : '尚未同步数据'} · 授权范围受服务端保护</span>} /></List.Item>
+  }} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未接入数据源。只接入已授权 API、导出或企业机器人，不采集个人微信聊天记录。" />
+
+  const alertContent = apiUnavailable ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="汇报智能体服务尚未部署，未显示任何预警数据。" /> : alerts.length ? <List className="business-list" dataSource={alerts.slice(0, 5)} renderItem={(alert) => {
+    const severity = statusMeta(alert.severity || alert.level, alertSeverity, { label: '待分级', color: 'default' })
+    const acknowledged = ['acknowledged', 'closed', 'resolved'].includes(String(alert.status || '').toLowerCase()) || Boolean(alert.acknowledged_at)
+    return <List.Item actions={!acknowledged && canWrite && alert.id ? [<Button key="ack" size="small" type="link" onClick={() => acknowledgeAlert(alert)}>确认处理</Button>] : []}><List.Item.Meta avatar={<Avatar size="small" className="business-alert-avatar" icon={<ClockCircleOutlined />} />} title={<Space size={6} wrap><Text strong>{compactText(alert.title, '待处理预警')}</Text><Tag color={severity.color}>{severity.label}</Tag>{acknowledged && <Tag color="success">已确认</Tag>}</Space>} description={<span>{compactText(alert.summary || alert.description)} · {formatDate(alert.created_at || alert.occurred_at)}</span>} /></List.Item>
+  }} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前没有可展示的预警。预警规则应在授权数据到达后由管理员配置。" />
+
+  const reportContent = apiUnavailable ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="汇报智能体服务尚未部署，未显示任何生产日报。" /> : reports.length ? <List className="business-list" dataSource={reports.slice(0, 4)} renderItem={(report) => <List.Item><List.Item.Meta avatar={<Avatar size="small" icon={<ProjectOutlined />} />} title={<Space size={6} wrap><Text strong>{compactText(report.title, '生产日报')}</Text><Tag color="blue">待复核</Tag></Space>} description={<span>{compactText(report.summary || report.content, '暂无日报摘要')} · {formatDate(report.report_date || report.created_at)}</span>} /></List.Item>} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未生成生产日报。日报只会汇总已授权且可追溯的数据。" />
+
+  const weeklyReportContent = apiUnavailable ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="汇报智能体服务尚未部署，未显示任何周报。" /> : weeklyReports.length ? <List className="business-list" dataSource={weeklyReports.slice(0, 4)} renderItem={(report) => <List.Item><List.Item.Meta avatar={<Avatar size="small" icon={<FileTextOutlined />} />} title={<Space size={6} wrap><Text strong>{compactText(report.title, '周报')}</Text><Tag color="blue">待复核</Tag></Space>} description={<span>{compactText(report.summary || report.content, '暂无周报摘要')} · {formatDate(report.week_start_date)}</span>} /></List.Item>} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未生成周报。" />
+
+  const kbContent = apiUnavailable ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="汇报智能体服务尚未部署，未显示任何知识库文档。" /> : knowledgeBases.length ? <List className="business-list" dataSource={knowledgeBases.slice(0, 5)} renderItem={(kb) => <List.Item><List.Item.Meta avatar={<Avatar size="small" icon={<BookOutlined />} />} title={<Space size={6} wrap><Text strong>{compactText(kb.title, '未命名文档')}</Text>{kb.file_name && <Tag color="purple">文件</Tag>}</Space>} description={<span>{compactText(kb.description, '暂无说明')} · {kb.file_name ? `${kb.file_name} · ` : ''}{formatDate(kb.created_at)}</span>} /></List.Item>} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未创建知识库文档。支持上传文件或手动创建文档。" />
+
+  const chatContent = historyLoading ? <div className="business-history-loading"><Spin size="small" />正在加载已保存的对话</div> : chatMessages.length ? <Bubble.List className="business-bubbles" autoScroll items={chatMessages.map((item) => ({ ...item, className: item.error ? 'business-error-bubble' : undefined }))} roles={{ assistant: { placement: 'start', avatar: { icon: <RobotOutlined />, className: 'assistant-avatar' }, variant: 'borderless', shape: 'corner' }, user: { placement: 'end', avatar: { icon: <UserOutlined /> }, variant: 'filled', shape: 'corner' } }} /> : <Welcome variant="borderless" icon={<Avatar size={48} className="business-assistant-avatar" icon={<RobotOutlined />} />} title="正在与汇报智能体协作" description="汇总已授权数据，生成日报、总结和风险预警。支持知识库、文件和接口的输入和对接。" />
+
+  return <div className="page-shell business-page">
+    <Flex justify="space-between" align="flex-start" wrap="wrap" gap={16} className="page-heading business-heading">
+      <div><Title level={2}>汇报智能体</Title><Text type="secondary">将已授权的业务数据汇总为预警、生产日报与总结报告；支持知识库、文件和接口的输入和对接。</Text></div>
+      <Space wrap><Tag color="blue">工作区隔离</Tag><Button onClick={() => loadReport({ quiet: true })} loading={refreshing}>刷新数据</Button></Space>
+    </Flex>
+
+    {loadError && <Alert className="business-load-alert" type={apiUnavailable ? 'info' : 'warning'} showIcon message={apiUnavailable ? '汇报智能体暂不可用' : '数据加载异常'} description={loadError} action={<Button size="small" onClick={() => loadReport()}>重新加载</Button>} />}
+
+    <Card className="business-isolation-card" bordered={false}>
+      <Flex gap={16} align="flex-start" wrap="wrap"><Avatar size={42} className="business-isolation-avatar" icon={<CheckCircleOutlined />} /><div className="business-isolation-copy"><Text strong>汇报智能体功能说明</Text><div className="business-isolation-points"><span>汇总已授权数据生成日报、周报和总结</span><span>支持知识库文档上传和管理</span><span>支持已授权 API、导出或企业机器人接入</span><span>所有关键操作留存来源与处理记录</span></div></div></Flex>
+    </Card>
+
+    <Spin spinning={loading} tip="正在读取已授权的经营数据">
+      <div className="business-stat-grid">
+        <Card bordered={false}><Statistic title="已登记数据源" value={apiUnavailable ? '—' : counts.sources} prefix={<AppstoreOutlined />} /><Text type="secondary">接口、导出或企业机器人</Text></Card>
+        <Card bordered={false}><Statistic title="待处理预警" value={apiUnavailable ? '—' : counts.activeAlerts} valueStyle={{ color: !apiUnavailable && counts.activeAlerts ? '#cf1322' : undefined }} prefix={<ClockCircleOutlined />} /><Text type="secondary">含生产、订单、设备与交期</Text></Card>
+        <Card bordered={false}><Statistic title="生产日报" value={apiUnavailable ? '—' : counts.reports} prefix={<ProjectOutlined />} /><Text type="secondary">生成后仍需人工复核</Text></Card>
+        <Card bordered={false}><Statistic title="知识库文档" value={apiUnavailable ? '—' : counts.knowledgeBases} prefix={<BookOutlined />} /><Text type="secondary">支持文件上传和手动创建</Text></Card>
+      </div>
+
+      <div className="business-workspace-grid">
+        <Card className="business-chat-card" title={<Space><MessageOutlined />汇报智能体</Space>} extra={<Tag color="blue">工作区成员</Tag>}>
+          <div className="business-chat-body">{chatContent}</div>
+          {historyNotice && <Text className="business-history-notice" type="secondary">{historyNotice}</Text>}
+          <Sender value={chatInput} onChange={setChatInput} onSubmit={(value) => sendQuestion(value || chatInput)} loading={sending} disabled={!canWrite || apiUnavailable || historyLoading} placeholder={!canWrite ? '只读成员不能发起对话' : apiUnavailable ? '汇报智能体服务尚未部署' : historyLoading ? '正在加载已保存的对话…' : '例如：今天有哪些生产异常和待跟进事项？'} autoSize={{ minRows: 1, maxRows: 4 }} />
+        </Card>
+      </div>
+
+      <div className="business-data-grid">
+        <Card className="business-data-card" title="业务数据源" extra={canManage && <Button size="small" icon={<PlusOutlined />} onClick={() => setSourceOpen(true)}>登记数据源</Button>}>{sourceContent}</Card>
+        <Card className="business-data-card" title="关键预警" extra={<Badge status={apiUnavailable ? 'default' : counts.activeAlerts ? 'error' : 'success'} text={apiUnavailable ? '服务未接入' : counts.activeAlerts ? '需关注' : '暂无待处理'} />}>{alertContent}</Card>
+        <Card className="business-data-card" title="生产日报" extra={canManage && <Space><Button size="small" onClick={generateReport}>生成日报</Button><Button size="small" onClick={generateWeeklyReport}>生成周报</Button></Space>}>{reportContent}</Card>
+        <Card className="business-data-card" title="知识库" extra={canWrite && <Space><Button size="small" icon={<PlusOutlined />} onClick={() => setKbOpen(true)}>创建文档</Button><Upload showUploadList={false} beforeUpload={uploadKnowledgeBase} disabled={kbUploading}><Button size="small" icon={<UploadOutlined />} loading={kbUploading}>上传文件</Button></Upload></Space>}>{kbContent}</Card>
+      </div>
+
+      {weeklyReports.length > 0 && <div className="business-data-grid" style={{ marginTop: 16 }}>
+        <Card className="business-data-card" title="周报" extra={<Tag color="blue">周期性总结</Tag>}>{weeklyReportContent}</Card>
+      </div>}
+    </Spin>
+
+    <Modal title="登记业务数据源" open={sourceOpen} onCancel={() => setSourceOpen(false)} onOk={() => sourceForm.submit()} okText="登记" cancelText="取消" destroyOnClose>
+      <Form form={sourceForm} layout="vertical" onFinish={createSource} initialValues={{ source_type: 'oa', connection_mode: 'api', access_scope: '按最小权限授权' }}>
+        <Alert type="info" showIcon message="仅接入已授权的数据" description="优先使用开放 API、系统导出、企业机器人或受控中间件；不建议抓取个人微信聊天记录或绕过登录权限。" />
+        <Form.Item name="name" label="数据源名称" rules={[{ required: true, min: 2, message: '请输入至少两个字的数据源名称' }]}><Input placeholder="例如：生产日报接口" /></Form.Item>
+        <Form.Item name="source_type" label="数据类型" rules={[{ required: true }]}><Select options={[{ value: 'oa', label: '公司 OA' }, { value: 'mini_program', label: '公司小程序' }, { value: 'production_report', label: '生产日报' }, { value: 'enterprise_robot', label: '企业机器人 / 群聊' }, { value: 'custom_api', label: '自有业务接口' }]} /></Form.Item>
+        <Form.Item name="connection_mode" label="接入方式" rules={[{ required: true }]}><Select options={[{ value: 'api', label: '开放 API' }, { value: 'export', label: '系统导出' }, { value: 'middleware', label: '受控中间件' }, { value: 'robot', label: '企业机器人' }]} /></Form.Item>
+        <Form.Item name="access_scope" label="授权范围" rules={[{ required: true, min: 2 }]}><Input placeholder="例如：只读生产日报与异常字段" /></Form.Item>
+      </Form>
+    </Modal>
+
+    <Modal title="创建知识库文档" open={kbOpen} onCancel={() => setKbOpen(false)} onOk={() => kbForm.submit()} okText="创建" cancelText="取消" destroyOnClose>
+      <Form form={kbForm} layout="vertical" onFinish={createKnowledgeBase}>
+        <Alert type="info" showIcon message="知识库文档" description="创建文档后，汇报智能体可以引用文档内容生成报告。支持上传文件或手动输入内容。" />
+        <Form.Item name="title" label="文档标题" rules={[{ required: true, min: 2, message: '请输入至少两个字的文档标题' }]}><Input placeholder="例如：生产流程规范" /></Form.Item>
+        <Form.Item name="description" label="文档说明"><Input placeholder="简要说明文档内容" /></Form.Item>
+        <Form.Item name="content" label="文档内容"><Input.TextArea rows={6} placeholder="输入文档内容，汇报智能体将引用此内容生成报告" /></Form.Item>
+      </Form>
+    </Modal>
+
+    <Modal title="保存数据源接入凭据" open={Boolean(ingestCredential)} onCancel={() => setIngestCredential(null)} footer={<Button type="primary" onClick={() => setIngestCredential(null)}>我已安全保存</Button>} destroyOnClose>
+      <Alert type="warning" showIcon message="接入令牌仅在本次页面中显示一次" description="请立即存入受控密钥管理系统。不要截图、不要写入 README 或文档、不要发送到群聊；关闭此窗口后无法再次查看明文令牌。" />
+      <Form layout="vertical" className="business-credential-form">
+        <Form.Item label="数据源"><Input value={ingestCredential?.name || ''} readOnly /></Form.Item>
+        <Form.Item label="接入地址"><Space.Compact style={{ width: '100%' }}><Input value={ingestCredential?.url || '服务端未返回接入地址'} readOnly /><Button onClick={() => copyCredential(ingestCredential?.url, '接入地址')} disabled={!ingestCredential?.url}>复制</Button></Space.Compact></Form.Item>
+        <Form.Item label="一次性接入令牌"><Space.Compact style={{ width: '100%' }}><Input.Password value={ingestCredential?.token || ''} readOnly visibilityToggle /><Button onClick={() => copyCredential(ingestCredential?.token, '接入令牌')}>复制</Button></Space.Compact></Form.Item>
+      </Form>
+    </Modal>
+  </div>
+}
+
+export default function ReportAssistantsPage(props) {
+  return <XProvider locale={zhCN}><ReportAssistantContent {...props} /></XProvider>
+}
