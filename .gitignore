@@ -18,10 +18,6 @@ env/
 *.swp
 *.swo
 
-# 数据库
-*.db
-*.sqlite3
-
 # 日志
 *.log
 
