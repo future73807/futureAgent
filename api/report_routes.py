@@ -16,7 +16,7 @@ from datetime import date, datetime, time, timezone
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status, UploadFile, File
+from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request, status, UploadFile, File
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
@@ -1060,7 +1060,7 @@ def create_knowledge_base(
 
 
 @router.post("/knowledge-bases/upload", status_code=status.HTTP_201_CREATED)
-def upload_knowledge_base_file(
+async def upload_knowledge_base_file(
     file: UploadFile = File(...),
     title: str = Form(default=""),
     description: str = Form(default=""),

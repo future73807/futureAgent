@@ -100,22 +100,25 @@ def _upgrade_schema() -> None:
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names())
     if "alembic_version" not in existing_tables:
-        if _matches_schema(inspector, set(SQLModel.metadata.tables)):
+        # Exclude both business and report agent tables when detecting legacy schemas,
+        # since these are new additions that didn't exist in earlier versions.
+        current_tables = set(SQLModel.metadata.tables)
+        non_agent_tables = current_tables - BUSINESS_AGENT_TABLES - REPORT_AGENT_TABLES
+        if _matches_schema(inspector, current_tables):
             # A controlled transition for installations that already include
             # every current model table. No DDL is needed; record the head.
             command.stamp(alembic_config, "head")
             return
-        pre_business_tables = set(SQLModel.metadata.tables) - BUSINESS_AGENT_TABLES
         if _matches_schema(
             inspector,
-            pre_business_tables,
+            non_agent_tables,
             ignored_columns=PRE_BUSINESS_MISSING_COLUMNS,
         ):
             # The immediately preceding commercial schema has all governed
             # AgentRun columns but not the operating-agent tables.
             command.stamp(alembic_config, "20260725_02")
         else:
-            legacy_tables = pre_business_tables - {"agent_runs"}
+            legacy_tables = non_agent_tables - {"agent_runs"}
             if _matches_schema(
                 inspector,
                 legacy_tables,
