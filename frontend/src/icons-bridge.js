@@ -22,4 +22,7 @@ export { default as SendOutlined } from '@ant-design/icons/es/icons/SendOutlined
 export { default as SettingOutlined } from '@ant-design/icons/es/icons/SettingOutlined'
 export { default as StopOutlined } from '@ant-design/icons/es/icons/StopOutlined'
 export { default as TeamOutlined } from '@ant-design/icons/es/icons/TeamOutlined'
+export { default as BookOutlined } from '@ant-design/icons/es/icons/BookOutlined'
+export { default as FileTextOutlined } from '@ant-design/icons/es/icons/FileTextOutlined'
+export { default as UploadOutlined } from '@ant-design/icons/es/icons/UploadOutlined'
 export { default as UserOutlined } from '@ant-design/icons/es/icons/UserOutlined'
