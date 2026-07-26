@@ -3,7 +3,6 @@ import AntApp from 'antd/es/app'
 import Alert from 'antd/es/alert'
 import Avatar from 'antd/es/avatar'
 import Button from 'antd/es/button'
-import Card from 'antd/es/card'
 import Empty from 'antd/es/empty'
 import Flex from 'antd/es/flex'
 import Form from 'antd/es/form'
@@ -20,7 +19,6 @@ import {
   BookOutlined,
   CheckCircleOutlined,
   ClockCircleOutlined,
-  FileTextOutlined,
   MessageOutlined,
   PlusOutlined,
   ProjectOutlined,
@@ -34,26 +32,11 @@ import Welcome from '@ant-design/x/es/welcome'
 import XProvider from '@ant-design/x/es/x-provider'
 import Suggestion from '@ant-design/x/es/suggestion'
 import Conversations from '@ant-design/x/es/conversations'
+import Prompts from '@ant-design/x/es/prompts'
 import zhCN from 'antd/es/locale/zh_CN'
 import { apiFetch } from '../api.js'
 
 const { Title, Text, Paragraph } = Typography
-
-const sourceStatus = {
-  connected: { label: '已连接', color: 'success' },
-  active: { label: '运行中', color: 'processing' },
-  pending: { label: '待授权', color: 'warning' },
-  error: { label: '需处理', color: 'error' },
-  disabled: { label: '已停用', color: 'default' },
-}
-
-const alertSeverity = {
-  critical: { label: '紧急', color: 'red' },
-  high: { label: '高', color: 'volcano' },
-  warning: { label: '中', color: 'gold' },
-  medium: { label: '中', color: 'gold' },
-  low: { label: '低', color: 'blue' },
-}
 
 function pickArray(payload, keys = []) {
   if (Array.isArray(payload?.items)) return payload.items
@@ -96,10 +79,6 @@ function answerFrom(payload) {
   const candidate = payload?.reply ?? payload?.answer ?? payload?.content ?? payload?.assistant_message?.content ?? payload?.message?.content
   const content = typeof candidate === 'string' && candidate.trim() ? candidate.trim() : '助手已收到请求，但当前没有可展示的结果。请检查已授权数据源后重试。'
   return withCitations(content, payload?.assistant_message?.citations || payload?.citations)
-}
-
-function statusMeta(value, mapping, fallback = { label: '待确认', color: 'default' }) {
-  return mapping[String(value || '').toLowerCase()] || fallback
 }
 
 const suggestionItems = [
@@ -282,16 +261,6 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
     return false
   }
 
-  const acknowledgeAlert = async (alert) => {
-    try {
-      await apiFetch(`/api/v1/report/alerts/${alert.id}/acknowledge`, { method: 'POST', body: JSON.stringify({}) })
-      message.success('预警已确认，处理记录已保留。')
-      loadReport({ quiet: true })
-    } catch (error) {
-      message.error(readableError(error))
-    }
-  }
-
   const generateReport = async () => {
     try {
       await apiFetch('/api/v1/report/daily-reports/generate', { method: 'POST', body: JSON.stringify({}) })
@@ -343,77 +312,46 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
     sendQuestion(messages[item.key] || item.label)
   }
 
-  const sourceContent = apiUnavailable ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="汇报智能体服务尚未部署，未显示任何数据源。" /> : sources.length ? (
-    <Conversations
-      items={sources.slice(0, 5).map((source) => ({
-        key: source.id,
-        label: compactText(source.name, '未命名数据源'),
-        description: `${source.source_type} · ${source.connection_mode} · ${source.record_count || 0} 条记录`,
-        icon: <Avatar size="small" icon={<AppstoreOutlined />} />,
-      }))}
-    />
-  ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未接入数据源。只接入已授权 API、导出或企业机器人，不采集个人微信聊天记录。" />
+  const sourceItems = sources.slice(0, 5).map((source) => ({
+    key: source.id,
+    label: compactText(source.name, '未命名数据源'),
+    description: `${source.source_type} · ${source.connection_mode} · ${source.record_count || 0} 条记录`,
+    icon: <Avatar size="small" icon={<AppstoreOutlined />} />,
+  }))
 
-  const alertContent = apiUnavailable ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="汇报智能体服务尚未部署，未显示任何预警数据。" /> : alerts.length ? (
-    <Conversations
-      items={alerts.slice(0, 5).map((alert) => ({
-        key: alert.id,
-        label: compactText(alert.title, '待处理预警'),
-        description: `${alert.level} · ${formatDate(alert.created_at)}`,
-        icon: <Avatar size="small" icon={<ClockCircleOutlined />} />,
-      }))}
-    />
-  ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前没有可展示的预警。" />
+  const alertItems = alerts.slice(0, 5).map((alert) => ({
+    key: alert.id,
+    label: compactText(alert.title, '待处理预警'),
+    description: `${alert.level} · ${formatDate(alert.created_at)}`,
+    icon: <Avatar size="small" icon={<ClockCircleOutlined />} />,
+  }))
 
-  const reportContent = apiUnavailable ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="汇报智能体服务尚未部署，未显示任何生产日报。" /> : reports.length ? (
-    <Conversations
-      items={reports.slice(0, 4).map((report) => ({
-        key: report.id,
-        label: compactText(report.title, '生产日报'),
-        description: formatDate(report.report_date || report.created_at),
-        icon: <Avatar size="small" icon={<ProjectOutlined />} />,
-      }))}
-    />
-  ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未生成生产日报。日报只会汇总已授权且可追溯的数据。" />
+  const reportItems = reports.slice(0, 4).map((report) => ({
+    key: report.id,
+    label: compactText(report.title, '生产日报'),
+    description: formatDate(report.report_date || report.created_at),
+    icon: <Avatar size="small" icon={<ProjectOutlined />} />,
+  }))
 
-  const kbContent = apiUnavailable ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="汇报智能体服务尚未部署，未显示任何知识库文档。" /> : knowledgeBases.length ? (
-    <Conversations
-      items={knowledgeBases.slice(0, 5).map((kb) => ({
-        key: kb.id,
-        label: compactText(kb.title, '未命名文档'),
-        description: `${kb.file_name ? '文件 · ' : ''}${formatDate(kb.created_at)}`,
-        icon: <Avatar size="small" icon={<BookOutlined />} />,
-      }))}
-    />
-  ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未创建知识库文档。支持上传文件或手动创建文档。" />
+  const kbItems = knowledgeBases.slice(0, 5).map((kb) => ({
+    key: kb.id,
+    label: compactText(kb.title, '未命名文档'),
+    description: `${kb.file_name ? '文件 · ' : ''}${formatDate(kb.created_at)}`,
+    icon: <Avatar size="small" icon={<BookOutlined />} />,
+  }))
 
-  const chatContent = historyLoading ? (
-    <div className="business-history-loading"><Spin size="small" />正在加载已保存的对话</div>
-  ) : chatMessages.length ? (
-    <Bubble.List
-      className="business-bubbles"
-      autoScroll
-      items={chatMessages.map((item) => ({
-        ...item,
-        className: item.error ? 'business-error-bubble' : undefined,
-        avatar: item.role === 'user' ? { icon: <UserOutlined /> } : { icon: <RobotOutlined />, className: 'assistant-avatar' },
-        placement: item.role === 'user' ? 'end' : 'start',
-        variant: item.role === 'user' ? 'filled' : 'borderless',
-        shape: 'corner',
-      }))}
-    />
-  ) : (
-    <Welcome
-      variant="borderless"
-      icon={<Avatar size={48} className="business-assistant-avatar" icon={<RobotOutlined />} />}
-      title="正在与汇报智能体协作"
-      description="汇总已授权数据，生成日报、总结和风险预警。支持知识库、文件和接口的输入和对接。"
-    />
-  )
+  const chatBubbleItems = chatMessages.map((item) => ({
+    ...item,
+    className: item.error ? 'business-error-bubble' : undefined,
+    avatar: item.role === 'user' ? { icon: <UserOutlined /> } : { icon: <RobotOutlined />, className: 'assistant-avatar' },
+    placement: item.role === 'user' ? 'end' : 'start',
+    variant: item.role === 'user' ? 'filled' : 'borderless',
+    shape: 'corner',
+  }))
 
   return (
-    <div className="page-shell business-page">
-      <Flex justify="space-between" align="flex-start" wrap="wrap" gap={16} className="page-heading business-heading">
+    <div className="page-shell report-page">
+      <Flex justify="space-between" align="flex-start" wrap="wrap" gap={16} className="page-heading">
         <div>
           <Title level={2}>汇报智能体</Title>
           <Text type="secondary">将已授权的业务数据汇总为预警、生产日报与总结报告；支持知识库、文件和接口的输入和对接。</Text>
@@ -435,87 +373,123 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
         />
       )}
 
-      <Card className="business-isolation-card" bordered={false}>
-        <Flex gap={16} align="flex-start" wrap="wrap">
-          <Avatar size={42} className="business-isolation-avatar" icon={<CheckCircleOutlined />} />
-          <div className="business-isolation-copy">
-            <Text strong>汇报智能体功能说明</Text>
-            <div className="business-isolation-points">
-              <span>汇总已授权数据生成日报、周报和总结</span>
-              <span>支持知识库文档上传和管理</span>
-              <span>支持已授权 API、导出或企业机器人接入</span>
-              <span>所有关键操作留存来源与处理记录</span>
+      <Spin spinning={loading} tip="正在读取已授权的经营数据">
+        <div className="report-layout">
+          {/* 左侧：对话区域 */}
+          <div className="report-chat-section">
+            <div className="report-chat-header">
+              <Space><MessageOutlined /><Text strong>汇报智能体</Text></Space>
+              <Tag color="blue">工作区成员</Tag>
+            </div>
+            <div className="report-chat-body">
+              {historyLoading ? (
+                <div className="business-history-loading"><Spin size="small" />正在加载已保存的对话</div>
+              ) : chatBubbleItems.length ? (
+                <Bubble.List className="business-bubbles" autoScroll items={chatBubbleItems} />
+              ) : (
+                <Welcome
+                  variant="borderless"
+                  icon={<Avatar size={48} icon={<RobotOutlined />} />}
+                  title="正在与汇报智能体协作"
+                  description="汇总已授权数据，生成日报、总结和风险预警。支持知识库、文件和接口的输入和对接。"
+                />
+              )}
+              {historyNotice && <Text className="business-history-notice" type="secondary">{historyNotice}</Text>}
+            </div>
+            <div className="report-chat-input">
+              <Suggestion items={suggestionItems} onItemClick={handleSuggestionClick} />
+              <Sender
+                value={chatInput}
+                onChange={setChatInput}
+                onSubmit={(value) => sendQuestion(value || chatInput)}
+                loading={sending}
+                disabled={!canWrite || apiUnavailable || historyLoading}
+                placeholder={!canWrite ? '只读成员不能发起对话' : apiUnavailable ? '汇报智能体服务尚未部署' : historyLoading ? '正在加载已保存的对话…' : '例如：今天有哪些生产异常和待跟进事项？'}
+                autoSize={{ minRows: 1, maxRows: 4 }}
+              />
             </div>
           </div>
-        </Flex>
-      </Card>
 
-      <Spin spinning={loading} tip="正在读取已授权的经营数据">
-        <div className="business-stat-grid">
-          <Card bordered={false}>
-            <div className="stat-card">
-              <AppstoreOutlined className="stat-icon" />
-              <div className="stat-content">
-                <div className="stat-value">{apiUnavailable ? '—' : counts.sources}</div>
-                <div className="stat-label">已登记数据源</div>
+          {/* 右侧：数据面板 */}
+          <div className="report-side-panel">
+            {/* 统计卡片 */}
+            <div className="report-stats">
+              <div className="stat-item">
+                <div className="stat-icon-wrap"><AppstoreOutlined /></div>
+                <div className="stat-info">
+                  <div className="stat-number">{apiUnavailable ? '—' : counts.sources}</div>
+                  <div className="stat-label">已登记数据源</div>
+                </div>
+              </div>
+              <div className="stat-item">
+                <div className="stat-icon-wrap"><ClockCircleOutlined /></div>
+                <div className="stat-info">
+                  <div className="stat-number" style={{ color: !apiUnavailable && counts.activeAlerts ? '#cf1322' : undefined }}>{apiUnavailable ? '—' : counts.activeAlerts}</div>
+                  <div className="stat-label">待处理预警</div>
+                </div>
+              </div>
+              <div className="stat-item">
+                <div className="stat-icon-wrap"><ProjectOutlined /></div>
+                <div className="stat-info">
+                  <div className="stat-number">{apiUnavailable ? '—' : counts.reports}</div>
+                  <div className="stat-label">生产日报</div>
+                </div>
+              </div>
+              <div className="stat-item">
+                <div className="stat-icon-wrap"><BookOutlined /></div>
+                <div className="stat-info">
+                  <div className="stat-number">{apiUnavailable ? '—' : counts.knowledgeBases}</div>
+                  <div className="stat-label">知识库文档</div>
+                </div>
               </div>
             </div>
-            <Text type="secondary">接口、导出或企业机器人</Text>
-          </Card>
-          <Card bordered={false}>
-            <div className="stat-card">
-              <ClockCircleOutlined className="stat-icon" />
-              <div className="stat-content">
-                <div className="stat-value" style={{ color: !apiUnavailable && counts.activeAlerts ? '#cf1322' : undefined }}>{apiUnavailable ? '—' : counts.activeAlerts}</div>
-                <div className="stat-label">待处理预警</div>
-              </div>
-            </div>
-            <Text type="secondary">含生产、订单、设备与交期</Text>
-          </Card>
-          <Card bordered={false}>
-            <div className="stat-card">
-              <ProjectOutlined className="stat-icon" />
-              <div className="stat-content">
-                <div className="stat-value">{apiUnavailable ? '—' : counts.reports}</div>
-                <div className="stat-label">生产日报</div>
-              </div>
-            </div>
-            <Text type="secondary">生成后仍需人工复核</Text>
-          </Card>
-          <Card bordered={false}>
-            <div className="stat-card">
-              <BookOutlined className="stat-icon" />
-              <div className="stat-content">
-                <div className="stat-value">{apiUnavailable ? '—' : counts.knowledgeBases}</div>
-                <div className="stat-label">知识库文档</div>
-              </div>
-            </div>
-            <Text type="secondary">支持文件上传和手动创建</Text>
-          </Card>
-        </div>
 
-        <div className="business-workspace-grid">
-          <Card className="business-chat-card" title={<Space><MessageOutlined />汇报智能体</Space>} extra={<Tag color="blue">工作区成员</Tag>}>
-            <div className="business-chat-body">{chatContent}</div>
-            {historyNotice && <Text className="business-history-notice" type="secondary">{historyNotice}</Text>}
-            <Suggestion items={suggestionItems} onItemClick={handleSuggestionClick} />
-            <Sender
-              value={chatInput}
-              onChange={setChatInput}
-              onSubmit={(value) => sendQuestion(value || chatInput)}
-              loading={sending}
-              disabled={!canWrite || apiUnavailable || historyLoading}
-              placeholder={!canWrite ? '只读成员不能发起对话' : apiUnavailable ? '汇报智能体服务尚未部署' : historyLoading ? '正在加载已保存的对话…' : '例如：今天有哪些生产异常和待跟进事项？'}
-              autoSize={{ minRows: 1, maxRows: 4 }}
-            />
-          </Card>
-        </div>
+            {/* 业务数据源 */}
+            <div className="report-panel-section">
+              <div className="report-panel-header">
+                <Text strong>业务数据源</Text>
+                {canManage && <Button size="small" icon={<PlusOutlined />} onClick={() => setSourceOpen(true)}>登记</Button>}
+              </div>
+              {apiUnavailable ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="服务未部署" /> : sourceItems.length ? (
+                <Conversations items={sourceItems} />
+              ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未接入数据源" />}
+            </div>
 
-        <div className="business-data-grid">
-          <Card className="business-data-card" title="业务数据源" extra={canManage && <Button size="small" icon={<PlusOutlined />} onClick={() => setSourceOpen(true)}>登记数据源</Button>}>{sourceContent}</Card>
-          <Card className="business-data-card" title="关键预警" extra={<Tag color={apiUnavailable ? 'default' : counts.activeAlerts ? 'error' : 'success'}>{apiUnavailable ? '服务未接入' : counts.activeAlerts ? '需关注' : '暂无待处理'}</Tag>}>{alertContent}</Card>
-          <Card className="business-data-card" title="生产日报" extra={canManage && <Space><Button size="small" onClick={generateReport}>生成日报</Button><Button size="small" onClick={generateWeeklyReport}>生成周报</Button></Space>}>{reportContent}</Card>
-          <Card className="business-data-card" title="知识库" extra={canWrite && <Space><Button size="small" icon={<PlusOutlined />} onClick={() => setKbOpen(true)}>创建文档</Button><Upload showUploadList={false} beforeUpload={uploadKnowledgeBase} disabled={kbUploading}><Button size="small" icon={<UploadOutlined />} loading={kbUploading}>上传文件</Button></Upload></Space>}>{kbContent}</Card>
+            {/* 关键预警 */}
+            <div className="report-panel-section">
+              <div className="report-panel-header">
+                <Text strong>关键预警</Text>
+                <Tag color={apiUnavailable ? 'default' : counts.activeAlerts ? 'error' : 'success'}>
+                  {apiUnavailable ? '未接入' : counts.activeAlerts ? '需关注' : '暂无'}
+                </Tag>
+              </div>
+              {apiUnavailable ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="服务未部署" /> : alertItems.length ? (
+                <Conversations items={alertItems} />
+              ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前没有可展示的预警" />}
+            </div>
+
+            {/* 生产日报 */}
+            <div className="report-panel-section">
+              <div className="report-panel-header">
+                <Text strong>生产日报</Text>
+                {canManage && <Space><Button size="small" onClick={generateReport}>日报</Button><Button size="small" onClick={generateWeeklyReport}>周报</Button></Space>}
+              </div>
+              {apiUnavailable ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="服务未部署" /> : reportItems.length ? (
+                <Conversations items={reportItems} />
+              ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未生成生产日报" />}
+            </div>
+
+            {/* 知识库 */}
+            <div className="report-panel-section">
+              <div className="report-panel-header">
+                <Text strong>知识库</Text>
+                {canWrite && <Space><Button size="small" icon={<PlusOutlined />} onClick={() => setKbOpen(true)}>创建</Button><Upload showUploadList={false} beforeUpload={uploadKnowledgeBase} disabled={kbUploading}><Button size="small" icon={<UploadOutlined />} loading={kbUploading}>上传</Button></Upload></Space>}
+              </div>
+              {apiUnavailable ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="服务未部署" /> : kbItems.length ? (
+                <Conversations items={kbItems} />
+              ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未创建知识库文档" />}
+            </div>
+          </div>
         </div>
       </Spin>
 
