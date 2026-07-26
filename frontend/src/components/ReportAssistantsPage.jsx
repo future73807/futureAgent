@@ -19,6 +19,7 @@ import {
   BookOutlined,
   CheckCircleOutlined,
   ClockCircleOutlined,
+  FileTextOutlined,
   MessageOutlined,
   PlusOutlined,
   ProjectOutlined,
@@ -30,7 +31,6 @@ import Bubble from '@ant-design/x/es/bubble'
 import Sender from '@ant-design/x/es/sender'
 import Welcome from '@ant-design/x/es/welcome'
 import XProvider from '@ant-design/x/es/x-provider'
-import Suggestion from '@ant-design/x/es/suggestion'
 import Conversations from '@ant-design/x/es/conversations'
 import Prompts from '@ant-design/x/es/prompts'
 import zhCN from 'antd/es/locale/zh_CN'
@@ -81,11 +81,11 @@ function answerFrom(payload) {
   return withCitations(content, payload?.assistant_message?.citations || payload?.citations)
 }
 
-const suggestionItems = [
-  { key: 'daily', label: '今日生产情况', description: '查询今天的生产数据和异常' },
-  { key: 'weekly', label: '本周总结', description: '生成本周生产总结报告' },
-  { key: 'alert', label: '风险预警', description: '查看当前待处理预警' },
-  { key: 'source', label: '数据源管理', description: '管理已授权的数据源' },
+const quickActions = [
+  { key: 'daily', label: '今日生产情况', icon: <ProjectOutlined /> },
+  { key: 'weekly', label: '本周总结', icon: <FileTextOutlined /> },
+  { key: 'alert', label: '风险预警', icon: <ClockCircleOutlined /> },
+  { key: 'source', label: '数据源管理', icon: <AppstoreOutlined /> },
 ]
 
 function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '' }) {
@@ -302,7 +302,7 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
     }
   }
 
-  const handleSuggestionClick = (item) => {
+  const handleQuickAction = (item) => {
     const messages = {
       daily: '今天有哪些生产数据和异常情况？',
       weekly: '生成本周生产总结报告',
@@ -397,7 +397,13 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
               {historyNotice && <Text className="business-history-notice" type="secondary">{historyNotice}</Text>}
             </div>
             <div className="report-chat-input">
-              <Suggestion items={suggestionItems} onItemClick={handleSuggestionClick} />
+              <div className="quick-actions">
+                {quickActions.map((action) => (
+                  <Button key={action.key} size="small" icon={action.icon} onClick={() => handleQuickAction(action)}>
+                    {action.label}
+                  </Button>
+                ))}
+              </div>
               <Sender
                 value={chatInput}
                 onChange={setChatInput}

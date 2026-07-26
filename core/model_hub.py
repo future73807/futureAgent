@@ -19,7 +19,7 @@ except ImportError:
 class ModelHub:
     """
     利用 LiteLLM 统一了不同模型的调用方式
-    model_id 例如: "gpt-4o", "claude-3-5-sonnet", "ollama/llama3"
+    model_id 例如: "gpt-4o", "claude-3-5-sonnet", "ollama/llama3", "LongCat-2.0"
     """
 
     def __init__(self):
@@ -40,20 +40,64 @@ class ModelHub:
         temperature: float = 0.7,
         stream: bool = False,
     ):
-        """LiteLLM 统一调用接口"""
+        """统一调用接口 - 优先使用 LiteLLM，否则用 langchain-openai"""
+        provider_kwargs = self._provider_kwargs(model_id)
+        
+        # 如果没有 LiteLLM，使用 langchain-openai 作为后备
         if not LITELLM_AVAILABLE:
-            raise ImportError("未安装 LiteLLM，请先安装 API 依赖。")
+            from langchain_openai import ChatOpenAI
+            from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+            
+            llm = ChatOpenAI(
+                model=model_id,
+                temperature=temperature,
+                streaming=stream,
+                api_key=provider_kwargs.get("api_key"),
+                base_url=provider_kwargs.get("api_base"),
+            )
+            
+            lc_messages = []
+            for msg in messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role == "user":
+                    lc_messages.append(HumanMessage(content=content))
+                elif role == "assistant":
+                    lc_messages.append(AIMessage(content=content))
+                elif role == "system":
+                    lc_messages.append(SystemMessage(content=content))
+            
+            if stream:
+                async def stream_gen():
+                    try:
+                        async for chunk in llm.astream(lc_messages):
+                            class FakeChoice:
+                                def __init__(self, content):
+                                    self.delta = type('Delta', (), {'content': content})()
+                            yield type('Response', (), {'choices': [FakeChoice(chunk.content)]})()
+                    except Exception as e:
+                        class FakeChoice:
+                            def __init__(self, content):
+                                self.delta = type('Delta', (), {'content': content})()
+                        yield type('Response', (), {'choices': [FakeChoice(f"[Error: {str(e)}]")]})()
+                return stream_gen()
+            else:
+                response = await llm.ainvoke(lc_messages)
+                class FakeChoice:
+                    def __init__(self, content):
+                        self.delta = type('Delta', (), {'content': content})()
+                return type('Response', (), {'choices': [FakeChoice(response.content)]})()
+        
+        # 有 LiteLLM 时使用 LiteLLM
         request_model = model_id
         if settings.litellm_proxy_url:
-            # LiteLLM Proxy 暴露 OpenAI 兼容接口；openai/ 前缀让本地 LiteLLM
-            # 客户端把模型名原样交给 Proxy，由后台配置决定真实提供商。
             request_model = f"openai/{model_id}"
             kwargs = {
                 "api_base": self._proxy_base_url(),
                 "api_key": settings.litellm_master_key,
             }
         else:
-            kwargs = self._provider_kwargs(model_id)
+            kwargs = provider_kwargs
         response = await acompletion(
             model=request_model,
             messages=messages,
@@ -103,7 +147,7 @@ class ModelHub:
                 model=model,
                 temperature=temperature,
                 streaming=streaming,
-                api_key=settings.openai_api_key,
+                api_key=provider_kwargs.get("api_key", settings.openai_api_key),
                 base_url=provider_kwargs.pop("api_base", settings.openai_base_url),
                 **provider_kwargs,
             )
@@ -115,10 +159,13 @@ class ModelHub:
 
     @staticmethod
     def _provider_kwargs(model_id: str) -> dict:
-        if model_id.startswith("ollama/"):
+        model_lower = model_id.lower()
+        if model_lower.startswith("ollama/"):
             return {"api_base": settings.ollama_base_url}
-        if model_id.startswith(("gpt-", "openai/")) and settings.openai_base_url:
+        if model_lower.startswith(("gpt-", "openai/")) and settings.openai_base_url:
             return {"api_base": settings.openai_base_url}
+        if model_lower.startswith("longcat") and settings.longcat_api_key:
+            return {"api_base": settings.longcat_api_base, "api_key": settings.longcat_api_key}
         return {}
 
     @staticmethod
@@ -147,14 +194,17 @@ class ModelHub:
     @classmethod
     def is_direct_provider_configured(cls, model_id: str) -> bool:
         """Return whether the API itself has a usable direct provider route."""
-        if model_id.startswith(("gpt-", "openai/")):
+        model_lower = model_id.lower()
+        if model_lower.startswith(("gpt-", "openai/")):
             return cls._is_usable_credential(settings.openai_api_key)
-        if model_id.startswith("claude"):
+        if model_lower.startswith("claude"):
             return cls._is_usable_credential(settings.anthropic_api_key)
-        if model_id.startswith(("gemini/", "gemini-")):
+        if model_lower.startswith(("gemini/", "gemini-")):
             return cls._is_usable_credential(settings.google_api_key)
-        if model_id.startswith("ollama/"):
+        if model_lower.startswith("ollama/"):
             return bool(settings.ollama_base_url.strip())
+        if model_lower.startswith("longcat"):
+            return cls._is_usable_credential(settings.longcat_api_key)
         return False
 
     @classmethod
@@ -188,6 +238,9 @@ class ModelHub:
         if settings.litellm_proxy_url.strip():
             return None
         if not LITELLM_AVAILABLE:
+            # 没有 LiteLLM 时，如果有直接供应商凭据，也允许通过
+            if ModelHub.is_direct_provider_configured(model_id):
+                return None
             return "未安装 LiteLLM，请先安装 API 依赖后再使用 AI 对话。"
         if not ModelHub.is_model_configured(model_id):
             return f"模型“{model_id}”尚未配置。请添加供应商凭据或配置 LiteLLM 内部网关。"

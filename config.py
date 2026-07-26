@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     google_api_key: str = ""
     ollama_base_url: str = "http://localhost:11434"
+    longcat_api_key: str = ""
+    longcat_api_base: str = "https://api.longcat.chat/openai"
 
     # ===== LiteLLM Proxy =====
     litellm_proxy_url: str = ""

@@ -1698,7 +1698,9 @@ async def chat_completions(
             session.commit()
             yield {"event": "done", "data": "{}"}
         except Exception as exc:
-            assistant_message.content = "".join(collected) or "[AI request did not complete]"
+            import traceback
+            traceback.print_exc()
+            assistant_message.content = "".join(collected) or f"[AI request did not complete: {str(exc)}]"
             session.add(assistant_message)
             session.commit()
             yield _sse_error(exc)
