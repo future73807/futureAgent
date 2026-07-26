@@ -449,7 +449,7 @@ def _write_report_audit(
     )
 
 
-def _ensure_report_bootstrap(session: Session, workspace_id: str) -> bool:
+def _ensure_report_bootstrap(session: Session, workspace_id: str, owner_user_id: str) -> bool:
     """供应透明默认值，不伪造任何业务数据。"""
     changed = False
     existing = session.exec(
@@ -461,7 +461,7 @@ def _ensure_report_bootstrap(session: Session, workspace_id: str) -> bool:
                 workspace_id=workspace_id,
                 name="汇报智能体",
                 description="汇总已授权数据，生成日报、总结和风险预警。",
-                created_by="system",
+                created_by=owner_user_id,
             )
         )
         changed = True
@@ -487,7 +487,7 @@ def _ensure_report_bootstrap(session: Session, workspace_id: str) -> bool:
                     name=name,
                     keywords_json=json.dumps(keywords, ensure_ascii=False),
                     severity=severity,
-                    created_by="system",
+                    created_by=owner_user_id,
                 )
             )
             changed = True
@@ -668,7 +668,7 @@ def report_dashboard(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     workspace_id = context.workspace.id
-    if _ensure_report_bootstrap(session, workspace_id):
+    if _ensure_report_bootstrap(session, workspace_id, context.user.id):
         session.commit()
 
     sources = session.exec(
@@ -1154,7 +1154,7 @@ def list_report_alert_rules(
     context: WorkspaceContext = Depends(get_workspace_context),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    if _ensure_report_bootstrap(session, context.workspace.id):
+    if _ensure_report_bootstrap(session, context.workspace.id, context.user.id):
         session.commit()
     rules = session.exec(
         select(ReportAlertRule)
