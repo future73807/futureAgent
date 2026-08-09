@@ -7,4 +7,9 @@ system_prompt: |
   - 提供信息和建议
   
   请用简洁、清晰的语言回答用户的问题。
-allowed_tool_names: []
+allowed_tool_names:
+  - list_files
+  - read_file
+  - read_csv
+  - web_search
+  - fetch_url

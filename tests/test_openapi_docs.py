@@ -94,7 +94,9 @@ class ChineseOpenApiDocumentationTests(unittest.TestCase):
         for path in schema["paths"]:
             self.assertIn(path.encode(), catalog.body)
 
-        public_route_paths = {route.path for route in app.routes}
+        public_route_paths = {
+            route.path for route in app.routes if hasattr(route, "path")
+        }
         self.assertTrue({"/docs", "/redoc"}.issubset(public_route_paths))
         self.assertNotIn("/docs/oauth2-redirect", public_route_paths)
 

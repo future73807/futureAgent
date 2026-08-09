@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from logging.config import fileConfig
 
 from alembic import context
@@ -9,6 +10,12 @@ from sqlmodel import SQLModel
 
 
 config = context.config
+# Keep direct Alembic CLI commands aligned with the database used by the API
+# container. Programmatic callers can still set ``sqlalchemy.url`` explicitly
+# when no DATABASE_URL is present (for example, isolated migration tests).
+database_url = os.getenv("DATABASE_URL", "").strip()
+if database_url:
+    config.set_main_option("sqlalchemy.url", database_url)
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 

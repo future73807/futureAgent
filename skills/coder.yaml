@@ -10,5 +10,9 @@ system_prompt: |
   请提供清晰、可运行的代码示例。
 allowed_tool_names:
   - run_python
+  - list_files
   - read_file
   - write_file
+  - edit_file
+  - web_search
+  - fetch_url

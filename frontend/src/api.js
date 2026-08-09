@@ -24,14 +24,58 @@ export function clearAuthSession() {
   sessionStorage.removeItem(WORKSPACE_KEY)
 }
 
+const fieldLabels = {
+  display_name: '你的姓名',
+  workspace_name: '工作区名称',
+  email: '工作邮箱',
+  password: '密码',
+}
+
+function validationIssue(entry) {
+  if (!entry || typeof entry !== 'object') return null
+  const location = Array.isArray(entry.loc) ? entry.loc : []
+  const field = [...location].reverse().find((value) => typeof value === 'string' && fieldLabels[value])
+  const label = fieldLabels[field] || '提交内容'
+  const type = String(entry.type || '').toLowerCase()
+  const rawMessage = String(entry.msg || '').toLowerCase()
+
+  let message
+  if (type.includes('missing')) {
+    message = `${label}不能为空。`
+  } else if (field === 'email') {
+    message = '请输入真实有效的工作邮箱；保留域名和无效邮箱不可用于注册。'
+  } else if (field === 'password' && (type.includes('too_short') || /at least|minimum|min_length/.test(rawMessage))) {
+    message = '密码至少需要 10 个字符。'
+  } else if (field === 'password' && (type.includes('too_long') || /at most|maximum|max_length/.test(rawMessage))) {
+    message = '密码最多支持 72 个字符。'
+  } else if (type.includes('too_short')) {
+    message = `${label}内容过短，请补充完整。`
+  } else if (type.includes('too_long')) {
+    message = `${label}内容过长，请精简后重试。`
+  } else {
+    message = `${label}格式不符合要求，请检查后重试。`
+  }
+
+  return { name: field ? [field] : [], errors: [message], message }
+}
+
 async function errorFrom(response) {
   let detail = `请求失败（${response.status}）`
+  let fieldErrors = []
   try {
     const payload = await response.json()
     const candidate = payload?.detail ?? payload?.message ?? detail
-    detail = typeof candidate === 'string' ? candidate : JSON.stringify(candidate)
+    if (Array.isArray(candidate)) {
+      fieldErrors = candidate.map(validationIssue).filter(Boolean)
+      detail = [...new Set(fieldErrors.map((item) => item.message))].slice(0, 2).join(' ') || '提交内容不符合要求，请检查后重试。'
+    } else {
+      detail = typeof candidate === 'string' ? candidate : '提交内容不符合要求，请检查后重试。'
+    }
   } catch { /* Non-JSON error response. */ }
-  return new Error(detail)
+  const error = new Error(detail)
+  error.status = response.status
+  error.fieldErrors = fieldErrors.filter((item) => item.name.length)
+  return error
 }
 
 export async function refreshAccessToken() {

@@ -10,6 +10,10 @@ system_prompt: |
   当用户需要分析数据时，请主动使用提供的工具来完成任务。
 allowed_tool_names:
   - run_python
+  - list_files
   - read_csv
   - write_file
+  - edit_file
   - read_file
+  - web_search
+  - fetch_url

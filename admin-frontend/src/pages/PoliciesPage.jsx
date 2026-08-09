@@ -46,12 +46,12 @@ export default function PoliciesPage() {
         <div><Title level={2}>权限策略</Title><Text type="secondary">Casbin RBAC 控制模型、技能、MCP 服务与具体工具</Text></div>
         <Space><Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button><Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>添加策略</Button></Space>
       </div>
-      <Card className="admin-card"><Table rowKey={(item) => `${item.role}:${item.resource}:${item.action}`} columns={columns} dataSource={policies} loading={loading} pagination={false} locale={{ emptyText: '暂无数据' }} /></Card>
+      <Card className="admin-card"><Table rowKey={(item) => `${item.role}:${item.resource}:${item.action}`} columns={columns} dataSource={policies} loading={loading} pagination={false} scroll={{ x: 'max-content' }} locale={{ emptyText: '暂无数据' }} /></Card>
       <Modal title="添加权限策略" open={open} onCancel={() => setOpen(false)} onOk={add} okText="确认" cancelText="取消">
         <div className="form-stack">
-          <div><label>角色</label><Input value={draft.role} onChange={(event) => setDraft({ ...draft, role: event.target.value })} placeholder="developer" /></div>
-          <div><label>资源</label><Input value={draft.resource} onChange={(event) => setDraft({ ...draft, resource: event.target.value })} placeholder="model:*" /></div>
-          <div><label>动作</label><Input value={draft.action} onChange={(event) => setDraft({ ...draft, action: event.target.value })} placeholder="use" /></div>
+          <div><label htmlFor="policy-role">角色</label><Input id="policy-role" aria-required="true" value={draft.role} onChange={(event) => setDraft({ ...draft, role: event.target.value })} placeholder="developer" /></div>
+          <div><label htmlFor="policy-resource">资源</label><Input id="policy-resource" aria-required="true" value={draft.resource} onChange={(event) => setDraft({ ...draft, resource: event.target.value })} placeholder="model:*" /></div>
+          <div><label htmlFor="policy-action">动作</label><Input id="policy-action" aria-required="true" value={draft.action} onChange={(event) => setDraft({ ...draft, action: event.target.value })} placeholder="use" /></div>
         </div>
       </Modal>
     </div>

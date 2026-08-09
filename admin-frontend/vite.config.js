@@ -19,12 +19,12 @@ export default defineConfig({
           const component = modulePath.match(/\/node_modules\/antd\/es\/([^/]+)\/index\.js$/)?.[1]
           if (!component) return undefined
           if (['form', 'input', 'select', 'switch'].includes(component)) return 'antd-input'
-          if (['modal', 'popconfirm'].includes(component)) return 'antd-overlay'
+          if (['drawer', 'dropdown', 'modal', 'popconfirm'].includes(component)) return 'antd-overlay'
           if (['layout', 'menu'].includes(component)) return 'antd-navigation'
           if (component === 'table') return 'antd-table'
           if (component === 'card') return 'antd-card'
           if (['avatar', 'badge', 'descriptions', 'statistic', 'tag'].includes(component)) return 'antd-status'
-          if (['app', 'button', 'config-provider', 'space', 'spin', 'typography', 'theme', 'row', 'col'].includes(component)) return 'antd-foundation'
+          if (['app', 'button', 'config-provider', 'space', 'spin', 'typography', 'theme', 'row', 'col', 'grid'].includes(component)) return 'antd-foundation'
           return undefined
         },
       },

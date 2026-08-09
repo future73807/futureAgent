@@ -443,16 +443,16 @@ function BusinessAssistantContent({ workspaceRole, members = [], currentUserId =
 
     {loadError && <Alert className="business-load-alert" type={apiUnavailable ? 'info' : 'warning'} showIcon message={apiUnavailable ? '经营助手暂不可用' : '经营数据加载异常'} description={loadError} action={<Button size="small" onClick={() => loadBusiness()}>重新加载</Button>} />}
 
-    <Card className="business-isolation-card" bordered={false}>
+    <Card className="business-isolation-card" variant="borderless">
       <Flex gap={16} align="flex-start" wrap="wrap"><Avatar size={42} className="business-isolation-avatar" icon={<CheckCircleOutlined />} /><div className="business-isolation-copy"><Text strong>角色与数据隔离已在产品流程中明确</Text><div className="business-isolation-points"><span>老板私聊：仅工作区所有者</span><span>私事员工：不混入公事数据</span><span>公事员工：仅已授权业务数据</span><span>所有关键操作留存来源与处理记录</span></div></div></Flex>
     </Card>
 
     <Spin spinning={loading} tip="正在读取已授权的经营数据">
       <div className="business-stat-grid">
-        <Card bordered={false}><Statistic title="已登记数据源" value={apiUnavailable ? '—' : counts.sources} prefix={<AppstoreOutlined />} /><Text type="secondary">接口、导出或企业机器人</Text></Card>
-        <Card bordered={false}><Statistic title="待处理预警" value={apiUnavailable ? '—' : counts.activeAlerts} valueStyle={{ color: !apiUnavailable && counts.activeAlerts ? '#cf1322' : undefined }} prefix={<ClockCircleOutlined />} /><Text type="secondary">含生产、订单、设备与交期</Text></Card>
-        <Card bordered={false}><Statistic title="生产日报" value={apiUnavailable ? '—' : counts.reports} prefix={<ProjectOutlined />} /><Text type="secondary">生成后仍需人工复核</Text></Card>
-        <Card bordered={false}><Statistic title="老板任务" value={apiUnavailable ? '—' : counts.tasks} prefix={<UserOutlined />} /><Text type="secondary">任务状态可追溯</Text></Card>
+        <Card variant="borderless"><Statistic title="已登记数据源" value={apiUnavailable ? '—' : counts.sources} prefix={<AppstoreOutlined />} /><Text type="secondary">接口、导出或企业机器人</Text></Card>
+        <Card variant="borderless"><Statistic title="待处理预警" value={apiUnavailable ? '—' : counts.activeAlerts} valueStyle={{ color: !apiUnavailable && counts.activeAlerts ? '#cf1322' : undefined }} prefix={<ClockCircleOutlined />} /><Text type="secondary">含生产、订单、设备与交期</Text></Card>
+        <Card variant="borderless"><Statistic title="生产日报" value={apiUnavailable ? '—' : counts.reports} prefix={<ProjectOutlined />} /><Text type="secondary">生成后仍需人工复核</Text></Card>
+        <Card variant="borderless"><Statistic title="老板任务" value={apiUnavailable ? '—' : counts.tasks} prefix={<UserOutlined />} /><Text type="secondary">任务状态可追溯</Text></Card>
       </div>
 
       <div className="business-workspace-grid">
@@ -475,7 +475,7 @@ function BusinessAssistantContent({ workspaceRole, members = [], currentUserId =
       </div>
     </Spin>
 
-    <Modal title="登记业务数据源" open={sourceOpen} onCancel={() => setSourceOpen(false)} onOk={() => sourceForm.submit()} okText="登记" cancelText="取消" destroyOnClose>
+    <Modal title="登记业务数据源" open={sourceOpen} onCancel={() => setSourceOpen(false)} onOk={() => sourceForm.submit()} okText="登记" cancelText="取消" destroyOnHidden>
       <Form form={sourceForm} layout="vertical" onFinish={createSource} initialValues={{ source_type: 'oa', connection_mode: 'api', access_scope: '按最小权限授权' }}>
         <Alert type="info" showIcon message="仅接入已授权的数据" description="优先使用开放 API、系统导出、企业机器人或受控中间件；不建议抓取个人微信聊天记录或绕过登录权限。" />
         <Form.Item name="name" label="数据源名称" rules={[{ required: true, min: 2, message: '请输入至少两个字的数据源名称' }]}><Input placeholder="例如：生产日报接口" /></Form.Item>
@@ -485,7 +485,7 @@ function BusinessAssistantContent({ workspaceRole, members = [], currentUserId =
       </Form>
     </Modal>
 
-    <Modal title="下达老板任务" open={taskOpen} onCancel={() => setTaskOpen(false)} onOk={() => taskForm.submit()} okText="创建任务" cancelText="取消" destroyOnClose>
+    <Modal title="下达老板任务" open={taskOpen} onCancel={() => setTaskOpen(false)} onOk={() => taskForm.submit()} okText="创建任务" cancelText="取消" destroyOnHidden>
       <Form form={taskForm} layout="vertical" onFinish={createBossTask} initialValues={{ priority: 'medium' }}>
         <Form.Item name="title" label="任务标题" rules={[{ required: true, min: 2, message: '请输入至少两个字的任务标题' }]}><Input placeholder="例如：核实今日设备异常并反馈" /></Form.Item>
         <Form.Item name="description" label="任务说明"><Input.TextArea rows={3} placeholder="写明预期结果和相关背景" /></Form.Item>
@@ -494,7 +494,7 @@ function BusinessAssistantContent({ workspaceRole, members = [], currentUserId =
       </Form>
     </Modal>
 
-    <Modal title="更新任务进展" open={Boolean(taskProgress)} onCancel={() => { setTaskProgress(null); progressForm.resetFields() }} onOk={() => progressForm.submit()} okText="保存进展" cancelText="取消" destroyOnClose>
+    <Modal title="更新任务进展" open={Boolean(taskProgress)} onCancel={() => { setTaskProgress(null); progressForm.resetFields() }} onOk={() => progressForm.submit()} okText="保存进展" cancelText="取消" destroyOnHidden>
       <Form form={progressForm} layout="vertical" onFinish={updateTaskProgress}>
         <Form.Item label="任务"><Input value={taskProgress?.title || ''} readOnly /></Form.Item>
         <Form.Item name="status" label="当前状态" rules={[{ required: true }]}><Select options={[{ value: 'todo', label: '待处理' }, { value: 'in_progress', label: '进行中' }, { value: 'blocked', label: '受阻' }, { value: 'done', label: '已完成' }, { value: 'cancelled', label: '已取消' }]} /></Form.Item>
@@ -502,7 +502,7 @@ function BusinessAssistantContent({ workspaceRole, members = [], currentUserId =
       </Form>
     </Modal>
 
-    <Modal title="保存数据源接入凭据" open={Boolean(ingestCredential)} onCancel={() => setIngestCredential(null)} footer={<Button type="primary" onClick={() => setIngestCredential(null)}>我已安全保存</Button>} destroyOnClose>
+    <Modal title="保存数据源接入凭据" open={Boolean(ingestCredential)} onCancel={() => setIngestCredential(null)} footer={<Button type="primary" onClick={() => setIngestCredential(null)}>我已安全保存</Button>} destroyOnHidden>
       <Alert type="warning" showIcon message="接入令牌仅在本次页面中显示一次" description="请立即存入受控密钥管理系统。不要截图、不要写入 README 或文档、不要发送到群聊；关闭此窗口后无法再次查看明文令牌。" />
       <Form layout="vertical" className="business-credential-form">
         <Form.Item label="数据源"><Input value={ingestCredential?.name || ''} readOnly /></Form.Item>

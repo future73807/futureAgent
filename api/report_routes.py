@@ -13,11 +13,12 @@ import json
 import secrets
 from collections import Counter
 from datetime import date, datetime, time, timezone
+from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request, status, UploadFile, File
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
@@ -61,6 +62,25 @@ CONNECTION_MODE_ALIASES = {
 ALERT_LEVELS = {"low", "medium", "high", "critical"}
 ALERT_STATUSES = {"open", "acknowledged", "resolved"}
 REPORT_TYPES = {"daily", "weekly", "monthly"}
+KNOWLEDGE_TEXT_EXTENSIONS = {
+    ".txt",
+    ".md",
+    ".csv",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".log",
+    ".html",
+    ".htm",
+    ".xml",
+}
+KNOWLEDGE_TEXT_CONTENT_TYPES = {
+    "application/json",
+    "application/xml",
+    "application/yaml",
+    "application/x-yaml",
+}
+MAX_KNOWLEDGE_TEXT_BYTES = 400_000
 
 
 class ReportRequest(BaseModel):
@@ -140,6 +160,12 @@ class WeeklyReportGenerateRequest(ReportRequest):
     week_start_date: date
     week_end_date: date
     title: str = Field(default="", max_length=240)
+
+    @model_validator(mode="after")
+    def validate_date_range(self):
+        if self.week_end_date < self.week_start_date:
+            raise ValueError("周报结束日期不能早于开始日期")
+        return self
 
 
 class KnowledgeBaseCreateRequest(ReportRequest):
@@ -1068,15 +1094,48 @@ async def upload_knowledge_base_file(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     _require_member_write(context)
-    content = await file.read()
-    text_content = content.decode("utf-8", errors="ignore") if file.content_type and file.content_type.startswith("text/") else ""
+    file_name = Path(file.filename or "knowledge.txt").name
+    content_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+    extension = Path(file_name).suffix.lower()
+    if not (
+        content_type.startswith("text/")
+        or content_type in KNOWLEDGE_TEXT_CONTENT_TYPES
+        or extension in KNOWLEDGE_TEXT_EXTENSIONS
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="知识库上传仅支持 UTF-8 文本、Markdown、CSV、JSON、YAML、HTML 和 XML 文件",
+        )
+    if len(file_name) > 255:
+        raise HTTPException(status_code=422, detail="知识库文件名不能超过 255 个字符")
+    resolved_title = (title or Path(file_name).stem or file_name).strip()
+    if len(resolved_title) < 2 or len(resolved_title) > 240:
+        raise HTTPException(status_code=422, detail="知识库标题长度必须为 2 到 240 个字符")
+    if len(description) > 2000:
+        raise HTTPException(status_code=422, detail="知识库说明不能超过 2000 个字符")
+
+    content = await file.read(MAX_KNOWLEDGE_TEXT_BYTES + 1)
+    if len(content) > MAX_KNOWLEDGE_TEXT_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"知识库文本文件不能超过 {MAX_KNOWLEDGE_TEXT_BYTES} 字节",
+        )
+    try:
+        text_content = content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=422, detail="知识库文件必须使用 UTF-8 编码") from exc
+    if len(text_content) > 100_000:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail="知识库文本内容不能超过 100000 个字符",
+        )
     kb = KnowledgeBase(
         workspace_id=context.workspace.id,
-        title=title or file.filename,
+        title=resolved_title,
         description=description,
         content=text_content,
-        file_name=file.filename,
-        file_type=file.content_type or "application/octet-stream",
+        file_name=file_name,
+        file_type=content_type or "text/plain",
         file_size=len(content),
         created_by=context.user.id,
     )
@@ -1089,7 +1148,7 @@ async def upload_knowledge_base_file(
         action="report.knowledge_base.uploaded",
         target_type="knowledge_base",
         target_id=kb.id,
-        metadata={"file_name": file.filename, "file_type": file.content_type, "file_size": len(content)},
+        metadata={"file_name": file_name, "file_type": content_type or "text/plain", "file_size": len(content)},
     )
     session.commit()
     return {"knowledge_base": _knowledge_base_data(kb)}

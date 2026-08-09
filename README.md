@@ -68,6 +68,8 @@ docker compose config --quiet
 1. 受保护请求需携带 `Authorization: Bearer <token>` 和 `X-Workspace-ID: <id>`
 2. 角色来自签名令牌与数据库成员关系
 3. 生产环境必须替换默认凭据、配置 HTTPS、限制 CORS
+4. 内置 MCP 文件工具只接受 API 通过 `MCP_WORKSPACE_SIGNING_KEY` 签发的工作区声明，并在 MCP 服务端强制映射到独立目录；生产环境必须替换该密钥且不得把它发给浏览器
+5. `run_python` 不进入共享多租户 Agent；只有独占 MCP 容器可显式设置 `MCP_ENABLE_PYTHON_TOOL=true`
 
 ## 8. 上线前必须完成
 

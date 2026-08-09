@@ -4,7 +4,7 @@ import { App, Button, Card, Space, Table, Tag, Typography } from 'antd'
 import { apiFetch, toUserErrorMessage } from '../api.js'
 
 const { Title, Text } = Typography
-const statusLabels = { online: '在线', offline: '离线', unknown: '未知', degraded: '异常', disabled: '已禁用' }
+const statusLabels = { configured: '已配置', online: '在线', offline: '离线', unknown: '未知', degraded: '异常', disabled: '已禁用' }
 
 export default function McpPage() {
   const { message } = App.useApp()
@@ -20,11 +20,11 @@ export default function McpPage() {
   useEffect(() => { load(false) }, [])
 
   const columns = [
-    { title: '服务名', dataIndex: 'name', render: (value) => <span className="code-text">{value}</span> },
-    { title: '地址', dataIndex: 'url', ellipsis: true },
-    { title: '状态', dataIndex: 'status', render: (value) => <Tag color={value === 'online' ? 'success' : value === 'offline' ? 'error' : 'processing'}>{statusLabels[value] || '未知'}</Tag> },
-    { title: '工具', dataIndex: 'tools', render: (values) => <Space wrap>{(values || []).map((value) => <Tag color="cyan" key={value}>{value}</Tag>)}</Space> },
-    { title: '错误', dataIndex: 'error', ellipsis: true, render: (value) => value ? <Text type="danger">{toUserErrorMessage(value, 'MCP 服务探测失败，请检查服务配置和连接状态。')}</Text> : '-' },
+    { title: '服务名', dataIndex: 'name', width: 140, render: (value) => <span className="code-text">{value}</span> },
+    { title: '地址', dataIndex: 'url', ellipsis: true, responsive: ['md'] },
+    { title: '状态', dataIndex: 'status', width: 96, render: (value) => <Tag color={value === 'online' ? 'success' : value === 'offline' ? 'error' : value === 'configured' ? 'blue' : 'processing'}>{statusLabels[value] || '未知'}</Tag> },
+    { title: '工具', dataIndex: 'tools', responsive: ['sm'], render: (values, record) => values?.length ? <Space wrap>{values.map((value) => <Tag color="cyan" key={value}>{value}</Tag>)}</Space> : <Text type="secondary">{record.status === 'configured' ? '检测后显示' : '暂无'}</Text> },
+    { title: '错误', dataIndex: 'error', ellipsis: true, responsive: ['lg'], render: (value) => value ? <Text type="danger">{toUserErrorMessage(value, 'MCP 服务探测失败，请检查服务配置和连接状态。')}</Text> : '-' },
   ]
 
   return (

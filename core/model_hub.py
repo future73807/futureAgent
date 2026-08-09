@@ -2,7 +2,10 @@
 ModelHub - 基于 LiteLLM 的统一模型切换层
 开源轮子: https://github.com/BerriAI/litellm
 """
+import time
 from typing import Optional
+
+import httpx
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
@@ -21,6 +24,9 @@ class ModelHub:
     利用 LiteLLM 统一了不同模型的调用方式
     model_id 例如: "gpt-4o", "claude-3-5-sonnet", "ollama/llama3", "LongCat-2.0"
     """
+
+    _ollama_models_cache: dict[str, tuple[float, set[str] | None]] = {}
+    _ollama_cache_ttl_seconds = 5.0
 
     def __init__(self):
         if LITELLM_AVAILABLE:
@@ -69,27 +75,22 @@ class ModelHub:
             
             if stream:
                 async def stream_gen():
-                    try:
-                        async for chunk in llm.astream(lc_messages):
-                            class FakeChoice:
-                                def __init__(self, content):
-                                    self.delta = type('Delta', (), {'content': content})()
-                            yield type('Response', (), {'choices': [FakeChoice(chunk.content)]})()
-                    except Exception as e:
+                    async for chunk in llm.astream(lc_messages):
                         class FakeChoice:
                             def __init__(self, content):
                                 self.delta = type('Delta', (), {'content': content})()
-                        yield type('Response', (), {'choices': [FakeChoice(f"[Error: {str(e)}]")]})()
+                        yield type('Response', (), {'choices': [FakeChoice(chunk.content)]})()
                 return stream_gen()
             else:
                 response = await llm.ainvoke(lc_messages)
                 class FakeChoice:
                     def __init__(self, content):
                         self.delta = type('Delta', (), {'content': content})()
+                        self.message = type('Message', (), {'content': content})()
                 return type('Response', (), {'choices': [FakeChoice(response.content)]})()
         
         # 有 LiteLLM 时使用 LiteLLM
-        request_model = model_id
+        request_model = self._litellm_model_name(model_id)
         if settings.litellm_proxy_url:
             request_model = f"openai/{model_id}"
             kwargs = {
@@ -135,7 +136,7 @@ class ModelHub:
         if LITELLM_AVAILABLE:
             from langchain_community.chat_models import ChatLiteLLM
             return ChatLiteLLM(
-                model=model,
+                model=self._litellm_model_name(model),
                 temperature=temperature,
                 streaming=streaming,
                 **provider_kwargs,
@@ -167,6 +168,18 @@ class ModelHub:
         if model_lower.startswith("longcat") and settings.longcat_api_key:
             return {"api_base": settings.longcat_api_base, "api_key": settings.longcat_api_key}
         return {}
+
+    @staticmethod
+    def _litellm_model_name(model_id: str) -> str:
+        """Route OpenAI-compatible providers through LiteLLM explicitly.
+
+        LongCat exposes an OpenAI-compatible API, but its public model name
+        does not identify a provider to LiteLLM.  Without the prefix LiteLLM
+        rejects the request before it reaches the configured API base.
+        """
+        if model_id.lower().startswith("longcat"):
+            return f"openai/{model_id}"
+        return model_id
 
     @staticmethod
     def _is_usable_credential(value: str) -> bool:
@@ -219,6 +232,42 @@ class ModelHub:
         return bool(settings.litellm_proxy_url.strip()) or cls.is_direct_provider_configured(model_id)
 
     @classmethod
+    def _available_ollama_models(cls) -> set[str] | None:
+        """Return locally installed model names, or ``None`` when unreachable.
+
+        A configured URL is not runtime readiness. The short cache keeps the
+        model picker responsive while allowing a newly started Ollama service
+        to become available without restarting futureAgent.
+        """
+        base_url = settings.ollama_base_url.strip().rstrip("/")
+        if not base_url:
+            return None
+        root_url = base_url[:-3] if base_url.endswith("/v1") else base_url
+        now = time.monotonic()
+        cached = cls._ollama_models_cache.get(root_url)
+        if cached and now - cached[0] < cls._ollama_cache_ttl_seconds:
+            return cached[1]
+        available: set[str] | None = None
+        try:
+            with httpx.Client(timeout=0.75, trust_env=False) as client:
+                response = client.get(f"{root_url}/api/tags")
+                response.raise_for_status()
+                payload = response.json()
+            available = set()
+            for item in payload.get("models", []) if isinstance(payload, dict) else []:
+                if not isinstance(item, dict):
+                    continue
+                for key in ("name", "model"):
+                    value = str(item.get(key) or "").strip().lower()
+                    if value:
+                        available.add(value)
+                        available.add(value.split(":", 1)[0])
+        except (httpx.HTTPError, ValueError, TypeError):
+            available = None
+        cls._ollama_models_cache[root_url] = (now, available)
+        return available
+
+    @classmethod
     def configuration_source(cls, model_id: str) -> str:
         if settings.litellm_proxy_url.strip():
             return "litellm_proxy"
@@ -242,6 +291,13 @@ class ModelHub:
             if ModelHub.is_direct_provider_configured(model_id):
                 return None
             return "未安装 LiteLLM，请先安装 API 依赖后再使用 AI 对话。"
+        if model_id.lower().startswith("ollama/"):
+            available = ModelHub._available_ollama_models()
+            if available is None:
+                return "Ollama 服务当前不可达，请先启动本地 Ollama 后再使用该模型。"
+            requested = model_id.split("/", 1)[1].lower().split(":", 1)[0]
+            if requested not in available:
+                return f"Ollama 中尚未安装模型“{requested}”，请先拉取该模型。"
         if not ModelHub.is_model_configured(model_id):
             return f"模型“{model_id}”尚未配置。请添加供应商凭据或配置 LiteLLM 内部网关。"
         return None
@@ -259,4 +315,5 @@ class ModelHub:
             "ollama/qwen2.5",
             "gemini/gemini-1.5-pro",
             "gemini/gemini-1.5-flash",
+            "LongCat-2.0",
         ]

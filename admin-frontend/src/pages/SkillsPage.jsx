@@ -69,13 +69,13 @@ export default function SkillsPage() {
         <div><Title level={2}>技能管理</Title><Text type="secondary">维护系统提示词与工具白名单，配置持久化到 YAML</Text></div>
         <Space><Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button><Button type="primary" icon={<PlusOutlined />} onClick={() => showEditor(null)}>新建技能</Button></Space>
       </div>
-      <Card className="admin-card"><Table rowKey="name" columns={columns} dataSource={skills} loading={loading} pagination={false} locale={{ emptyText: '暂无数据' }} /></Card>
+      <Card className="admin-card"><Table rowKey="name" columns={columns} dataSource={skills} loading={loading} pagination={false} scroll={{ x: 'max-content' }} locale={{ emptyText: '暂无数据' }} /></Card>
       <Modal title={editing ? '编辑技能' : '新建技能'} open={open} onCancel={() => setOpen(false)} onOk={save} okText="确认" cancelText="取消" width={680}>
         <div className="form-stack">
-          <div><label>名称</label><Input disabled={editing} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="my_skill" /></div>
-          <div><label>描述</label><Input value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></div>
-          <div><label>系统提示词</label><Input.TextArea rows={8} value={draft.system_prompt} onChange={(event) => setDraft({ ...draft, system_prompt: event.target.value })} /></div>
-          <div><label>工具白名单（逗号分隔，留空表示全部授权工具）</label><Input value={tools} onChange={(event) => setTools(event.target.value)} placeholder="read_file, read_csv" /></div>
+          <div><label htmlFor="skill-name">名称</label><Input id="skill-name" aria-required="true" disabled={editing} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="my_skill" /></div>
+          <div><label htmlFor="skill-description">描述</label><Input id="skill-description" aria-required="true" value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></div>
+          <div><label htmlFor="skill-system-prompt">系统提示词</label><Input.TextArea id="skill-system-prompt" aria-required="true" rows={8} value={draft.system_prompt} onChange={(event) => setDraft({ ...draft, system_prompt: event.target.value })} /></div>
+          <div><label htmlFor="skill-tools">工具白名单（逗号分隔，留空表示全部授权工具）</label><Input id="skill-tools" value={tools} onChange={(event) => setTools(event.target.value)} placeholder="read_file, read_csv" /></div>
         </div>
       </Modal>
     </div>

@@ -39,7 +39,7 @@ model_list:
   - model_name: LongCat-2.0
     litellm_params:
       model: openai/LongCat-2.0
-      api_key: ak_2FS6U37Dv2BG8sm6kv5Lk4TF7BW03
+      api_key: os.environ/LONGCAT_API_KEY
       api_base: https://api.longcat.chat/openai
       max_tokens: 128000
 

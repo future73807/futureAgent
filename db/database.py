@@ -64,6 +64,19 @@ REPORT_AGENT_TABLES = {
 # while deciding where to stamp an unversioned legacy database.
 PRE_BUSINESS_MISSING_COLUMNS = {
     "audit_events": {"visibility", "owner_user_id"},
+    "agent_runs": {"mcp_servers_json", "tool_trace_json"},
+}
+
+# Unversioned development SQLite databases exist at both recent revisions.
+# Check the newest shape first: a revision-05 database already has the MCP
+# selection column and only lacks the new tool trace column.  Older revision-04
+# databases lack both columns and must run both additive migrations.
+PRE_AGENT_RUN_TRACE_MISSING_COLUMNS = {
+    "agent_runs": {"tool_trace_json"},
+}
+
+PRE_AGENT_RUN_MCP_MISSING_COLUMNS = {
+    "agent_runs": {"mcp_servers_json", "tool_trace_json"},
 }
 
 
@@ -81,9 +94,12 @@ def init_db() -> None:
             "do not use metadata.create_all as a migration mechanism."
         )
     else:
-        # Local development and unit tests can start from an empty schema.
-        # Deployments use Alembic migrations instead (see migrations/).
-        SQLModel.metadata.create_all(engine)
+        inspector = inspect(engine)
+        existing_tables = set(inspector.get_table_names())
+        if not existing_tables:
+            SQLModel.metadata.create_all(engine)
+        elif not _matches_schema(inspector, set(SQLModel.metadata.tables)):
+            _upgrade_schema()
     _migrate_legacy_development_admin()
     _seed_development_admin()
 
@@ -104,12 +120,31 @@ def _upgrade_schema() -> None:
         # since these are new additions that didn't exist in earlier versions.
         current_tables = set(SQLModel.metadata.tables)
         non_agent_tables = current_tables - BUSINESS_AGENT_TABLES - REPORT_AGENT_TABLES
+        pre_report_tables = current_tables - REPORT_AGENT_TABLES
         if _matches_schema(inspector, current_tables):
             # A controlled transition for installations that already include
             # every current model table. No DDL is needed; record the head.
             command.stamp(alembic_config, "head")
             return
         if _matches_schema(
+            inspector,
+            current_tables,
+            ignored_columns=PRE_AGENT_RUN_TRACE_MISSING_COLUMNS,
+        ):
+            command.stamp(alembic_config, "20260809_05")
+        elif _matches_schema(
+            inspector,
+            current_tables,
+            ignored_columns=PRE_AGENT_RUN_MCP_MISSING_COLUMNS,
+        ):
+            command.stamp(alembic_config, "20260726_04")
+        elif not (existing_tables & REPORT_AGENT_TABLES) and _matches_schema(
+            inspector,
+            pre_report_tables,
+            ignored_columns=PRE_AGENT_RUN_MCP_MISSING_COLUMNS,
+        ):
+            command.stamp(alembic_config, "20260725_03")
+        elif _matches_schema(
             inspector,
             non_agent_tables,
             ignored_columns=PRE_BUSINESS_MISSING_COLUMNS,

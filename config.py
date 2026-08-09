@@ -1,5 +1,7 @@
 import json
+import re
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import PostgresDsn, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -61,6 +63,12 @@ class Settings(BaseSettings):
     mcp_servers_json: str = ""
     mcp_connect_timeout: float = 5.0
     enable_local_mcp_tools: bool = False
+    # Shared by the API and the bundled MCP service.  It authenticates the
+    # server-derived workspace scope attached to local file-tool sessions; it
+    # is not exposed to the model or browser.
+    mcp_workspace_signing_key: str = (
+        "change-this-development-mcp-secret-before-production"
+    )
 
     # ===== 数据库配置 =====
     postgres_dsn: PostgresDsn = (
@@ -125,10 +133,17 @@ class Settings(BaseSettings):
                 raise ValueError("MCP_SERVERS_JSON 必须是合法的 JSON 对象") from exc
             if not isinstance(raw_servers, dict):
                 raise ValueError("MCP_SERVERS_JSON 必须是服务名到地址的 JSON 对象")
-            return {
-                str(name): self._normalize_mcp_url(str(url))
-                for name, url in raw_servers.items()
-            }
+            servers: dict[str, str] = {}
+            for raw_name, raw_url in raw_servers.items():
+                name = str(raw_name).strip()
+                if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", name):
+                    raise ValueError(
+                        "MCP 服务名必须以字母开头，且只能包含字母、数字、下划线和连字符"
+                    )
+                if name in servers:
+                    raise ValueError(f"MCP 服务名重复：{name}")
+                servers[name] = self._normalize_mcp_url(str(raw_url))
+            return servers
 
         return {
             hostname: self._normalize_mcp_url(hostname)
@@ -136,12 +151,30 @@ class Settings(BaseSettings):
         }
 
     def _normalize_mcp_url(self, value: str) -> str:
-        value = value.strip().rstrip("/")
-        if not value.startswith(("http://", "https://")):
-            value = f"http://{value}:{self.mcp_server_port}"
-        if not value.endswith(("/mcp", "/sse")):
-            value = f"{value}/mcp"
-        return value
+        value = value.strip()
+        if not value:
+            raise ValueError("MCP 服务地址不能为空")
+
+        has_scheme = value.startswith(("http://", "https://"))
+        if "://" in value and not has_scheme:
+            raise ValueError("MCP 服务地址只允许 HTTP 或 HTTPS")
+        candidate = value if has_scheme else f"http://{value}"
+        parsed = urlsplit(candidate)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("MCP 服务地址必须是有效的 HTTP 或 HTTPS URL")
+        try:
+            explicit_port = parsed.port
+        except ValueError as exc:
+            raise ValueError("MCP 服务地址端口无效") from exc
+
+        netloc = parsed.netloc
+        if not has_scheme and explicit_port is None:
+            host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+            netloc = f"{host}:{self.mcp_server_port}"
+        path = parsed.path.rstrip("/")
+        if not path.endswith(("/mcp", "/sse")):
+            path = f"{path}/mcp"
+        return urlunsplit((parsed.scheme, netloc, path, parsed.query, ""))
 
 
 settings = Settings()

@@ -1,6 +1,7 @@
 """End-to-end tests for the authorised operating-agent MVP."""
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from contextlib import nullcontext
@@ -379,6 +380,146 @@ class BusinessAgentApiTests(unittest.TestCase):
             json={"title": "非法跨工作区关联", "source_id": outsider_source.json()["data_source"]["id"]},
         )
         self.assertEqual(cross_workspace.status_code, 404)
+
+    def test_report_assistant_data_knowledge_reports_and_chat_flow(self):
+        """Exercise the report-assistant surface that is separate from business routes."""
+        owner_headers = self.headers(self.owner_token, self.owner_workspace)
+
+        dashboard = self.client.get("/api/v1/report/dashboard", headers=owner_headers)
+        self.assertEqual(dashboard.status_code, 200, dashboard.text)
+        self.assertEqual(dashboard.json()["summary_engine"], "deterministic_authorized_data")
+
+        source_response = self.client.post(
+            "/api/v1/report/data-sources",
+            headers=owner_headers,
+            json={
+                "name": "汇报验收数据源",
+                "source_type": "api",
+                "connection_mode": "api",
+                "access_scope": "只读汇报字段",
+            },
+        )
+        self.assertEqual(source_response.status_code, 201, source_response.text)
+        source_payload = source_response.json()
+        source_id = source_payload["data_source"]["id"]
+        ingest_token = source_payload["ingest_token"]
+        self.assertNotIn(ingest_token, json.dumps(source_payload["data_source"], ensure_ascii=False))
+
+        ingested = self.client.post(
+            f"/api/v1/report/ingest/{source_id}",
+            headers={"X-Report-Ingest-Token": ingest_token},
+            json={
+                "external_id": "report-flow-1",
+                "record_type": "production_daily",
+                "title": "生产正常，日报已提交",
+                "content": "产线 A 已完成当日计划。",
+                "payload": {"line": "A", "completed": True},
+                "occurred_on": date.today().isoformat(),
+            },
+        )
+        self.assertEqual(ingested.status_code, 201, ingested.text)
+        self.assertTrue(ingested.json()["created"])
+
+        duplicate = self.client.post(
+            f"/api/v1/report/ingest/{source_id}",
+            headers={"X-Report-Ingest-Token": ingest_token},
+            json={
+                "external_id": "report-flow-1",
+                "record_type": "production_daily",
+                "title": "重复提交不应覆盖",
+                "occurred_on": date.today().isoformat(),
+            },
+        )
+        self.assertEqual(duplicate.status_code, 201, duplicate.text)
+        self.assertFalse(duplicate.json()["created"])
+        self.assertNotIn("record", duplicate.json())
+
+        knowledge = self.client.post(
+            "/api/v1/report/knowledge-bases",
+            headers=owner_headers,
+            json={
+                "title": "验收运行手册",
+                "description": "汇报智能体知识库验收",
+                "content": "产线 A 的升级流程需要人工复核。",
+            },
+        )
+        self.assertEqual(knowledge.status_code, 201, knowledge.text)
+        knowledge_id = knowledge.json()["knowledge_base"]["id"]
+
+        uploaded = self.client.post(
+            "/api/v1/report/knowledge-bases/upload",
+            headers=owner_headers,
+            data={"title": "上传验收文档", "description": "multipart 路径"},
+            files={"file": ("runbook.md", "# Runbook\nAll systems ready.".encode(), "text/markdown")},
+        )
+        self.assertEqual(uploaded.status_code, 201, uploaded.text)
+        uploaded_id = uploaded.json()["knowledge_base"]["id"]
+        self.assertEqual(uploaded.json()["knowledge_base"]["file_name"], "runbook.md")
+        self.assertIn("All systems ready", uploaded.json()["knowledge_base"]["content"])
+
+        unsupported_upload = self.client.post(
+            "/api/v1/report/knowledge-bases/upload",
+            headers=owner_headers,
+            files={"file": ("manual.pdf", b"%PDF-1.7", "application/pdf")},
+        )
+        self.assertEqual(unsupported_upload.status_code, 415, unsupported_upload.text)
+
+        oversized_upload = self.client.post(
+            "/api/v1/report/knowledge-bases/upload",
+            headers=owner_headers,
+            files={"file": ("oversized.txt", b"x" * 100_001, "text/plain")},
+        )
+        self.assertEqual(oversized_upload.status_code, 413, oversized_upload.text)
+
+        daily = self.client.post(
+            "/api/v1/report/daily-reports/generate",
+            headers=owner_headers,
+            json={"report_date": date.today().isoformat()},
+        )
+        self.assertEqual(daily.status_code, 200, daily.text)
+        self.assertGreaterEqual(daily.json()["daily_report"]["metrics"]["record_count"], 1)
+
+        invalid_week = self.client.post(
+            "/api/v1/report/weekly-reports/generate",
+            headers=owner_headers,
+            json={
+                "week_start_date": "2026-08-10",
+                "week_end_date": "2026-08-09",
+            },
+        )
+        self.assertEqual(invalid_week.status_code, 422, invalid_week.text)
+
+        weekly = self.client.post(
+            "/api/v1/report/weekly-reports/generate",
+            headers=owner_headers,
+            json={
+                "week_start_date": date.today().isoformat(),
+                "week_end_date": date.today().isoformat(),
+                "title": "验收周报",
+            },
+        )
+        self.assertEqual(weekly.status_code, 200, weekly.text)
+        self.assertEqual(weekly.json()["weekly_report"]["title"], "验收周报")
+
+        chat = self.client.post(
+            "/api/v1/report/chat",
+            headers=owner_headers,
+            json={"message": "汇总今天的生产与知识库信息"},
+        )
+        self.assertEqual(chat.status_code, 200, chat.text)
+        self.assertFalse(chat.json()["external_model_called"])
+        self.assertEqual(chat.json()["engine"], "deterministic_authorized_data")
+        self.assertTrue(chat.json()["assistant_message"]["citations"])
+
+        history = self.client.get("/api/v1/report/messages", headers=owner_headers)
+        self.assertEqual(history.status_code, 200, history.text)
+        self.assertEqual([item["role"] for item in history.json()["messages"][-2:]], ["user", "assistant"])
+
+        for kb_id in (knowledge_id, uploaded_id):
+            deleted = self.client.delete(
+                f"/api/v1/report/knowledge-bases/{kb_id}", headers=owner_headers
+            )
+            self.assertEqual(deleted.status_code, 204, deleted.text)
 
     def test_private_source_and_ownership_transfer_cannot_be_bypassed(self):
         private_source = self.client.post(

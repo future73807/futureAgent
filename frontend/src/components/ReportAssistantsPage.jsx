@@ -88,6 +88,24 @@ const quickActions = [
   { key: 'source', label: '数据源管理', icon: <AppstoreOutlined /> },
 ]
 
+const knowledgeFileAccept = '.txt,.md,.csv,.json,.yaml,.yml,.log,.html,.htm,.xml,text/*,application/json,application/xml,application/yaml'
+const knowledgeFileExtensions = new Set(['txt', 'md', 'csv', 'json', 'yaml', 'yml', 'log', 'html', 'htm', 'xml'])
+const maxKnowledgeFileBytes = 400_000
+
+function localDateValue(value) {
+  const year = value.getFullYear()
+  const month = String(value.getMonth() + 1).padStart(2, '0')
+  const day = String(value.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function currentLocalWeek(today = new Date()) {
+  const mondayOffset = today.getDay() === 0 ? -6 : 1 - today.getDay()
+  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate() + mondayOffset)
+  const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 6)
+  return { start: localDateValue(start), end: localDateValue(end) }
+}
+
 function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '' }) {
   const { message } = AntApp.useApp()
   const canManage = ['owner', 'admin'].includes(workspaceRole)
@@ -244,6 +262,17 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
   }
 
   const uploadKnowledgeBase = async (file) => {
+    const extension = String(file.name || '').split('.').pop().toLowerCase()
+    const contentType = String(file.type || '').toLowerCase()
+    const textualType = contentType.startsWith('text/') || ['application/json', 'application/xml', 'application/yaml', 'application/x-yaml'].includes(contentType)
+    if (!textualType && !knowledgeFileExtensions.has(extension)) {
+      message.error('仅支持 UTF-8 文本、Markdown、CSV、JSON、YAML、HTML 和 XML 文件。')
+      return false
+    }
+    if (Number(file.size || 0) > maxKnowledgeFileBytes) {
+      message.error('知识库文件不能超过约 400 KB。')
+      return false
+    }
     setKbUploading(true)
     try {
       const formData = new FormData()
@@ -273,16 +302,12 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
 
   const generateWeeklyReport = async () => {
     try {
-      const today = new Date()
-      const weekStart = new Date(today)
-      weekStart.setDate(today.getDate() - today.getDay())
-      const weekEnd = new Date(weekStart)
-      weekEnd.setDate(weekStart.getDate() + 6)
+      const week = currentLocalWeek()
       await apiFetch('/api/v1/report/weekly-reports/generate', {
         method: 'POST',
         body: JSON.stringify({
-          week_start_date: weekStart.toISOString().split('T')[0],
-          week_end_date: weekEnd.toISOString().split('T')[0],
+          week_start_date: week.start,
+          week_end_date: week.end,
         }),
       })
       message.success('周报已生成，请人工复核后再分发。')
@@ -489,8 +514,9 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
             <div className="report-panel-section">
               <div className="report-panel-header">
                 <Text strong>知识库</Text>
-                {canWrite && <Space><Button size="small" icon={<PlusOutlined />} onClick={() => setKbOpen(true)}>创建</Button><Upload showUploadList={false} beforeUpload={uploadKnowledgeBase} disabled={kbUploading}><Button size="small" icon={<UploadOutlined />} loading={kbUploading}>上传</Button></Upload></Space>}
+                {canWrite && <Space><Button size="small" icon={<PlusOutlined />} onClick={() => setKbOpen(true)}>创建</Button><Upload accept={knowledgeFileAccept} showUploadList={false} beforeUpload={uploadKnowledgeBase} disabled={kbUploading}><Button size="small" icon={<UploadOutlined />} loading={kbUploading}>上传</Button></Upload></Space>}
               </div>
+              <Text type="secondary" className="report-panel-hint">支持 UTF-8 文本类文件，最大约 400 KB。</Text>
               {apiUnavailable ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="服务未部署" /> : kbItems.length ? (
                 <Conversations items={kbItems} />
               ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未创建知识库文档" />}
@@ -499,7 +525,7 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
         </div>
       </Spin>
 
-      <Modal title="登记业务数据源" open={sourceOpen} onCancel={() => setSourceOpen(false)} onOk={() => sourceForm.submit()} okText="登记" cancelText="取消" destroyOnClose>
+      <Modal title="登记业务数据源" open={sourceOpen} onCancel={() => setSourceOpen(false)} onOk={() => sourceForm.submit()} okText="登记" cancelText="取消" destroyOnHidden>
         <Form form={sourceForm} layout="vertical" onFinish={createSource} initialValues={{ source_type: 'oa', connection_mode: 'api', access_scope: '按最小权限授权' }}>
           <Alert type="info" showIcon message="仅接入已授权的数据" description="优先使用开放 API、系统导出、企业机器人或受控中间件；不建议抓取个人微信聊天记录或绕过登录权限。" />
           <Form.Item name="name" label="数据源名称" rules={[{ required: true, min: 2, message: '请输入至少两个字的数据源名称' }]}><Input placeholder="例如：生产日报接口" /></Form.Item>
@@ -509,7 +535,7 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
         </Form>
       </Modal>
 
-      <Modal title="创建知识库文档" open={kbOpen} onCancel={() => setKbOpen(false)} onOk={() => kbForm.submit()} okText="创建" cancelText="取消" destroyOnClose>
+      <Modal title="创建知识库文档" open={kbOpen} onCancel={() => setKbOpen(false)} onOk={() => kbForm.submit()} okText="创建" cancelText="取消" destroyOnHidden>
         <Form form={kbForm} layout="vertical" onFinish={createKnowledgeBase}>
           <Alert type="info" showIcon message="知识库文档" description="创建文档后，汇报智能体可以引用文档内容生成报告。支持上传文件或手动输入内容。" />
           <Form.Item name="title" label="文档标题" rules={[{ required: true, min: 2, message: '请输入至少两个字的文档标题' }]}><Input placeholder="例如：生产流程规范" /></Form.Item>
@@ -518,7 +544,7 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
         </Form>
       </Modal>
 
-      <Modal title="保存数据源接入凭据" open={Boolean(ingestCredential)} onCancel={() => setIngestCredential(null)} footer={<Button type="primary" onClick={() => setIngestCredential(null)}>我已安全保存</Button>} destroyOnClose>
+      <Modal title="保存数据源接入凭据" open={Boolean(ingestCredential)} onCancel={() => setIngestCredential(null)} footer={<Button type="primary" onClick={() => setIngestCredential(null)}>我已安全保存</Button>} destroyOnHidden>
         <Alert type="warning" showIcon message="接入令牌仅在本次页面中显示一次" description="请立即存入受控密钥管理系统。不要截图、不要写入 README 或文档、不要发送到群聊；关闭此窗口后无法再次查看明文令牌。" />
         <Form layout="vertical" className="business-credential-form">
           <Form.Item label="数据源"><Input value={ingestCredential?.name || ''} readOnly /></Form.Item>

@@ -60,4 +60,17 @@ export async function apiFetch(path, options = {}, retry = true) {
   return response.json()
 }
 
-export function serviceUrl(port, path = '') { return `${window.location.protocol}//${window.location.hostname}:${port}${path}` }
+export function serviceUrl(port, path = '') {
+  const normalizedPort = String(port ?? '').trim()
+  const portSuffix = normalizedPort ? `:${normalizedPort}` : ''
+  return `${window.location.protocol}//${window.location.hostname}${portSuffix}${path}`
+}
+
+export function userFrontendUrl() {
+  const configuredUrl = String(import.meta.env.VITE_USER_FRONTEND_URL || '').trim()
+  if (configuredUrl) return new URL(configuredUrl, window.location.origin).toString()
+
+  // Vite 的本地开发服务仍使用 5173；容器部署默认通过统一网关访问用户端。
+  if (window.location.port === '5174') return serviceUrl(5173)
+  return serviceUrl(import.meta.env.VITE_USER_FRONTEND_PORT || 80)
+}

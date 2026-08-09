@@ -6,7 +6,7 @@ import functools
 import uuid
 from typing import AsyncGenerator, Optional
 
-from langchain_core.messages import AIMessageChunk, HumanMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.base import RunnableSequence
 from langchain_core.tools import StructuredTool
@@ -20,6 +20,20 @@ from core.skill_manager import SkillManager
 from core.mcp_manager import MCPManager
 from auth.auth_manager import AuthManager
 from config import settings
+
+
+WORKSPACE_TOOL_NAMES = frozenset(
+    {
+        "list_files",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "read_csv",
+        "run_python",
+    }
+)
+TOOL_TRACE_MAX_EVENTS = 64
+TOOL_TRACE_RESULT_LIMIT = 2_000
 
 
 class State(MessagesState):
@@ -121,16 +135,18 @@ class AgentEngine:
 
         # 2. 获取所有可用工具 (MCP工具)
         all_tools: list[StructuredTool] = []
-        async with self.mcp_manager.connect_many(mcp_servers) as sessions:
+        workspace_id = config.get("workspace_id")
+        async with self.mcp_manager.connect_many(
+            mcp_servers, workspace_id=workspace_id
+        ) as sessions:
             for session in sessions:
                 tools = await self.mcp_manager.get_mcp_tools(session)
                 all_tools.extend(tools)
 
             # 未授权工具不会进入模型上下文，即使 MCP 服务本身可访问。
-            all_tools = [
-                tool for tool in all_tools
-                if self.auth_manager.is_allowed(user_role, f"tool:{tool.name}", "use")
-            ]
+            all_tools = self.filter_available_tools(
+                user_role, all_tools, workspace_id=workspace_id
+            )
 
             # 3. 装配 Skill (过滤工具 + 获取提示词)
             skill_data = self.skill_manager.assemble_skill(skill_name, all_tools)
@@ -167,6 +183,40 @@ class AgentEngine:
                     text = self._content_to_text(message.content)
                     if text:
                         yield text
+                elif isinstance(message, ToolMessage):
+                    self._record_tool_trace(config, message)
+
+    def filter_available_tools(
+        self,
+        user_role: str,
+        tools: list[StructuredTool],
+        *,
+        workspace_id: str | None = None,
+    ) -> list[StructuredTool]:
+        """Apply deployment safety and RBAC before tools reach the model.
+
+        The built-in MCP service also provides read-only internet tools.  A
+        deployment that disables workspace/Python tools should still be able
+        to use those network tools, so the restriction belongs at tool level
+        rather than rejecting the whole MCP server.
+        """
+        filtered = tools
+        # A valid server-derived workspace is mandatory even when the feature
+        # flag is enabled.  This keeps direct/internal callers from silently
+        # falling back to a shared filesystem root.
+        if not settings.enable_local_mcp_tools or not workspace_id:
+            filtered = [tool for tool in filtered if tool.name not in WORKSPACE_TOOL_NAMES]
+        else:
+            # Arbitrary Python can traverse the whole container filesystem and
+            # therefore cannot be made tenant-safe by changing only its cwd.
+            # It remains available only to explicitly isolated, direct MCP
+            # deployments and is never injected into the multi-tenant API agent.
+            filtered = [tool for tool in filtered if tool.name != "run_python"]
+        return [
+            tool
+            for tool in filtered
+            if self.auth_manager.is_allowed(user_role, f"tool:{tool.name}", "use")
+        ]
 
     def validate_permissions(self, user_role: str, config: dict) -> None:
         """在打开 SSE 响应前验证所请求资源。"""
@@ -191,3 +241,25 @@ class AgentEngine:
             elif isinstance(block, dict) and isinstance(block.get("text"), str):
                 parts.append(block["text"])
         return "".join(parts)
+
+    @classmethod
+    def _record_tool_trace(cls, config: dict, message: ToolMessage) -> None:
+        """Record a bounded completed-tool event without changing text output.
+
+        ``stream_mode=messages`` emits a ``ToolMessage`` after each ToolNode
+        invocation. Routes pass a request-local list in ``config`` and persist
+        it with the assistant message or governed AgentRun. Keeping the trace
+        side-channel separate preserves the existing string streaming API.
+        """
+        trace = config.get("tool_trace")
+        if not isinstance(trace, list) or len(trace) >= TOOL_TRACE_MAX_EVENTS:
+            return
+        result = cls._content_to_text(message.content)[:TOOL_TRACE_RESULT_LIMIT]
+        trace.append(
+            {
+                "name": message.name or "tool",
+                "tool_call_id": message.tool_call_id,
+                "status": getattr(message, "status", "success") or "success",
+                "result_preview": result,
+            }
+        )

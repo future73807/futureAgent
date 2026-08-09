@@ -15,13 +15,19 @@ services:
       DATABASE_URL: postgresql+psycopg://postgres:password@postgres:5432/postgres
       MCP_SERVERS_JSON: '{"local_tools":"http://mcp:8050/mcp"}'
       MCP_SERVER_PORT: 8050
-      ENABLE_LOCAL_MCP_TOOLS: "false"
+      # The bundled MCP server verifies a signed workspace claim and roots
+      # every file operation in that tenant's private directory.  This safe
+      # Compose path can therefore expose its five file tools by default.
+      ENABLE_LOCAL_MCP_TOOLS: ${ENABLE_LOCAL_MCP_TOOLS:-true}
+      MCP_WORKSPACE_SIGNING_KEY: ${MCP_WORKSPACE_SIGNING_KEY:-change-this-development-mcp-secret-before-production}
       # 默认直连已配置的供应商；不启动独立 LiteLLM 代理服务。
       LITELLM_PROXY_URL: ""
       # 默认 Compose 仅用于本地 HTTP 开发。生产环境必须经由 HTTPS 入口，
       # 并显式设置 ENVIRONMENT=production，确保续期 Cookie 只经 HTTPS 传输。
       ENVIRONMENT: ${ENVIRONMENT:-development}
       RUN_MIGRATIONS_ON_STARTUP: "true"
+      SKILLS_DIR: /app/runtime/config/skills
+      CASBIN_POLICY_PATH: /app/runtime/config/auth/rbac_policy.csv
       STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
       STORAGE_S3_BUCKET: ${STORAGE_S3_BUCKET:-}
       STORAGE_S3_ENDPOINT_URL: ${STORAGE_S3_ENDPOINT_URL:-}
@@ -37,6 +43,7 @@ services:
         condition: service_started
     volumes:
       - futureagent_uploads:/app/uploads
+      - futureagent_runtime_config:/app/runtime/config
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/ready')\""]
       interval: 10s
@@ -54,14 +61,25 @@ services:
       dockerfile: Dockerfile
     container_name: futureagent-mcp
     ports:
-      - "8050:8050"
+      - "127.0.0.1:8050:8050"
     environment:
       MCP_WORKSPACE_ROOT: /workspace
       MCP_SERVER_PORT: 8050
+      MCP_WORKSPACE_SIGNING_KEY: ${MCP_WORKSPACE_SIGNING_KEY:-change-this-development-mcp-secret-before-production}
+      MCP_ALLOWED_HOSTS_CSV: mcp:8050,localhost:8050,127.0.0.1:8050
+      MCP_ENABLE_PYTHON_TOOL: ${MCP_ENABLE_PYTHON_TOOL:-false}
+      MCP_WEB_TIMEOUT_SECONDS: ${MCP_WEB_TIMEOUT_SECONDS:-15}
+      MCP_WEB_MAX_BYTES: ${MCP_WEB_MAX_BYTES:-500000}
+      MCP_WEB_ALLOW_DNS_FAKE_IPS: ${MCP_WEB_ALLOW_DNS_FAKE_IPS:-false}
     volumes:
       - agent_workspace:/workspace
     networks:
       - futureagent-net
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
     restart: unless-stopped
 
   # ===== PostgreSQL 数据库 =====
@@ -95,7 +113,8 @@ services:
     container_name: futureagent-user-frontend
     ports:
       # 当前 Windows 将 5173/5174 所在端口段保留，改用可访问的本地端口。
-      - "8081:80"
+      # 如端口被其他项目占用，可在 .env 中设置 USER_FRONTEND_PORT。
+      - "${USER_FRONTEND_PORT:-8081}:80"
     depends_on:
       - api
     networks:
@@ -107,9 +126,13 @@ services:
     build:
       context: ./admin-frontend
       dockerfile: Dockerfile
+      args:
+        # 默认跳转统一网关；部署到不同域名时可显式设置完整公网地址。
+        VITE_USER_FRONTEND_URL: ${USER_FRONTEND_PUBLIC_URL:-}
+        VITE_USER_FRONTEND_PORT: ${GATEWAY_PORT:-80}
     container_name: futureagent-admin-frontend
     ports:
-      - "8082:80"
+      - "${ADMIN_FRONTEND_PORT:-8082}:80"
     depends_on:
       - api
     networks:
@@ -121,7 +144,7 @@ services:
     image: nginx:alpine
     container_name: futureagent-nginx
     ports:
-      - "80:80"
+      - "${GATEWAY_PORT:-80}:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
@@ -135,6 +158,7 @@ volumes:
   postgres_data:
   agent_workspace:
   futureagent_uploads:
+  futureagent_runtime_config:
 
 networks:
   futureagent-net:

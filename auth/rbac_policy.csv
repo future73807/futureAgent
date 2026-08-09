@@ -12,8 +12,11 @@ p, developer, tool:*, use
 p, user, model:gpt-3.5-turbo, use
 p, user, skill:chatbot, use
 p, user, mcp:*, use
+p, user, tool:list_files, use
 p, user, tool:read_file, use
 p, user, tool:read_csv, use
+p, user, tool:web_search, use
+p, user, tool:fetch_url, use
 
 # 角色继承：admin 继承 developer
 g, admin, developer

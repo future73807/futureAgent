@@ -6,15 +6,16 @@ import unittest
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from zipfile import ZipFile
 
 from fastapi.testclient import TestClient
-from sqlmodel import SQLModel, create_engine
+from sqlmodel import SQLModel, Session, create_engine
 
 import db.database as database
 from config import settings
-from db.models import now_utc
+from api.routes import _conversation_agent_query
+from db.models import ChatMessage, Conversation, now_utc
 from main import app
 
 
@@ -92,6 +93,80 @@ class ProductApiTests(unittest.TestCase):
             headers=self.auth_headers(self.member_token),
         )
         self.assertEqual(member_admin.status_code, 403)
+
+    def test_agent_chat_persists_completed_tool_trace(self):
+        registered = self.client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": "trace-owner@example.com",
+                "password": "StrongPass123!",
+                "display_name": "Trace Owner",
+                "workspace_name": "Trace workspace",
+            },
+        )
+        self.assertEqual(registered.status_code, 201, registered.text)
+        headers = self.auth_headers(
+            registered.json()["access_token"],
+            registered.json()["workspaces"][0]["id"],
+        )
+        conversation = self.client.post(
+            "/api/v1/conversations",
+            headers=headers,
+            json={"title": "Tool trace", "model_id": "gpt-4o-mini"},
+        )
+        conversation_id = conversation.json()["conversation"]["id"]
+
+        class FakeSkillManager:
+            @staticmethod
+            def get_skill(name):
+                return object() if name == "default" else None
+
+        class FakeMcpManager:
+            servers = {"web_tools": "http://tools.invalid/mcp"}
+
+        class FakeEngine:
+            skill_manager = FakeSkillManager()
+            mcp_manager = FakeMcpManager()
+
+            @staticmethod
+            def validate_permissions(*_args, **_kwargs):
+                return None
+
+            async def run(self, **kwargs):
+                kwargs["config"]["tool_trace"].append(
+                    {
+                        "name": "web_search",
+                        "tool_call_id": "call-chat-1",
+                        "status": "success",
+                        "result_preview": "verified result",
+                    }
+                )
+                yield "Answer grounded in the tool result."
+
+        with (
+            patch("api.routes.get_agent_engine", return_value=FakeEngine()),
+            patch("api.routes._ensure_model_ready"),
+        ):
+            response = self.client.post(
+                "/api/v1/chat/agent",
+                headers=headers,
+                json={
+                    "query": "Search and answer",
+                    "model_id": "gpt-4o-mini",
+                    "skill_name": "default",
+                    "conversation_id": conversation_id,
+                    "mcp_servers": ["web_tools"],
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("event: done", response.text)
+        messages = self.client.get(
+            f"/api/v1/conversations/{conversation_id}/messages",
+            headers=headers,
+        ).json()["messages"]
+        assistant = next(message for message in reversed(messages) if message["role"] == "assistant")
+        self.assertEqual(assistant["tool_trace"][0]["name"], "web_search")
+        self.assertEqual(assistant["tool_trace"][0]["tool_call_id"], "call-chat-1")
 
     def test_refresh_session_rotates_and_handles_naive_database_timestamps(self):
         from api.routes import _refresh_session_expired
@@ -240,9 +315,96 @@ class ProductApiTests(unittest.TestCase):
         self.assertEqual(downloaded.status_code, 200, downloaded.text)
         self.assertEqual(downloaded.content, b"Commercial acceptance criteria")
 
+        with Session(database.engine) as session:
+            session.add(
+                ChatMessage(
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content="Earlier launch context",
+                )
+            )
+            session.commit()
+            prompt = _conversation_agent_query(
+                session,
+                session.get(Conversation, conversation_id),
+                "Review the brief",
+            )
+        self.assertIn("Earlier launch context", prompt)
+        self.assertIn("Commercial acceptance criteria", prompt)
+        self.assertIn("Review the brief", prompt)
+
         audits = self.client.get("/api/v1/audit-events", headers=headers)
         self.assertEqual(audits.status_code, 200, audits.text)
         self.assertTrue(any(event["action"] == "attachment.uploaded" for event in audits.json()["events"]))
+
+    def test_conversation_attachments_are_private_from_regular_members(self):
+        owner = self.client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": "private-owner@example.com",
+                "password": "StrongPass123!",
+                "display_name": "Private Owner",
+                "workspace_name": "Private workspace",
+            },
+        )
+        colleague = self.client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": "private-member@example.com",
+                "password": "StrongPass123!",
+                "display_name": "Private Member",
+                "workspace_name": "Member home",
+            },
+        )
+        self.assertEqual(owner.status_code, 201, owner.text)
+        self.assertEqual(colleague.status_code, 201, colleague.text)
+        workspace_id = owner.json()["workspaces"][0]["id"]
+        owner_headers = self.auth_headers(owner.json()["access_token"], workspace_id)
+        member_headers = self.auth_headers(colleague.json()["access_token"], workspace_id)
+        added = self.client.post(
+            f"/api/v1/workspaces/{workspace_id}/members",
+            headers=owner_headers,
+            json={"email": "private-member@example.com", "role": "member"},
+        )
+        self.assertEqual(added.status_code, 201, added.text)
+
+        conversation = self.client.post(
+            "/api/v1/conversations",
+            headers=owner_headers,
+            json={"title": "Owner-only research", "model_id": "gpt-4o-mini"},
+        )
+        conversation_id = conversation.json()["conversation"]["id"]
+        uploaded = self.client.post(
+            "/api/v1/attachments",
+            headers=owner_headers,
+            data={"conversation_id": conversation_id},
+            files={"file": ("private.txt", b"owner-only evidence", "text/plain")},
+        )
+        attachment = uploaded.json()["attachment"]
+
+        listed = self.client.get("/api/v1/attachments", headers=member_headers)
+        self.assertEqual(listed.status_code, 200, listed.text)
+        self.assertNotIn(
+            attachment["id"],
+            {item["id"] for item in listed.json()["attachments"]},
+        )
+        filtered = self.client.get(
+            f"/api/v1/attachments?conversation_id={conversation_id}",
+            headers=member_headers,
+        )
+        self.assertEqual(filtered.status_code, 403, filtered.text)
+        self.assertEqual(
+            self.client.get(attachment["preview_url"], headers=member_headers).status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.get(attachment["download_url"], headers=member_headers).status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.get(attachment["download_url"], headers=owner_headers).content,
+            b"owner-only evidence",
+        )
 
     def test_model_unavailability_is_reported_before_sse_starts(self):
         response = self.client.post(
@@ -251,6 +413,68 @@ class ProductApiTests(unittest.TestCase):
             json={"query": "Verify the preflight", "model_id": "gpt-4o-mini"},
         )
         self.assertEqual(response.status_code, 503, response.text)
+
+    def test_ollama_is_not_advertised_ready_when_runtime_is_offline(self):
+        from core.model_hub import ModelHub
+
+        headers = self.auth_headers(self.owner_token, self.owner_workspace)
+        with (
+            patch.object(settings, "litellm_proxy_url", ""),
+            patch.object(settings, "ollama_base_url", "http://127.0.0.1:11434"),
+            patch.object(ModelHub, "_available_ollama_models", return_value=None),
+        ):
+            response = self.client.get("/api/v1/models", headers=headers)
+            chat = self.client.post(
+                "/api/v1/chat/completions",
+                headers=headers,
+                json={"query": "Do not open a false-ready stream", "model_id": "ollama/llama3"},
+            )
+        detail = next(
+            item for item in response.json()["details"] if item["id"] == "ollama/llama3"
+        )
+        self.assertTrue(detail["configured"])
+        self.assertFalse(detail["ready"])
+        self.assertEqual(chat.status_code, 503, chat.text)
+        self.assertIn("不可达", chat.json()["detail"])
+
+    def test_settings_separate_provider_configuration_from_runtime_availability(self):
+        from core.model_hub import ModelHub
+        from db.models import User
+
+        with Session(database.engine) as session:
+            owner = session.get(User, self.owner_id)
+            owner.is_platform_admin = True
+            session.add(owner)
+            session.commit()
+
+        headers = self.auth_headers(self.owner_token, self.owner_workspace)
+        with (
+            patch.object(settings, "openai_api_key", "sk-your-openai-key"),
+            patch.object(settings, "anthropic_api_key", ""),
+            patch.object(settings, "google_api_key", ""),
+            patch.object(settings, "longcat_api_key", ""),
+            patch.object(settings, "ollama_base_url", "http://127.0.0.1:11434"),
+            patch.object(ModelHub, "_available_ollama_models", return_value=None),
+        ):
+            offline = self.client.get("/api/v1/settings", headers=headers)
+
+        self.assertEqual(offline.status_code, 200, offline.text)
+        payload = offline.json()
+        self.assertFalse(payload["providers"]["openai"])
+        self.assertTrue(payload["providers"]["ollama"])
+        self.assertEqual(payload["provider_status"]["openai"]["availability"], "not_configured")
+        self.assertEqual(payload["provider_status"]["ollama"]["availability"], "offline")
+
+        with (
+            patch.object(settings, "ollama_base_url", "http://127.0.0.1:11434"),
+            patch.object(ModelHub, "_available_ollama_models", return_value={"llama3", "qwen2.5"}),
+        ):
+            online = self.client.get("/api/v1/settings", headers=headers)
+        self.assertEqual(online.json()["provider_status"]["ollama"], {
+            "configured": True,
+            "availability": "online",
+            "installed_model_count": 2,
+        })
 
     def test_platform_admin_can_record_a_real_model_probe_result(self):
         from sqlmodel import Session
@@ -319,7 +543,7 @@ class ProductApiTests(unittest.TestCase):
                 return object() if name == "default" else None
 
         class FakeMcpManager:
-            servers = {}
+            servers = {"web_tools": "http://tools.invalid/mcp"}
 
         class FakeEngine:
             skill_manager = FakeSkillManager()
@@ -329,7 +553,15 @@ class ProductApiTests(unittest.TestCase):
             def validate_permissions(*_args, **_kwargs):
                 return None
 
-            async def run(self, **_kwargs):
+            async def run(self, **kwargs):
+                kwargs["config"]["tool_trace"].append(
+                    {
+                        "name": "web_search",
+                        "tool_call_id": "call-run-1",
+                        "status": "success",
+                        "result_preview": "acceptance evidence source",
+                    }
+                )
                 yield "Release note draft with acceptance evidence."
 
         with (
@@ -339,7 +571,7 @@ class ProductApiTests(unittest.TestCase):
             response = self.client.post(
                 f"/api/v1/tasks/{task_id}/execute",
                 headers=owner_headers,
-                json={"model_id": "gpt-4o-mini", "skill_name": "default", "step_id": step_id, "idempotency_key": "release-note-first-run"},
+                json={"model_id": "gpt-4o-mini", "skill_name": "default", "step_id": step_id, "mcp_servers": [], "idempotency_key": "release-note-first-run"},
             )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertIn("event: done", response.text)
@@ -349,6 +581,8 @@ class ProductApiTests(unittest.TestCase):
         self.assertEqual(len(runs.json()["runs"]), 1)
         self.assertEqual(runs.json()["runs"][0]["status"], "succeeded")
         self.assertEqual(runs.json()["runs"][0]["attempt"], 1)
+        self.assertEqual(runs.json()["runs"][0]["mcp_servers"], [])
+        self.assertEqual(runs.json()["runs"][0]["tool_trace"][0]["name"], "web_search")
         self.assertIn("acceptance evidence", runs.json()["runs"][0]["output"])
         first_run_id = runs.json()["runs"][0]["id"]
 
@@ -364,6 +598,8 @@ class ProductApiTests(unittest.TestCase):
                 requested_by=self.owner_id,
                 model_id="gpt-4o-mini",
                 skill_name="default",
+                mcp_servers_json='["web_tools"]',
+                tool_trace_json='[{"name":"fetch_url","tool_call_id":"parent-call","status":"error","result_preview":"provider unavailable"}]',
                 status="failed",
                 error_message="Provider route was unavailable.",
             )
@@ -384,7 +620,7 @@ class ProductApiTests(unittest.TestCase):
             retry = self.client.post(
                 f"/api/v1/tasks/{task_id}/execute",
                 headers=owner_headers,
-                json={"model_id": "gpt-4o-mini", "skill_name": "default", "step_id": step_id, "retry_of_id": retry_parent_id, "idempotency_key": "release-note-retry-run"},
+                json={"model_id": "gpt-4o-mini", "skill_name": "default", "step_id": step_id, "mcp_servers": ["web_tools"], "retry_of_id": retry_parent_id, "idempotency_key": "release-note-retry-run"},
             )
         self.assertEqual(duplicate.status_code, 409, duplicate.text)
         self.assertEqual(retry.status_code, 200, retry.text)
@@ -392,6 +628,8 @@ class ProductApiTests(unittest.TestCase):
         retry_run = next(run for run in retry_runs if run["retry_of_id"] == retry_parent_id)
         self.assertEqual(retry_run["retry_of_id"], retry_parent_id)
         self.assertEqual(retry_run["attempt"], 2)
+        self.assertEqual(retry_run["mcp_servers"], ["web_tools"])
+        self.assertEqual(retry_run["tool_trace"][0]["tool_call_id"], "call-run-1")
 
         with Session(database.engine) as session:
             cancellable = AgentRun(
@@ -402,6 +640,8 @@ class ProductApiTests(unittest.TestCase):
                 requested_by=self.owner_id,
                 model_id="gpt-4o-mini",
                 skill_name="default",
+                mcp_servers_json='["web_tools"]',
+                tool_trace_json='[{"name":"fetch_url","tool_call_id":"cancelled-call","status":"success","result_preview":"saved before cancellation"}]',
             )
             session.add(cancellable)
             session.commit()
@@ -413,6 +653,11 @@ class ProductApiTests(unittest.TestCase):
         )
         self.assertEqual(cancelled.status_code, 200, cancelled.text)
         self.assertEqual(cancelled.json()["run"]["status"], "cancelled")
+        self.assertEqual(cancelled.json()["run"]["mcp_servers"], ["web_tools"])
+        self.assertEqual(
+            cancelled.json()["run"]["tool_trace"][0]["tool_call_id"],
+            "cancelled-call",
+        )
 
         activity = self.client.get(f"/api/v1/tasks/{task_id}/activity", headers=owner_headers)
         self.assertEqual(activity.status_code, 200, activity.text)
@@ -473,6 +718,67 @@ class ProductApiTests(unittest.TestCase):
         ):
             response = self.client.get(endpoint, headers=admin_headers)
             self.assertEqual(response.status_code, 200, f"{endpoint}: {response.text}")
+
+    def test_mcp_tool_listing_matches_workspace_role_permissions(self):
+        viewer = self.client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": "mcp-viewer@example.com",
+                "password": "StrongPass123!",
+                "display_name": "MCP Viewer",
+                "workspace_name": "Viewer home",
+            },
+        )
+        self.assertEqual(viewer.status_code, 201, viewer.text)
+        joined = self.client.post(
+            f"/api/v1/workspaces/{self.owner_workspace}/members",
+            headers=self.auth_headers(self.owner_token, self.owner_workspace),
+            json={"email": "mcp-viewer@example.com", "role": "viewer"},
+        )
+        self.assertEqual(joined.status_code, 201, joined.text)
+
+        discovered = {
+            "name": "local_tools",
+            "url": "http://mcp.invalid/mcp",
+            "status": "online",
+            "tools": [
+                "list_files",
+                "read_file",
+                "write_file",
+                "edit_file",
+                "read_csv",
+                "fetch_url",
+                "web_search",
+            ],
+        }
+        probe = AsyncMock(
+            side_effect=[
+                [{**discovered, "tools": list(discovered["tools"])}],
+                [{**discovered, "tools": list(discovered["tools"])}],
+            ]
+        )
+        with (
+            patch.object(settings, "enable_local_mcp_tools", True),
+            patch("api.routes.MCPManager.list_servers", probe),
+        ):
+            owner = self.client.get(
+                "/api/v1/mcp/servers?probe=true",
+                headers=self.auth_headers(self.owner_token, self.owner_workspace),
+            )
+            viewer_result = self.client.get(
+                "/api/v1/mcp/servers?probe=true",
+                headers=self.auth_headers(
+                    viewer.json()["access_token"], self.owner_workspace
+                ),
+            )
+
+        self.assertEqual(owner.status_code, 200, owner.text)
+        self.assertEqual(viewer_result.status_code, 200, viewer_result.text)
+        self.assertEqual(set(owner.json()["servers"][0]["tools"]), set(discovered["tools"]))
+        self.assertEqual(
+            set(viewer_result.json()["servers"][0]["tools"]),
+            {"list_files", "read_file", "read_csv", "fetch_url", "web_search"},
+        )
 
 
 if __name__ == "__main__":

@@ -175,6 +175,14 @@ class AgentRun(SQLModel, table=True):
     requested_by: str = Field(foreign_key="users.id", index=True)
     model_id: str = Field(max_length=120)
     skill_name: str = Field(max_length=120)
+    # NULL marks executions created before MCP selection was persisted.  New
+    # runs always write a JSON list, including an explicit empty list.
+    mcp_servers_json: str | None = Field(default=None, max_length=4000)
+    # As with MCP selection, NULL distinguishes historical runs from a new run
+    # that completed without calling a tool (stored as an explicit ``[]``).
+    # Each trace entry is bounded before persistence so provider/tool output
+    # cannot grow the row without limit.
+    tool_trace_json: str | None = Field(default=None, max_length=200_000)
     idempotency_key: str | None = Field(default=None, max_length=96, index=True)
     retry_of_id: str | None = Field(default=None, foreign_key="agent_runs.id", index=True)
     attempt: int = Field(default=1)
