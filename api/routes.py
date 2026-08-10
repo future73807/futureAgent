@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import secrets
 import tempfile
@@ -82,6 +83,7 @@ from db.models import (
 from db.security import create_token, decode_token, hash_password, verify_password
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 TASK_STATUSES = {"backlog", "todo", "in_progress", "review", "done"}
 TASK_PRIORITIES = {"low", "medium", "high", "urgent"}
@@ -1827,9 +1829,16 @@ async def chat_completions(
             session.commit()
             raise
         except Exception as exc:
-            import traceback
-            traceback.print_exc()
-            assistant_message.content = "".join(collected) or f"[AI request did not complete: {str(exc)}]"
+            # Provider exceptions can contain request metadata, internal URLs,
+            # or credential fragments.  Keep diagnostics bounded to safe
+            # identifiers and the exception type; never persist or print the
+            # upstream exception text.
+            logger.error(
+                "AI chat request failed: conversation_id=%s exception_type=%s",
+                conversation.id,
+                type(exc).__name__,
+            )
+            assistant_message.content = "".join(collected) or "[AI request did not complete]"
             session.add(assistant_message)
             session.commit()
             yield _sse_error(exc)
@@ -2833,7 +2842,10 @@ def public_settings(user: User = Depends(require_platform_admin)) -> dict[str, A
                 "installed_model_count": len(ollama_models or []),
             },
         },
-        "litellm": {"enabled": bool(settings.litellm_proxy_url), "url": settings.litellm_proxy_url},
+        "litellm": {
+            "enabled": ModelHub.is_litellm_proxy_configured(),
+            "url": settings.litellm_proxy_url,
+        },
         "observability": {"langfuse": bool(settings.langfuse_public_key and settings.langfuse_secret_key)},
         "uploads": {"max_upload_mb": settings.max_upload_mb},
         "storage": {

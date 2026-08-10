@@ -54,7 +54,30 @@ cd frontend && npm install && npm run dev
 cd ../admin-frontend && npm install && npm run dev
 ```
 
-## 6. 验证命令
+## 6. 模型与 API 配置
+
+先从示例生成只在本机使用的配置文件；`.env` 已被 Git 忽略，不要把真实密钥提交到仓库：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+至少配置一种可用的模型路由：
+
+| 路由 | `.env` 变量 | 说明 |
+| --- | --- | --- |
+| OpenAI | `OPENAI_API_KEY`、可选 `OPENAI_BASE_URL` | 默认使用 OpenAI 官方兼容地址 |
+| Anthropic | `ANTHROPIC_API_KEY` | Claude 模型直连 |
+| Google | `GOOGLE_API_KEY` | Gemini 模型直连 |
+| LongCat | `LONGCAT_API_KEY`、可选 `LONGCAT_API_BASE` | OpenAI 兼容接口 |
+| Ollama | `OLLAMA_BASE_URL` | Compose 默认连接 `host.docker.internal:11434`；API 在宿主机直接运行时使用 `http://localhost:11434` |
+| LiteLLM 代理 | `LITELLM_PROXY_URL`、`LITELLM_MASTER_KEY` | URL 非空时，支持的模型统一经内部代理路由 |
+
+修改后重新启动 API，并在管理员后台的“模型中心”逐个执行真实探针。配置项只代表存在路由；只有探针成功才代表供应商、凭据、网络和模型名称全部可用。
+
+生产环境还必须填写独立的 `JWT_SECRET_KEY`、`MCP_WORKSPACE_SIGNING_KEY` 和管理员密码，并使用 HTTPS。
+
+## 7. 验证命令
 
 ```powershell
 python -m unittest discover -s tests -v
@@ -63,7 +86,7 @@ cd ../admin-frontend && npm run build
 docker compose config --quiet
 ```
 
-## 7. 安全约定
+## 8. 安全约定
 
 1. 受保护请求需携带 `Authorization: Bearer <token>` 和 `X-Workspace-ID: <id>`
 2. 角色来自签名令牌与数据库成员关系
@@ -71,7 +94,7 @@ docker compose config --quiet
 4. 内置 MCP 文件工具只接受 API 通过 `MCP_WORKSPACE_SIGNING_KEY` 签发的工作区声明，并在 MCP 服务端强制映射到独立目录；生产环境必须替换该密钥且不得把它发给浏览器
 5. `run_python` 不进入共享多租户 Agent；只有独占 MCP 容器可显式设置 `MCP_ENABLE_PYTHON_TOOL=true`
 
-## 8. 上线前必须完成
+## 9. 上线前必须完成
 
 1. 配置真实模型供应商并在"模型中心"验证
 2. 使用 PostgreSQL + S3 对象存储

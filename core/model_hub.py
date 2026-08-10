@@ -195,6 +195,7 @@ class ModelHub:
         if not candidate:
             return False
         placeholders = {
+            "sk-futureagent",
             "sk-your-openai-key",
             "your-google-api-key",
             "replace-with-a-long-random-secret",
@@ -229,7 +230,16 @@ class ModelHub:
         operator should use :meth:`configuration_source` so they can make that
         distinction visible.
         """
-        return bool(settings.litellm_proxy_url.strip()) or cls.is_direct_provider_configured(model_id)
+        if settings.litellm_proxy_url.strip():
+            return cls.is_litellm_proxy_configured()
+        return cls.is_direct_provider_configured(model_id)
+
+    @classmethod
+    def is_litellm_proxy_configured(cls) -> bool:
+        """Require both proxy address and a non-placeholder credential."""
+        return bool(settings.litellm_proxy_url.strip()) and cls._is_usable_credential(
+            settings.litellm_master_key
+        )
 
     @classmethod
     def _available_ollama_models(cls) -> set[str] | None:
@@ -270,7 +280,7 @@ class ModelHub:
     @classmethod
     def configuration_source(cls, model_id: str) -> str:
         if settings.litellm_proxy_url.strip():
-            return "litellm_proxy"
+            return "litellm_proxy" if cls.is_litellm_proxy_configured() else "missing"
         if cls.is_direct_provider_configured(model_id):
             return "direct_provider"
         return "missing"
@@ -285,6 +295,10 @@ class ModelHub:
         cloud provider call without any credential.
         """
         if settings.litellm_proxy_url.strip():
+            if not ModelHub.is_litellm_proxy_configured():
+                return "LiteLLM 代理已设置地址，但缺少有效的 Master Key。"
+            if not LITELLM_AVAILABLE:
+                return "未安装 LiteLLM，请先安装 API 依赖后再使用内部模型网关。"
             return None
         if not LITELLM_AVAILABLE:
             # 没有 LiteLLM 时，如果有直接供应商凭据，也允许通过

@@ -100,6 +100,23 @@ class ModelReadinessTests(unittest.TestCase):
             self.assertEqual(ModelHub.configuration_source("gpt-4o-mini"), "missing")
             self.assertIn("尚未配置", ModelHub.readiness_error("gpt-4o-mini"))
 
+    def test_litellm_proxy_requires_a_non_placeholder_master_key(self):
+        with (
+            patch.object(settings, "litellm_proxy_url", "http://proxy.example.test"),
+            patch.object(settings, "litellm_master_key", ""),
+            patch.object(model_hub, "LITELLM_AVAILABLE", True),
+        ):
+            self.assertFalse(ModelHub.is_litellm_proxy_configured())
+            self.assertFalse(ModelHub.is_model_configured("gpt-4o-mini"))
+            self.assertEqual(ModelHub.configuration_source("gpt-4o-mini"), "missing")
+            self.assertIn("Master Key", ModelHub.readiness_error("gpt-4o-mini"))
+
+        with (
+            patch.object(settings, "litellm_proxy_url", "http://proxy.example.test"),
+            patch.object(settings, "litellm_master_key", "sk-futureagent"),
+        ):
+            self.assertFalse(ModelHub.is_litellm_proxy_configured())
+
     def test_longcat_is_selectable_and_uses_openai_compatible_litellm_route(self):
         self.assertIn("LongCat-2.0", ModelHub.list_supported_models())
         self.assertEqual(

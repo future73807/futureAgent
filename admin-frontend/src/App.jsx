@@ -78,6 +78,7 @@ function AdminShell({ profile, workspaces, onLogout }) {
   const [selectedKey, setSelectedKey] = useState(pageLabels[initialPage] ? initialPage : 'dashboard'); const [collapsed, setCollapsed] = useState(false); const [mobileNav, setMobileNav] = useState(false); const [online, setOnline] = useState(false); const [workspaceId, setCurrentWorkspace] = useState(getWorkspaceId() || workspaces[0]?.id || '')
   const userAppUrl = userFrontendUrl()
   useEffect(() => { setWorkspaceId(workspaceId) }, [workspaceId])
+  useEffect(() => { window.scrollTo(0, 0) }, [selectedKey])
   useEffect(() => { const check = () => apiFetch('/api/v1/health', { workspaceId: '' }).then(() => setOnline(true)).catch(() => setOnline(false)); check(); const timer = setInterval(check, 30_000); return () => clearInterval(timer) }, [])
   const navigate = (key) => { if (!pageLabels[key]) return; setSelectedKey(key); setMobileNav(false); window.history.replaceState(null, '', `#/${key}`) }
   const pages = useMemo(() => ({ dashboard: <DashboardPage onNavigate={navigate} />, users: <UsersPage />, workspaces: <WorkspacesPage />, audit: <AuditPage />, models: <ModelsPage />, skills: <SkillsPage />, mcp: <McpPage />, policies: <PoliciesPage />, settings: <SettingsPage /> }), [])
@@ -94,7 +95,7 @@ function AdminShell({ profile, workspaces, onLogout }) {
         <div className="admin-header-title">{!screens.lg && <Button type="text" icon={<MenuOutlined />} onClick={() => setMobileNav(true)} aria-label="打开管理导航" />}<Text strong>{pageLabels[selectedKey]}</Text><Badge status={online ? 'success' : 'error'} text={online ? 'API 正常' : 'API 异常'} /></div>
         <Space className="admin-header-actions" size={10}>
           <div className="admin-workspace-switch"><Text type="secondary">当前工作区</Text><Select aria-label="切换当前工作区" value={workspaceId || undefined} onChange={setCurrentWorkspace} placeholder="选择工作区" notFoundContent="暂无可切换的工作区" options={workspaces.map((item) => ({ value: item.id, label: item.name }))} /></div>
-          <Button icon={<ExportOutlined />} href={userAppUrl} target="_blank" rel="noreferrer"><span className="admin-action-label">用户端</span></Button>
+          <Button icon={<ExportOutlined />} href={userAppUrl} target="_blank" rel="noreferrer" aria-label="打开用户端"><span className="admin-action-label">用户端</span></Button>
           <Dropdown menu={accountMenu} placement="bottomRight" trigger={['click']}><Button type="text" className="admin-account-button" aria-label={`账号菜单：${profile.display_name}`}><Avatar size={30}>{profile.display_name?.slice(0, 1)}</Avatar><span className="admin-account-name">{profile.display_name}</span></Button></Dropdown>
         </Space>
       </Header>

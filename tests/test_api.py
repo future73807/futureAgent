@@ -414,6 +414,54 @@ class ProductApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 503, response.text)
 
+    def test_chat_provider_failure_is_sanitized_in_stream_history_and_logs(self):
+        owner_headers = self.auth_headers(self.owner_token, self.owner_workspace)
+        conversation = self.client.post(
+            "/api/v1/conversations",
+            headers=owner_headers,
+            json={"title": "Sanitized provider failure", "model_id": "gpt-4o-mini"},
+        )
+        self.assertEqual(conversation.status_code, 201, conversation.text)
+        conversation_id = conversation.json()["conversation"]["id"]
+        sensitive_detail = "upstream-secret-detail sk-should-never-be-stored"
+
+        with (
+            patch("api.routes._ensure_model_ready"),
+            patch(
+                "api.routes.ModelHub.generate",
+                new=AsyncMock(side_effect=RuntimeError(sensitive_detail)),
+            ),
+            patch("api.routes.logger.error") as safe_log,
+        ):
+            response = self.client.post(
+                "/api/v1/chat/completions",
+                headers=owner_headers,
+                json={
+                    "query": "Trigger a sanitized provider failure",
+                    "model_id": "gpt-4o-mini",
+                    "conversation_id": conversation_id,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn(sensitive_detail, response.text)
+        self.assertIn("AI 服务未能完成本次请求", response.text)
+        self.assertTrue(safe_log.called)
+        self.assertNotIn(sensitive_detail, repr(safe_log.call_args))
+
+        messages = self.client.get(
+            f"/api/v1/conversations/{conversation_id}/messages",
+            headers=owner_headers,
+        )
+        self.assertEqual(messages.status_code, 200, messages.text)
+        assistant = next(
+            item
+            for item in reversed(messages.json()["messages"])
+            if item["role"] == "assistant"
+        )
+        self.assertEqual(assistant["content"], "[AI request did not complete]")
+        self.assertNotIn(sensitive_detail, assistant["content"])
+
     def test_ollama_is_not_advertised_ready_when_runtime_is_offline(self):
         from core.model_hub import ModelHub
 

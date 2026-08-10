@@ -267,6 +267,7 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
             disabled={!canSend}
             placeholder={senderPlaceholder}
             autoSize={{ minRows: 1, maxRows: 6 }}
+            actions={(_, { components: { SendButton, LoadingButton } }) => streaming ? <LoadingButton aria-label="停止生成" /> : <SendButton aria-label="发送消息" />}
           />
         </div>
       </section>

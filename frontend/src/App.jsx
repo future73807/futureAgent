@@ -786,6 +786,7 @@ function WorkspaceApp({ session, onLogout }) {
   }, [canProbeMcp, clearWorkspaceData, message, workspaceId])
 
   useEffect(() => { setWorkspaceId(workspaceId); loadWorkspace() }, [loadWorkspace, workspaceId])
+  useEffect(() => { window.scrollTo(0, 0) }, [nav])
   const loadConversationMessages = useCallback(async (conversationId = activeConversationId, { notify = false } = {}) => {
     const requestId = ++conversationRequestIdRef.current
     const requestedWorkspaceId = workspaceId
@@ -867,7 +868,7 @@ function WorkspaceApp({ session, onLogout }) {
             <Badge className="workspace-health" status={refreshing ? 'processing' : 'success'} text={refreshing ? '正在同步' : '已安全连接'} />
             <Tooltip title="刷新工作区"><Button type="text" icon={<ReloadOutlined spin={refreshing} />} onClick={refreshWorkspace} disabled={refreshing || loading} aria-label="刷新工作区" /></Tooltip>
             <Dropdown menu={{ items: [{ key: 'profile', label: profile?.email, disabled: true }, { type: 'divider' }, { key: 'logout', icon: <LogoutOutlined />, label: '退出登录', onClick: onLogout }] }}>
-              <Button type="text" className="profile-button"><Avatar size="small" icon={<UserOutlined />} /><span>{profile?.display_name}</span></Button>
+              <Button type="text" className="profile-button" aria-label={`账号菜单：${profile?.display_name || '当前用户'}`}><Avatar size="small" icon={<UserOutlined />} /><span>{profile?.display_name}</span></Button>
             </Dropdown>
           </Space>
         </Header>

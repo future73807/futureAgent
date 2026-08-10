@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
 import unittest
 import tempfile
+from argparse import Namespace
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -27,6 +30,56 @@ class _Inspector:
 
 
 class MigrationBaselineTests(unittest.TestCase):
+    def test_cli_uses_project_database_setting_instead_of_ini_placeholder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "cli-default.db"
+            placeholder_path = Path(directory) / "ini-placeholder.db"
+            url = f"sqlite:///{database_path.as_posix()}"
+
+            bootstrap_config = Config("alembic.ini")
+            bootstrap_config.set_main_option("sqlalchemy.url", url)
+            command.upgrade(bootstrap_config, "head")
+
+            output = StringIO()
+            cli_config = Config("alembic.ini", stdout=output, cmd_opts=Namespace())
+            cli_config.set_main_option(
+                "sqlalchemy.url", f"sqlite:///{placeholder_path.as_posix()}"
+            )
+            with patch.object(settings, "database_url", url), patch.dict(os.environ):
+                os.environ.pop("DATABASE_URL", None)
+                command.current(cli_config)
+
+            self.assertIn("20260809_06", output.getvalue())
+            self.assertFalse(placeholder_path.exists())
+
+    def test_programmatic_database_url_is_not_overridden_by_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            explicit_path = Path(directory) / "explicit.db"
+            environment_path = Path(directory) / "environment.db"
+            explicit_url = f"sqlite:///{explicit_path.as_posix()}"
+            environment_url = f"sqlite:///{environment_path.as_posix()}"
+            config = Config("alembic.ini")
+            config.set_main_option("sqlalchemy.url", explicit_url)
+
+            with (
+                patch.object(settings, "database_url", environment_url),
+                patch.dict(os.environ, {"DATABASE_URL": environment_url}),
+            ):
+                command.upgrade(config, "head")
+
+            engine = create_engine(explicit_url)
+            try:
+                with engine.connect() as connection:
+                    self.assertEqual(
+                        connection.exec_driver_sql(
+                            "select version_num from alembic_version"
+                        ).scalar_one(),
+                        "20260809_06",
+                    )
+            finally:
+                engine.dispose()
+            self.assertFalse(environment_path.exists())
+
     def test_pre_alembic_schema_is_recognised_as_a_safe_baseline(self):
         legacy_tables = set(SQLModel.metadata.tables) - BUSINESS_AGENT_TABLES - {"agent_runs"}
         self.assertTrue(_matches_schema(_Inspector(legacy_tables), legacy_tables))

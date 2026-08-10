@@ -437,6 +437,7 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
                 disabled={!canWrite || apiUnavailable || historyLoading}
                 placeholder={!canWrite ? '只读成员不能发起对话' : apiUnavailable ? '汇报智能体服务尚未部署' : historyLoading ? '正在加载已保存的对话…' : '例如：今天有哪些生产异常和待跟进事项？'}
                 autoSize={{ minRows: 1, maxRows: 4 }}
+                actions={(_, { components: { SendButton, LoadingButton } }) => sending ? <LoadingButton aria-label="停止生成" /> : <SendButton aria-label="发送消息" />}
               />
             </div>
           </div>

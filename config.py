@@ -29,7 +29,7 @@ class Settings(BaseSettings):
 
     # ===== LiteLLM Proxy =====
     litellm_proxy_url: str = ""
-    litellm_master_key: str = "sk-futureagent"
+    litellm_master_key: str = ""
 
     # ===== 应用身份与数据 =====
     database_url: str = f"sqlite:///{(BASE_DIR / 'futureagent.db').as_posix()}"

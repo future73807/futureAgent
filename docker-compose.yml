@@ -15,13 +15,17 @@ services:
       DATABASE_URL: postgresql+psycopg://postgres:password@postgres:5432/postgres
       MCP_SERVERS_JSON: '{"local_tools":"http://mcp:8050/mcp"}'
       MCP_SERVER_PORT: 8050
+      # Docker 容器内的 localhost 指向 API 容器自身。默认通过 Docker
+      # 提供的宿主机别名连接本机 Ollama，同时允许 .env 显式覆盖。
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       # The bundled MCP server verifies a signed workspace claim and roots
       # every file operation in that tenant's private directory.  This safe
       # Compose path can therefore expose its five file tools by default.
       ENABLE_LOCAL_MCP_TOOLS: ${ENABLE_LOCAL_MCP_TOOLS:-true}
       MCP_WORKSPACE_SIGNING_KEY: ${MCP_WORKSPACE_SIGNING_KEY:-change-this-development-mcp-secret-before-production}
-      # 默认直连已配置的供应商；不启动独立 LiteLLM 代理服务。
-      LITELLM_PROXY_URL: ""
+      # 留空时直连已配置的供应商；设置后统一通过 LiteLLM 代理路由。
+      LITELLM_PROXY_URL: ${LITELLM_PROXY_URL:-}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-}
       # 默认 Compose 仅用于本地 HTTP 开发。生产环境必须经由 HTTPS 入口，
       # 并显式设置 ENVIRONMENT=production，确保续期 Cookie 只经 HTTPS 传输。
       ENVIRONMENT: ${ENVIRONMENT:-development}
@@ -44,6 +48,9 @@ services:
     volumes:
       - futureagent_uploads:/app/uploads
       - futureagent_runtime_config:/app/runtime/config
+    extra_hosts:
+      # Linux Docker 需要显式注册该别名；Docker Desktop 会安全地复用它。
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/ready')\""]
       interval: 10s

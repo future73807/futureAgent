@@ -463,7 +463,7 @@ function BusinessAssistantContent({ workspaceRole, members = [], currentUserId =
         <Card className="business-chat-card" title={<Space><MessageOutlined />{assistantName(selectedAssistant, selectedCatalog)}</Space>} extra={<Tag color={selectedCatalog.color}>{selectedCatalog.audience}</Tag>}>
           <div className="business-chat-body">{chatContent}</div>
           {historyNotice && <Text className="business-history-notice" type="secondary">{historyNotice}</Text>}
-          <Sender value={chatInput} onChange={setChatInput} onSubmit={(value) => sendQuestion(value || chatInput)} loading={sending} disabled={!hasSelectedChat || !canWrite || apiUnavailable || historyLoading} placeholder={!canWrite ? '只读成员不能发起业务助手对话' : selectedLocked ? '该空间仅老板可用' : !selectedCard?.enabled ? '该助手尚未启用' : apiUnavailable ? '经营助手服务尚未部署' : historyLoading ? '正在加载已保存的对话…' : '例如：今天有哪些生产异常和待跟进事项？'} autoSize={{ minRows: 1, maxRows: 4 }} />
+          <Sender value={chatInput} onChange={setChatInput} onSubmit={(value) => sendQuestion(value || chatInput)} loading={sending} disabled={!hasSelectedChat || !canWrite || apiUnavailable || historyLoading} placeholder={!canWrite ? '只读成员不能发起业务助手对话' : selectedLocked ? '该空间仅老板可用' : !selectedCard?.enabled ? '该助手尚未启用' : apiUnavailable ? '经营助手服务尚未部署' : historyLoading ? '正在加载已保存的对话…' : '例如：今天有哪些生产异常和待跟进事项？'} autoSize={{ minRows: 1, maxRows: 4 }} actions={(_, { components: { SendButton, LoadingButton } }) => sending ? <LoadingButton aria-label="停止生成" /> : <SendButton aria-label="发送消息" />} />
         </Card>
       </div>
 
