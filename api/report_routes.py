@@ -23,6 +23,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from api.dependencies import WorkspaceContext, get_workspace_context, write_audit
+from config import settings
+from core.assistant_ai import generate_answer_sync, render_user_prompt
+from core.knowledge_retrieval import retrieve_knowledge
 from db.database import get_session
 from db.report_models import (
     KnowledgeBase,
@@ -1689,6 +1692,27 @@ def _deterministic_reply(
     return "\n".join(lines), citations
 
 
+def _compose_reply(
+    question: str,
+    summary: str,
+    citations: list[dict[str, Any]],
+    retrieved: list[dict[str, Any]],
+) -> tuple[str, str, bool]:
+    """优先用已配置模型基于授权数据作答；任何失败都降级为确定性摘要。"""
+    user_prompt = render_user_prompt(question, summary, retrieved)
+    model_reply = generate_answer_sync(settings.default_model, user_prompt)
+    if not model_reply:
+        return summary, "deterministic_authorized_data", False
+    existing_keys = {json.dumps(item, sort_keys=True, ensure_ascii=False) for item in citations}
+    for item in retrieved:
+        marker = {"type": item["source"], "id": item["id"], "title": item["title"]}
+        key = json.dumps(marker, sort_keys=True, ensure_ascii=False)
+        if key not in existing_keys and len(citations) < 10:
+            citations.append(marker)
+            existing_keys.add(key)
+    return model_reply.strip(), "llm_authorized_data", True
+
+
 @router.get("/messages")
 def list_report_messages(
     limit: int = Query(100, ge=1, le=300),
@@ -1717,7 +1741,9 @@ def chat_with_report_assistant(
     question = (payload.message or payload.query or "").strip()
     if not question:
         raise HTTPException(status_code=422, detail="请输入要查询的内容")
-    reply, citations = _deterministic_reply(session, context, question)
+    summary, citations = _deterministic_reply(session, context, question)
+    retrieved = retrieve_knowledge(session, context.workspace.id, question, limit=5)
+    reply, engine, external_called = _compose_reply(question, summary, citations, retrieved)
     user_message = ReportAssistantMessage(
         workspace_id=context.workspace.id,
         user_id=context.user.id,
@@ -1748,6 +1774,6 @@ def chat_with_report_assistant(
         "reply": reply,
         "message": _message_data(user_message),
         "assistant_message": _message_data(assistant_message),
-        "engine": "deterministic_authorized_data",
-        "external_model_called": False,
+        "engine": engine,
+        "external_model_called": external_called,
     }

@@ -22,6 +22,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from api.dependencies import WorkspaceContext, get_workspace_context, write_audit
+from config import settings
+from core.assistant_ai import generate_answer_sync, render_user_prompt
+from core.knowledge_retrieval import retrieve_knowledge
 from db.database import get_session
 from db.models import (
     BusinessAlert,
@@ -1114,6 +1117,52 @@ def _deterministic_reply(
     return "\n".join(lines), citations
 
 
+def _retrieve_scoped_context(
+    session: Session,
+    context: WorkspaceContext,
+    assistant: BusinessAssistant,
+    question: str,
+) -> list[dict[str, Any]]:
+    """按助手隔离语义过滤检索结果：知识库/附件/汇报记录属工作区共享，
+    业务记录必须落在该助手的可见范围内；私事助手不引用任何共享来源。"""
+    retrieved = retrieve_knowledge(session, context.workspace.id, question, limit=5)
+    allowed_ids = {record.id for record in _assistant_scope_records(session, context, assistant)}
+    if assistant.agent_type == "personal_private":
+        return [
+            item
+            for item in retrieved
+            if item["source"] == "business_record" and item["id"] in allowed_ids
+        ]
+
+    def keep(item: dict[str, Any]) -> bool:
+        if item["source"] != "business_record":
+            return True
+        return item["id"] in allowed_ids
+
+    return [item for item in retrieved if keep(item)]
+
+
+def _compose_reply(
+    question: str,
+    summary: str,
+    citations: list[dict[str, Any]],
+    retrieved: list[dict[str, Any]],
+) -> tuple[str, str, bool]:
+    """优先用已配置模型基于授权数据作答；任何失败都降级为确定性摘要。"""
+    user_prompt = render_user_prompt(question, summary, retrieved)
+    model_reply = generate_answer_sync(settings.default_model, user_prompt)
+    if not model_reply:
+        return summary, "deterministic_authorized_data", False
+    existing_keys = {json.dumps(item, sort_keys=True, ensure_ascii=False) for item in citations}
+    for item in retrieved:
+        marker = {"type": item["source"], "id": item["id"], "title": item["title"]}
+        key = json.dumps(marker, sort_keys=True, ensure_ascii=False)
+        if key not in existing_keys and len(citations) < 10:
+            citations.append(marker)
+            existing_keys.add(key)
+    return model_reply.strip(), "llm_authorized_data", True
+
+
 @router.post("/assistants/{assistant_id}/chat")
 def chat_with_business_assistant(
     assistant_id: str,
@@ -1128,7 +1177,9 @@ def chat_with_business_assistant(
     question = (payload.message or payload.query or "").strip()
     if not question:
         raise HTTPException(status_code=422, detail="请输入要查询的内容")
-    reply, citations = _deterministic_reply(session, context, assistant, question)
+    summary, citations = _deterministic_reply(session, context, assistant, question)
+    retrieved = _retrieve_scoped_context(session, context, assistant, question)
+    reply, engine, external_called = _compose_reply(question, summary, citations, retrieved)
     user_message = BusinessAssistantMessage(
         workspace_id=context.workspace.id,
         assistant_id=assistant.id,
@@ -1162,8 +1213,8 @@ def chat_with_business_assistant(
         "reply": reply,
         "message": _message_data(user_message),
         "assistant_message": _message_data(assistant_message),
-        "engine": "deterministic_authorized_data",
-        "external_model_called": False,
+        "engine": engine,
+        "external_model_called": external_called,
     }
 
 
