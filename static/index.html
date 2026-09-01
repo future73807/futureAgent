@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>futureAgent · 团队 AI 工作空间</title>
+  <style>
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: grid; place-items: center;
+      padding: 32px 18px; color: #172033;
+      font-family: "PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif;
+      background:
+        radial-gradient(680px circle at 12% 8%, rgba(86, 103, 223, .16), transparent 55%),
+        radial-gradient(560px circle at 88% 90%, rgba(130, 92, 214, .13), transparent 55%),
+        #edf1f8;
+    }
+    main { width: min(100%, 720px); text-align: center; }
+    .logo {
+      display: inline-grid; place-items: center; width: 64px; height: 64px;
+      border-radius: 18px; font-size: 30px;
+      background: linear-gradient(120deg, #5667df, #7655cf);
+      box-shadow: 0 14px 34px rgba(79, 95, 213, .28);
+    }
+    h1 { margin: 18px 0 8px; font-size: 30px; letter-spacing: -.8px; }
+    p.sub { margin: 0 auto 30px; max-width: 460px; color: #667085; line-height: 1.75; }
+    .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    @media (max-width: 640px) { .cards { grid-template-columns: 1fr; } }
+    a.card {
+      display: block; padding: 22px 16px; text-decoration: none; color: inherit;
+      border: 1px solid #e5e9f2; border-radius: 14px; background: rgba(255, 255, 255, .92);
+      box-shadow: 0 10px 30px rgba(28, 39, 72, .07);
+      transition: transform .18s ease, box-shadow .18s ease;
+    }
+    a.card:hover { transform: translateY(-3px); box-shadow: 0 18px 40px rgba(28, 39, 72, .12); }
+    a.card strong { display: block; font-size: 16px; margin-bottom: 6px; color: #141c30; }
+    a.card span { color: #667085; font-size: 12.5px; line-height: 1.6; }
+    .em { color: #4f5fd5; }
+    footer { margin-top: 30px; color: #98a2b8; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <main>
+    <span class="logo">🤖</span>
+    <h1>futureAgent</h1>
+    <p class="sub">面向团队协作的 AI 工作空间：对话、项目任务、计划审批、交付文件与审计记录，都在同一个有权限边界的工作区里。</p>
+    <div class="cards">
+      <a class="card" href="http://localhost:8081/">
+        <strong class="em">用户端</strong>
+        <span>AI 对话 · 项目看板 · 工作模式<br />经营与汇报智能体</span>
+      </a>
+      <a class="card" href="http://localhost:8082/">
+        <strong class="em">管理后台</strong>
+        <span>用户与工作区 · 模型中心<br />技能 / MCP / 权限策略</span>
+      </a>
+      <a class="card" href="/docs">
+        <strong class="em">接口目录</strong>
+        <span>OpenAPI 中文文档<br />与真实探针说明</span>
+      </a>
+    </div>
+    <footer>本地开发环境默认端口：用户端 8081 · 管理端 8082 · API 8000</footer>
+  </main>
+</body>
+</html>
