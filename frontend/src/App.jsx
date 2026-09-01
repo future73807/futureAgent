@@ -35,6 +35,7 @@ import theme from 'antd/es/theme'
 import {
   AppstoreOutlined,
   BarChartOutlined,
+  BellOutlined,
   CheckCircleFilled,
   CheckCircleOutlined,
   ClockCircleOutlined,
@@ -732,6 +733,9 @@ function WorkspaceApp({ session, onLogout }) {
   const [hasMoreMessages, setHasMoreMessages] = useState(false)
   const [globalQuery, setGlobalQuery] = useState('')
   const [searchResults, setSearchResults] = useState([])
+  const [notifications, setNotifications] = useState([])
+  const [unreadCount, setUnreadCount] = useState(0)
+  const [notificationOpen, setNotificationOpen] = useState(false)
   const loadedWorkspaceIdRef = useRef('')
   const workspaceRequestIdRef = useRef(0)
   const conversationRequestIdRef = useRef(0)
@@ -845,6 +849,32 @@ function WorkspaceApp({ session, onLogout }) {
       setSearchResults(data.results || [])
     } catch { setSearchResults([]) }
   }, [workspaceId])
+  const loadNotifications = useCallback(async () => {
+    if (!workspaceId) return
+    try {
+      const data = await apiFetch('/api/v1/notifications?limit=30', { workspaceId })
+      setNotifications(data.notifications || [])
+      setUnreadCount(data.unread_count || 0)
+    } catch { /* 通知加载失败不打断主界面 */ }
+  }, [workspaceId])
+  useEffect(() => { loadNotifications(); const timer = setInterval(loadNotifications, 60_000); return () => clearInterval(timer) }, [loadNotifications])
+  const markNotificationRead = async (notification) => {
+    if (notification.read) return
+    try {
+      await apiFetch(`/api/v1/notifications/${notification.id}/read`, { method: 'POST', workspaceId })
+      loadNotifications()
+    } catch { /* 保持未读状态即可 */ }
+  }
+  const markAllNotificationsRead = async () => {
+    try { await apiFetch('/api/v1/notifications/read-all', { method: 'POST', workspaceId }); loadNotifications() } catch { /* 忽略 */ }
+  }
+  const openNotification = (notification) => {
+    markNotificationRead(notification)
+    if (notification.link && navigationLabels[notification.link]) {
+      setNav(notification.link)
+      setNotificationOpen(false)
+    }
+  }
   useEffect(() => { loadConversationMessages(undefined, { notify: true }).catch(() => {}) }, [loadConversationMessages])
 
   const newConversation = async () => {
@@ -931,6 +961,11 @@ function WorkspaceApp({ session, onLogout }) {
             <div className="header-context"><Text strong>{navigationLabels[nav]}</Text><Text type="secondary">{workspace?.name || '团队工作区'}</Text></div>
           </Flex>
           <Space size={6}>
+            <Tooltip title="通知中心">
+              <Badge count={unreadCount} size="small" offset={[-3, 3]}>
+                <Button type="text" icon={<BellOutlined />} onClick={() => { setNotificationOpen(true); loadNotifications() }} aria-label="通知中心" />
+              </Badge>
+            </Tooltip>
             <AutoComplete
               className="global-search"
               value={globalQuery}
@@ -951,6 +986,28 @@ function WorkspaceApp({ session, onLogout }) {
         </Header>
         <Content className="workspace-content">{workspaceContent}</Content>
       </Layout>
+      <Drawer
+        title={<Flex justify="space-between" align="center" gap={8}><span>通知中心</span><Button size="small" type="link" disabled={!unreadCount} onClick={markAllNotificationsRead}>全部已读</Button></Flex>}
+        open={notificationOpen}
+        onClose={() => setNotificationOpen(false)}
+        width={screens.sm ? 400 : '100%'}
+      >
+        {notifications.length ? (
+          <List dataSource={notifications} renderItem={(item) => (
+            <List.Item
+              className={item.read ? 'notification-item' : 'notification-item notification-item-unread'}
+              onClick={() => openNotification(item)}
+              style={{ cursor: 'pointer' }}
+            >
+              <List.Item.Meta
+                title={item.title}
+                description={<Space direction="vertical" size={2}>{item.body && <span>{item.body}</span>}<Text type="secondary" style={{ fontSize: 12 }}>{formatDateTime(item.created_at)}</Text></Space>}
+              />
+              {!item.read && <Badge status="processing" />}
+            </List.Item>
+          )} />
+        ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无通知" />}
+      </Drawer>
       <Drawer title="任务详情" open={Boolean(taskDrawer)} onClose={() => setTaskDrawer(null)} width={screens.sm ? 480 : '100%'}>
         {taskDrawer && <Space direction="vertical" size="middle" style={{ width: '100%' }}><Title level={4}>{taskDrawer.title}</Title><Paragraph>{taskDrawer.description || '暂无任务说明。'}</Paragraph><Descriptions bordered size="small" column={1}><Descriptions.Item label="状态"><Tag>{taskStatusLabels[taskDrawer.status] || taskDrawer.status}</Tag></Descriptions.Item><Descriptions.Item label="优先级"><Tag>{priorityLabels[taskDrawer.priority] || taskDrawer.priority}</Tag></Descriptions.Item><Descriptions.Item label="截止日期">{taskDrawer.due_date || '未设置'}</Descriptions.Item></Descriptions><Button type="primary" icon={<AppstoreOutlined />} onClick={() => { setNav('work'); setTaskDrawer(null) }}>在工作模式中打开</Button></Space>}
       </Drawer>

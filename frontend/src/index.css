@@ -250,6 +250,10 @@ button, input, textarea { font: inherit; }
 .global-search-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .global-search-copy small { display: block; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
 .messages-older-wrap { width: fit-content; margin: 0 auto 14px; }
+.notification-item { border-radius: 10px; transition: background .18s var(--ease); }
+.notification-item:hover { background: #f5f7fd; }
+.notification-item-unread { background: #f3f5ff; }
+.notification-item-unread:hover { background: #eceffc; }
 .workspace-content {
   min-width: 0;
   overflow: auto;

@@ -446,3 +446,36 @@ class RefreshSession(SQLModel, table=True):
     expires_at: datetime
     revoked: bool = Field(default=False)
     created_at: datetime = Field(default_factory=now_utc)
+
+
+class Notification(SQLModel, table=True):
+    """站内通知：始终定向到单个用户，避免广播越权。"""
+
+    __tablename__ = "notifications"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    workspace_id: str = Field(foreign_key="workspaces.id", index=True)
+    user_id: str = Field(foreign_key="users.id", index=True)
+    type: str = Field(default="system", max_length=24)  # task/plan/run/alert/system
+    title: str = Field(max_length=240)
+    body: str = Field(default="", max_length=4000)
+    link: str = Field(default="", max_length=40)  # 用户端导航 key：board/work/chat/business/report
+    ref_id: str = Field(default="", max_length=80)
+    read_at: datetime | None = Field(default=None)
+    created_at: datetime = Field(default_factory=now_utc, index=True)
+
+
+class NotificationTarget(SQLModel, table=True):
+    """工作区级通知出口：普通 Webhook 或企业微信/飞书/钉钉群机器人。"""
+
+    __tablename__ = "notification_targets"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    workspace_id: str = Field(foreign_key="workspaces.id", index=True)
+    name: str = Field(max_length=120)
+    kind: str = Field(default="webhook", max_length=24)  # webhook/wecom/feishu/dingtalk
+    url: str = Field(max_length=1000)
+    enabled: bool = Field(default=True)
+    created_by: str = Field(foreign_key="users.id", index=True)
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)

@@ -48,6 +48,7 @@ from api.dependencies import (
     require_workspace_role,
     write_audit,
 )
+from api.notifications import dispatch_to_targets, push_notification
 from auth.auth_manager import AuthManager
 from config import settings
 from core.agent_engine import AgentEngine, WORKSPACE_TOOL_NAMES
@@ -1381,6 +1382,17 @@ def create_task(
     )
     session.add(task)
     session.flush()
+    if task.assignee_id and task.assignee_id != context.user.id:
+        push_notification(
+            session,
+            context.workspace.id,
+            task.assignee_id,
+            "task",
+            f"新任务指派：{task.title}",
+            body=f"{context.user.display_name} 将任务指派给你",
+            link="board",
+            ref_id=task.id,
+        )
     write_audit(
         session,
         actor_id=context.user.id,
@@ -1391,6 +1403,8 @@ def create_task(
         metadata={"project_id": task.project_id, "status": task.status},
     )
     session.commit()
+    if task.assignee_id and task.assignee_id != context.user.id:
+        dispatch_to_targets(session, context.workspace.id, f"新任务指派：{task.title}", "请到项目看板查看详情。")
     return {"task": _task_data(task)}
 
 
@@ -1577,7 +1591,7 @@ def approve_work_plan(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     require_workspace_role(context, "owner", "admin")
-    _task_or_404(session, context.workspace.id, task_id)
+    task = _task_or_404(session, context.workspace.id, task_id)
     plan = session.exec(select(WorkPlan).where(WorkPlan.task_id == task_id)).first()
     if not plan:
         raise HTTPException(status_code=404, detail="工作计划不存在")
@@ -1588,6 +1602,17 @@ def approve_work_plan(
     plan.approved_at = now_utc()
     plan.updated_at = now_utc()
     session.add(plan)
+    for recipient in {task.assignee_id, task.reporter_id} - {None, context.user.id}:
+        push_notification(
+            session,
+            context.workspace.id,
+            recipient,
+            "plan",
+            f"计划已批准：{task.title}",
+            body="可以进入工作模式开始执行了",
+            link="work",
+            ref_id=task.id,
+        )
     write_audit(
         session,
         actor_id=context.user.id,
@@ -1597,6 +1622,7 @@ def approve_work_plan(
         target_id=plan.id,
     )
     session.commit()
+    dispatch_to_targets(session, context.workspace.id, f"计划已批准：{task.title}", "可以进入工作模式开始执行。")
     return {"plan": _plan_data(session, plan)}
 
 
@@ -2315,6 +2341,16 @@ async def execute_task_with_agent(
             run.status = "succeeded"
             _save_agent_run_progress(session, run, collected, config["tool_trace"])
             run.completed_at = now_utc()
+            push_notification(
+                session,
+                context.workspace.id,
+                run.requested_by,
+                "run",
+                f"AI 执行完成：{task.title}",
+                body="结果已保存，等待人工审核",
+                link="work",
+                ref_id=run.id,
+            )
             write_audit(
                 session,
                 actor_id=context.user.id,
@@ -2325,6 +2361,7 @@ async def execute_task_with_agent(
                 metadata={"status": run.status, "step_id": run.step_id},
             )
             session.commit()
+            dispatch_to_targets(session, context.workspace.id, f"AI 执行完成：{task.title}", "结果已保存，等待人工审核。")
             record_agent_run("succeeded")
             yield {
                 "event": "done",
@@ -2368,6 +2405,16 @@ async def execute_task_with_agent(
                 else "AI 执行未完成，请检查模型路由后重试。"
             )
             run.completed_at = now_utc()
+            push_notification(
+                session,
+                context.workspace.id,
+                run.requested_by,
+                "run",
+                f"AI 执行需要处理：{task.title}",
+                body=run.error_message,
+                link="work",
+                ref_id=run.id,
+            )
             write_audit(
                 session,
                 actor_id=context.user.id,
