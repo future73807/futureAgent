@@ -113,4 +113,4 @@ function AdminApp() {
   return session ? <AdminShell profile={session.user} workspaces={session.workspaces || []} onLogout={logout} /> : <Login onLogin={loggedIn} />
 }
 
-export default function App() { return <ConfigProvider locale={zhCN} theme={{ algorithm: theme.defaultAlgorithm, token: { colorPrimary: '#4263eb', borderRadius: 14, colorBgLayout: '#f3f6fc', fontFamily: '"PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif' } }}><AntApp><AdminApp /></AntApp></ConfigProvider> }
+export default function App() { return <ConfigProvider locale={zhCN} theme={{ algorithm: theme.defaultAlgorithm, token: { colorPrimary: '#4f5fd5', colorInfo: '#4f5fd5', colorBgLayout: '#f4f6fb', borderRadius: 14, fontFamily: '"PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif' } }}><AntApp><AdminApp /></AntApp></ConfigProvider> }

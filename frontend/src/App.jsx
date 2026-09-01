@@ -34,6 +34,7 @@ import theme from 'antd/es/theme'
 import {
   AppstoreOutlined,
   BarChartOutlined,
+  CheckCircleFilled,
   CheckCircleOutlined,
   ClockCircleOutlined,
   DeleteOutlined,
@@ -162,10 +163,21 @@ function AuthScreen({ onAuthenticated }) {
 
   return (
     <div className="auth-page">
+      <section className="auth-intro" aria-label="产品简介">
+        <div className="auth-intro-brand"><Avatar size={38} className="brand-avatar" icon={<RobotOutlined />} /><span>futureAgent</span></div>
+        <div className="auth-intro-hero">
+          <Title level={1}>把对话、任务与交付<br />放进同一个 AI 工作区</Title>
+          <Paragraph>规划、审批、执行、留痕：团队在一个有权限边界的工作区里，让 AI 真正接手可追溯的工作。</Paragraph>
+        </div>
+        <Space direction="vertical" size={10} className="auth-intro-points">
+          <Text><CheckCircleFilled /> 多工作区隔离与角色权限</Text>
+          <Text><CheckCircleFilled /> 计划-审批-执行的工作治理</Text>
+          <Text><CheckCircleFilled /> 全程可审计的操作轨迹</Text>
+        </Space>
+      </section>
       <Card className="auth-card" variant="borderless">
         <Space direction="vertical" size={4} className="auth-heading">
-          <Avatar size={52} className="brand-avatar" icon={<RobotOutlined />} />
-          <Title level={2}>futureAgent</Title>
+          <Title level={3} style={{ marginBottom: 2 }}>欢迎使用 futureAgent</Title>
           <Text type="secondary">面向团队协作的 AI 工作空间</Text>
         </Space>
         <div className="auth-tabs">
@@ -186,9 +198,15 @@ function AuthScreen({ onAuthenticated }) {
           <Form.Item name="email" label="工作邮箱" rules={[{ required: true, type: 'email' }]}>
             <Input autoComplete="email" placeholder="name@company.com" />
           </Form.Item>
-          <Form.Item name="password" label="密码" rules={[{ required: true, min: 10, message: '密码至少需要 10 个字符' }]}>
-            <Input.Password autoComplete={mode === 'login' ? 'current-password' : 'new-password'} placeholder="至少 10 个字符" />
-          </Form.Item>
+          {mode === 'login' ? (
+            <Form.Item name="password" label="密码" rules={[{ required: true, min: 10, message: '密码至少需要 10 个字符' }]}>
+              <Input.Password autoComplete="current-password" placeholder="至少 10 个字符" />
+            </Form.Item>
+          ) : (
+            <Form.Item name="password" label="密码" rules={[{ required: true, min: 10, message: '密码至少需要 10 个字符' }]}>
+              <Input.Password autoComplete="new-password" placeholder="至少 10 个字符" />
+            </Form.Item>
+          )}
           <Button type="primary" htmlType="submit" block size="large" loading={loading}>
             {mode === 'login' ? '登录工作区' : '创建安全工作区'}
           </Button>
@@ -277,7 +295,7 @@ function BoardPage({ projects, tasks, members, onRefresh, openTask, workspaceRol
       </Flex>
       {projects.length ? <Flex wrap="wrap" gap={10} className="board-filters"><Select value={projectId} onChange={setProjectId} className="project-selector" options={projects.map((item) => ({ value: item.id, label: item.name }))} /><Input.Search allowClear placeholder="搜索任务标题、上下文或标签" value={query} onChange={(event) => setQuery(event.target.value)} style={{ width: 280, maxWidth: '100%' }} /><Select value={statusFilter} onChange={setStatusFilter} style={{ width: 150 }} options={[{ value: 'all', label: '全部状态' }, ...columns.map((item) => ({ value: item.key, label: item.title }))]} /></Flex> : <Empty className="guided-empty" description="请先创建项目，再开始规划工作">{canWrite && <Button type="primary" icon={<FolderOpenOutlined />} onClick={() => setProjectOpen(true)}>创建第一个项目</Button>}</Empty>}
       {projectId && <div className="kanban-grid">{columns.map((column) => (
-        <section key={column.key} className="kanban-column">
+        <section key={column.key} className={`kanban-column kanban-column-${column.key}`}>
           <Flex justify="space-between" align="center"><Text strong>{column.title}</Text><Badge color={column.color} count={projectTasks.filter((task) => task.status === column.key).length} /></Flex>
           <div className="task-stack">
             {projectTasks.filter((task) => task.status === column.key).map((task) => <TaskCard key={task.id} task={task} members={members} onSelect={openTask} onMove={moveTask} />)}
@@ -901,5 +919,5 @@ export default function App() {
 }
 
 export function Root() {
-  return <ConfigProvider locale={zhCN} theme={{ algorithm: theme.defaultAlgorithm, token: { colorPrimary: '#4f5fd5', colorInfo: '#4f5fd5', colorSuccess: '#1f9d72', colorWarning: '#d97706', colorError: '#d14343', colorText: '#172033', colorTextSecondary: '#667085', colorBorder: '#e0e6ef', colorBgLayout: '#f5f7fb', borderRadius: 10, controlHeight: 36, fontFamily: '"PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif' }, components: { Button: { primaryShadow: '0 5px 14px rgba(79, 95, 213, .18)' }, Card: { headerFontSize: 15 }, Menu: { darkItemBg: '#111827', darkItemSelectedBg: '#4f5fd5' } } }}><AntApp><App /></AntApp></ConfigProvider>
+  return <ConfigProvider locale={zhCN} theme={{ algorithm: theme.defaultAlgorithm, token: { colorPrimary: '#4f5fd5', colorInfo: '#4f5fd5', colorSuccess: '#1f9d72', colorWarning: '#d97706', colorError: '#d14343', colorText: '#172033', colorTextSecondary: '#667085', colorBorder: '#e0e6ef', colorBorderSecondary: '#eaeef6', colorBgLayout: '#f4f6fb', borderRadius: 10, controlHeight: 36, fontFamily: '"PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif' }, components: { Button: { primaryShadow: '0 6px 16px rgba(79, 95, 213, .22)', fontWeight: 500 }, Card: { headerFontSize: 15 }, Menu: { darkItemBg: '#101624', darkItemSelectedBg: '#4f5fd5' } } }}><AntApp><App /></AntApp></ConfigProvider>
 }

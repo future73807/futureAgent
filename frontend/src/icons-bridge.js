@@ -4,6 +4,7 @@ export { default as ArrowUpOutlined } from '@ant-design/icons/es/icons/ArrowUpOu
 export { default as AudioMutedOutlined } from '@ant-design/icons/es/icons/AudioMutedOutlined'
 export { default as AudioOutlined } from '@ant-design/icons/es/icons/AudioOutlined'
 export { default as BarChartOutlined } from '@ant-design/icons/es/icons/BarChartOutlined'
+export { default as CheckCircleFilled } from '@ant-design/icons/es/icons/CheckCircleFilled'
 export { default as CheckCircleOutlined } from '@ant-design/icons/es/icons/CheckCircleOutlined'
 export { default as ClearOutlined } from '@ant-design/icons/es/icons/ClearOutlined'
 export { default as ClockCircleOutlined } from '@ant-design/icons/es/icons/ClockCircleOutlined'
