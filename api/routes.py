@@ -2592,7 +2592,33 @@ def _extract_attachment_text(source: Path | Any, extension: str, first_bytes: by
         return _extract_docx_text(source)
     if extension == ".xlsx":
         return _extract_xlsx_text(source)
+    if extension == ".pdf":
+        return _extract_pdf_text(source)
     return ""
+
+
+def _extract_pdf_text(source: Path | Any) -> str:
+    """pypdf 提取文本型 PDF；扫描件（无文本层）返回空串并保持可存储。"""
+    try:
+        from pypdf import PdfReader
+        from pypdf.errors import PdfReadError
+
+        if hasattr(source, "seek"):
+            source.seek(0)
+        reader = PdfReader(source)
+        chunks: list[str] = []
+        total = 0
+        for page in reader.pages:
+            text = (page.extract_text() or "").strip()
+            if not text:
+                continue
+            chunks.append(text)
+            total += len(text) + 1
+            if total >= PREVIEW_TEXT_LIMIT:
+                break
+        return "\n".join(chunks)[:PREVIEW_TEXT_LIMIT]
+    except Exception:  # noqa: BLE001 - 加密/损坏/扫描 PDF 都降级为无文本
+        return ""
 
 
 @router.get("/v1/attachments")

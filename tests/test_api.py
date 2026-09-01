@@ -740,6 +740,52 @@ class ProductApiTests(unittest.TestCase):
                 )
             self.assertEqual(_extract_xlsx_text(xlsx_path), "Metric\tReady")
 
+    def test_pdf_extractor_returns_text_and_degrades(self):
+        from api.routes import _extract_pdf_text
+
+        def build_text_pdf(text: str) -> bytes:
+            stream = f"BT /F1 14 Tf 72 720 Td ({text}) Tj ET".encode()
+            objects = [
+                b"<< /Type /Catalog /Pages 2 0 R >>",
+                b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+                b"/Resources << /Font << /F1 5 0 R >> >> >>",
+                b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream",
+                b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            ]
+            output = bytearray(b"%PDF-1.4\n")
+            offsets: list[int] = []
+            for number, body in enumerate(objects, start=1):
+                offsets.append(len(output))
+                output += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
+            xref_at = len(output)
+            output += f"xref\n0 {len(objects) + 1}\n".encode()
+            output += b"0000000000 65535 f \n"
+            for offset in offsets:
+                output += f"{offset:010d} 00000 n \n".encode()
+            output += (
+                f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+                f"startxref\n{xref_at}\n%%EOF"
+            ).encode()
+            return bytes(output)
+
+        from io import BytesIO
+
+        from pypdf import PdfWriter
+
+        with tempfile.TemporaryDirectory() as directory:
+            text_pdf = Path(directory) / "brief.pdf"
+            text_pdf.write_bytes(build_text_pdf("Quarterly delivery brief"))
+            self.assertIn("Quarterly delivery brief", _extract_pdf_text(text_pdf))
+
+            writer = PdfWriter()
+            writer.add_blank_page(width=612, height=792)
+            buffer = BytesIO()
+            writer.write(buffer)
+            blank_pdf = Path(directory) / "blank.pdf"
+            blank_pdf.write_bytes(buffer.getvalue())
+            self.assertEqual(_extract_pdf_text(blank_pdf), "")
+
     def test_platform_admin_views_are_server_protected(self):
         member_denied = self.client.get(
             "/api/v1/admin/overview",
