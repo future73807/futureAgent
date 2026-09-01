@@ -8,6 +8,10 @@ from contextlib import nullcontext
 from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock
+from uuid import uuid4
+
+# 密码不在源码里保存字面量：每个测试进程随机生成，只要求单次运行内自洽。
+BUSINESS_TEST_PASSWORD = "S3ed-" + uuid4().hex[:13] + "!"
 
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
@@ -126,7 +130,7 @@ class BusinessAgentApiTests(unittest.TestCase):
             "/api/v1/auth/register",
             json={
                 "email": email,
-                "password": "BusinessPass123!",
+                "password": BUSINESS_TEST_PASSWORD,
                 "display_name": display_name,
                 "workspace_name": workspace_name,
             },

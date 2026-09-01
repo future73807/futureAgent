@@ -2431,6 +2431,20 @@ def _xml_local_name(node: ElementTree.Element) -> str:
     return node.tag.rsplit("}", 1)[-1] if isinstance(node.tag, str) else ""
 
 
+def _carries_xml_entity_declaration(raw: bytes) -> bool:
+    """办公文档 XML 不需要 DOCTYPE/ENTITY；出现即视为实体扩展攻击载荷。"""
+    return b"<!doctype" in raw[:8192].lower() or b"<!entity" in raw.lower()
+
+
+def _parse_untrusted_xml(raw: bytes) -> ElementTree.Element:
+    """用 defusedxml 解析不可信 XML，禁用 DTD 实体扩展，另做显式声明拒绝。"""
+    if _carries_xml_entity_declaration(raw):
+        raise ElementTree.ParseError("xml entity declarations are not allowed")
+    from defusedxml import ElementTree as DefusedElementTree
+
+    return DefusedElementTree.fromstring(raw, forbid_dtd=True)
+
+
 def _extract_docx_text(source: Path | Any) -> str:
     try:
         if hasattr(source, "seek"):
@@ -2439,7 +2453,7 @@ def _extract_docx_text(source: Path | Any) -> str:
             raw = _bounded_zip_member(archive, "word/document.xml")
         if not raw:
             return ""
-        root = ElementTree.fromstring(raw)
+        root = _parse_untrusted_xml(raw)
         return "".join(
             node.text or "" for node in root.iter() if _xml_local_name(node) == "t"
         )[:PREVIEW_TEXT_LIMIT]
@@ -2452,13 +2466,15 @@ def _extract_xlsx_text(source: Path | Any) -> str:
         if hasattr(source, "seek"):
             source.seek(0)
         with ZipFile(source) as archive:
-            shared_root = ElementTree.fromstring(_bounded_zip_member(archive, "xl/sharedStrings.xml") or b"<sst/>")
-            shared_strings = [
-                "".join(node.itertext())
-                for node in shared_root.iter()
-                if _xml_local_name(node) == "si"
-            ]
-            sheet_root = ElementTree.fromstring(_bounded_zip_member(archive, "xl/worksheets/sheet1.xml") or b"<worksheet/>")
+            shared_raw = _bounded_zip_member(archive, "xl/sharedStrings.xml") or b"<sst/>"
+            sheet_raw = _bounded_zip_member(archive, "xl/worksheets/sheet1.xml") or b"<worksheet/>"
+        shared_root = _parse_untrusted_xml(shared_raw)
+        shared_strings = [
+            "".join(node.itertext())
+            for node in shared_root.iter()
+            if _xml_local_name(node) == "si"
+        ]
+        sheet_root = _parse_untrusted_xml(sheet_raw)
         rows: list[str] = []
         for row in (node for node in sheet_root.iter() if _xml_local_name(node) == "row"):
             values: list[str] = []

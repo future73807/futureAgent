@@ -7,7 +7,11 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 from zipfile import ZipFile
+
+# 密码不在源码里保存字面量：每个测试进程随机生成，只要求单次运行内自洽。
+TEST_PASSWORD = "S3ed-" + uuid4().hex[:13] + "!"
 
 from fastapi.testclient import TestClient
 from sqlmodel import SQLModel, Session, create_engine
@@ -39,7 +43,7 @@ class ProductApiTests(unittest.TestCase):
             "/api/v1/auth/register",
             json={
                 "email": "owner@example.com",
-                "password": "StrongPass123!",
+                "password": TEST_PASSWORD,
                 "display_name": "Owner",
                 "workspace_name": "Owner workspace",
             },
@@ -53,7 +57,7 @@ class ProductApiTests(unittest.TestCase):
             "/api/v1/auth/register",
             json={
                 "email": "member@example.com",
-                "password": "StrongPass123!",
+                "password": TEST_PASSWORD,
                 "display_name": "Member",
                 "workspace_name": "Member workspace",
             },
@@ -99,7 +103,7 @@ class ProductApiTests(unittest.TestCase):
             "/api/v1/auth/register",
             json={
                 "email": "trace-owner@example.com",
-                "password": "StrongPass123!",
+                "password": TEST_PASSWORD,
                 "display_name": "Trace Owner",
                 "workspace_name": "Trace workspace",
             },
@@ -180,7 +184,7 @@ class ProductApiTests(unittest.TestCase):
 
         login = self.client.post(
             "/api/v1/auth/login",
-            json={"email": "owner@example.com", "password": "StrongPass123!"},
+            json={"email": "owner@example.com", "password": TEST_PASSWORD},
         )
         self.assertEqual(login.status_code, 200, login.text)
         refreshed = self.client.post("/api/v1/auth/refresh")
@@ -342,7 +346,7 @@ class ProductApiTests(unittest.TestCase):
             "/api/v1/auth/register",
             json={
                 "email": "private-owner@example.com",
-                "password": "StrongPass123!",
+                "password": TEST_PASSWORD,
                 "display_name": "Private Owner",
                 "workspace_name": "Private workspace",
             },
@@ -351,7 +355,7 @@ class ProductApiTests(unittest.TestCase):
             "/api/v1/auth/register",
             json={
                 "email": "private-member@example.com",
-                "password": "StrongPass123!",
+                "password": TEST_PASSWORD,
                 "display_name": "Private Member",
                 "workspace_name": "Member home",
             },
@@ -772,7 +776,7 @@ class ProductApiTests(unittest.TestCase):
             "/api/v1/auth/register",
             json={
                 "email": "mcp-viewer@example.com",
-                "password": "StrongPass123!",
+                "password": TEST_PASSWORD,
                 "display_name": "MCP Viewer",
                 "workspace_name": "Viewer home",
             },
