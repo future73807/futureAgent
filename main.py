@@ -9,12 +9,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
 from api.docs_catalog import render_api_catalog
+from api.automation_routes import router as automation_router
 from api.notifications import router as notifications_router
 from api.openapi import API_TITLE, build_openapi_schema
 from api.routes import router
 from api.report_routes import router as report_router
 from config import settings
 from core.observability import install_observability
+from core.scheduler import shutdown_scheduler, start_scheduler
 from db.database import init_db
 import os
 
@@ -22,7 +24,9 @@ import os
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    start_scheduler()
     yield
+    shutdown_scheduler()
 
 app = FastAPI(
     title=API_TITLE,
@@ -53,6 +57,7 @@ install_observability(app)
 app.include_router(router, prefix="/api")
 app.include_router(report_router, prefix="/api/v1/report")
 app.include_router(notifications_router, prefix="/api")
+app.include_router(automation_router, prefix="/api")
 
 
 def _root_path(request: Request, path: str) -> str:

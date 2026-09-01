@@ -479,3 +479,24 @@ class NotificationTarget(SQLModel, table=True):
     created_by: str = Field(foreign_key="users.id", index=True)
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
+
+
+class ScheduledJob(SQLModel, table=True):
+    """工作区级定时自动化任务（cron 由 APScheduler 解析执行）。"""
+
+    __tablename__ = "scheduled_jobs"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    workspace_id: str = Field(foreign_key="workspaces.id", index=True)
+    name: str = Field(max_length=120)
+    # business_daily_report / report_daily / report_weekly / alert_scan
+    job_type: str = Field(max_length=32)
+    cron: str = Field(max_length=64)
+    enabled: bool = Field(default=True)
+    payload_json: str = Field(default="{}", max_length=4000)
+    last_run_at: datetime | None = Field(default=None)
+    last_status: str = Field(default="", max_length=16)  # ok/failed
+    last_message: str = Field(default="", max_length=500)
+    created_by: str = Field(foreign_key="users.id", index=True)
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)

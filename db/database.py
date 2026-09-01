@@ -58,6 +58,14 @@ REPORT_AGENT_TABLES = {
     "report_assistant_messages",
 }
 
+# 通知中心与自动化调度是最新加入的特性表。旧库识别时忽略它们：缺少这些表
+# 只说明版本停在 20260902_08 之前，升级链会以增量表把它们补齐。
+NEWEST_FEATURE_TABLES = {
+    "notifications",
+    "notification_targets",
+    "scheduled_jobs",
+}
+
 # Revision 20260725_03 adds both business tables and audit visibility columns.
 # A real 20260725_02 installation has every prior table but naturally lacks
 # those two new audit columns, so bootstrap detection must ignore only them
@@ -116,11 +124,13 @@ def _upgrade_schema() -> None:
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names())
     if "alembic_version" not in existing_tables:
-        # Exclude both business and report agent tables when detecting legacy schemas,
-        # since these are new additions that didn't exist in earlier versions.
+        # Exclude business/report agent tables and the newest feature tables
+        # when detecting legacy schemas: their absence only means the install
+        # predates those revisions, and the additive chain recreates them.
         current_tables = set(SQLModel.metadata.tables)
-        non_agent_tables = current_tables - BUSINESS_AGENT_TABLES - REPORT_AGENT_TABLES
-        pre_report_tables = current_tables - REPORT_AGENT_TABLES
+        core_current = current_tables - NEWEST_FEATURE_TABLES
+        non_agent_tables = current_tables - BUSINESS_AGENT_TABLES - REPORT_AGENT_TABLES - NEWEST_FEATURE_TABLES
+        pre_report_tables = current_tables - REPORT_AGENT_TABLES - NEWEST_FEATURE_TABLES
         if _matches_schema(inspector, current_tables):
             # A controlled transition for installations that already include
             # every current model table. No DDL is needed; record the head.
@@ -128,13 +138,13 @@ def _upgrade_schema() -> None:
             return
         if _matches_schema(
             inspector,
-            current_tables,
+            core_current,
             ignored_columns=PRE_AGENT_RUN_TRACE_MISSING_COLUMNS,
         ):
             command.stamp(alembic_config, "20260809_05")
         elif _matches_schema(
             inspector,
-            current_tables,
+            core_current,
             ignored_columns=PRE_AGENT_RUN_MCP_MISSING_COLUMNS,
         ):
             command.stamp(alembic_config, "20260726_04")

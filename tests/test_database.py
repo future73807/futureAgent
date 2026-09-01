@@ -17,6 +17,9 @@ import db.database as database
 from config import settings
 from db.database import BUSINESS_AGENT_TABLES, _matches_schema
 
+# 迁移链的当前 head；新增迁移时只需更新这一处。
+CURRENT_HEAD = "20260902_08"
+
 
 class _Inspector:
     def __init__(self, tables: set[str]):
@@ -49,7 +52,7 @@ class MigrationBaselineTests(unittest.TestCase):
                 os.environ.pop("DATABASE_URL", None)
                 command.current(cli_config)
 
-            self.assertIn("20260809_06", output.getvalue())
+            self.assertIn(CURRENT_HEAD, output.getvalue())
             self.assertFalse(placeholder_path.exists())
 
     def test_programmatic_database_url_is_not_overridden_by_environment(self):
@@ -74,7 +77,7 @@ class MigrationBaselineTests(unittest.TestCase):
                         connection.exec_driver_sql(
                             "select version_num from alembic_version"
                         ).scalar_one(),
-                        "20260809_06",
+                        CURRENT_HEAD,
                     )
             finally:
                 engine.dispose()
@@ -103,7 +106,7 @@ class MigrationBaselineTests(unittest.TestCase):
                 with engine.connect() as connection:
                     self.assertEqual(
                         connection.exec_driver_sql("select version_num from alembic_version").scalar_one(),
-                        "20260809_06",
+                        CURRENT_HEAD,
                     )
             finally:
                 engine.dispose()
@@ -132,7 +135,7 @@ class MigrationBaselineTests(unittest.TestCase):
                 with engine.connect() as connection:
                     self.assertEqual(
                         connection.exec_driver_sql("select version_num from alembic_version").scalar_one(),
-                        "20260809_06",
+                        CURRENT_HEAD,
                     )
             finally:
                 engine.dispose()
@@ -162,7 +165,7 @@ class MigrationBaselineTests(unittest.TestCase):
                 with migration_engine.connect() as connection:
                     self.assertEqual(
                         connection.exec_driver_sql("select version_num from alembic_version").scalar_one(),
-                        "20260809_06",
+                        CURRENT_HEAD,
                     )
             finally:
                 database.engine = original_engine
@@ -206,7 +209,7 @@ class MigrationBaselineTests(unittest.TestCase):
                         connection.exec_driver_sql(
                             "select version_num from alembic_version"
                         ).scalar_one(),
-                            "20260809_06",
+                            CURRENT_HEAD,
                     )
             finally:
                 database.engine = original_engine
@@ -249,7 +252,7 @@ class MigrationBaselineTests(unittest.TestCase):
                         connection.exec_driver_sql(
                             "select version_num from alembic_version"
                         ).scalar_one(),
-                            "20260809_06",
+                            CURRENT_HEAD,
                     )
             finally:
                 database.engine = original_engine
@@ -328,7 +331,7 @@ class MigrationBaselineTests(unittest.TestCase):
                         connection.exec_driver_sql(
                             "select version_num from alembic_version"
                         ).scalar_one(),
-                        "20260809_06",
+                        CURRENT_HEAD,
                     )
             finally:
                 database.engine = original_engine

@@ -8,9 +8,11 @@ import Flex from 'antd/es/flex'
 import Form from 'antd/es/form'
 import Input from 'antd/es/input'
 import Modal from 'antd/es/modal'
+import Popconfirm from 'antd/es/popconfirm'
 import Select from 'antd/es/select'
 import Space from 'antd/es/space'
 import Spin from 'antd/es/spin'
+import Switch from 'antd/es/switch'
 import Tag from 'antd/es/tag'
 import Typography from 'antd/es/typography'
 import Upload from 'antd/es/upload'
@@ -19,6 +21,7 @@ import {
   BookOutlined,
   CheckCircleOutlined,
   ClockCircleOutlined,
+  DeleteOutlined,
   FileTextOutlined,
   MessageOutlined,
   PlusOutlined,
@@ -129,8 +132,11 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
   const [kbOpen, setKbOpen] = useState(false)
   const [kbUploading, setKbUploading] = useState(false)
   const [ingestCredential, setIngestCredential] = useState(null)
+  const [automationJobs, setAutomationJobs] = useState([])
+  const [automationOpen, setAutomationOpen] = useState(false)
   const [sourceForm] = Form.useForm()
   const [kbForm] = Form.useForm()
+  const [automationForm] = Form.useForm()
 
   const loadReport = useCallback(async ({ quiet = false } = {}) => {
     if (quiet) setRefreshing(true)
@@ -166,6 +172,58 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
   }, [])
 
   useEffect(() => { loadReport() }, [loadReport])
+
+  const loadAutomation = useCallback(async () => {
+    if (!canManage) return
+    try {
+      const payload = await apiFetch('/api/v1/automation/jobs')
+      setAutomationJobs(Array.isArray(payload?.jobs) ? payload.jobs : [])
+    } catch { /* 自动化任务不可用时不影响主面板 */ }
+  }, [canManage])
+  useEffect(() => { loadAutomation() }, [loadAutomation])
+
+  const createAutomationJob = async (values) => {
+    try {
+      await apiFetch('/api/v1/automation/jobs', {
+        method: 'POST',
+        body: JSON.stringify({ name: values.name, job_type: values.job_type, cron: values.cron }),
+      })
+      message.success('自动化任务已创建并开始调度。')
+      setAutomationOpen(false)
+      automationForm.resetFields()
+      loadAutomation()
+    } catch (error) {
+      message.error(readableError(error))
+    }
+  }
+  const toggleAutomationJob = async (job, enabled) => {
+    try {
+      await apiFetch(`/api/v1/automation/jobs/${job.id}`, { method: 'PATCH', body: JSON.stringify({ enabled }) })
+      loadAutomation()
+    } catch (error) {
+      message.error(readableError(error))
+    }
+  }
+  const runAutomationJob = async (job) => {
+    try {
+      const payload = await apiFetch(`/api/v1/automation/jobs/${job.id}/run`, { method: 'POST' })
+      if (payload?.status === 'ok') message.success(payload.message || '执行完成')
+      else message.warning(payload?.message || '执行失败')
+      loadAutomation()
+      loadReport({ quiet: true })
+    } catch (error) {
+      message.error(readableError(error))
+    }
+  }
+  const removeAutomationJob = async (job) => {
+    try {
+      await apiFetch(`/api/v1/automation/jobs/${job.id}`, { method: 'DELETE' })
+      message.success('自动化任务已删除')
+      loadAutomation()
+    } catch (error) {
+      message.error(readableError(error))
+    }
+  }
 
   useEffect(() => {
     let current = true
@@ -522,9 +580,49 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
                 <Conversations items={kbItems} />
               ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未创建知识库文档" />}
             </div>
+
+            {/* 自动化任务 */}
+            {canManage && (
+              <div className="report-panel-section">
+                <div className="report-panel-header">
+                  <Text strong>自动化任务</Text>
+                  <Button size="small" icon={<PlusOutlined />} onClick={() => setAutomationOpen(true)}>新建</Button>
+                </div>
+                <Text type="secondary" className="report-panel-hint">按 cron 定时生成日报/周报或扫描预警，结果推送站内通知。</Text>
+                {automationJobs.length ? (
+                  <div className="automation-list">
+                    {automationJobs.map((job) => (
+                      <div key={job.id} className="automation-item">
+                        <div className="automation-copy">
+                          <span>{job.name}</span>
+                          <small>{job.job_type_label} · {job.cron}</small>
+                          {job.last_message && <small className={job.last_status === 'failed' ? 'automation-error' : undefined}>上次：{job.last_message}</small>}
+                        </div>
+                        <Space size={4}>
+                          <Button size="small" type="text" onClick={() => runAutomationJob(job)}>执行</Button>
+                          <Popconfirm title="确认删除该自动化任务？" onConfirm={() => removeAutomationJob(job)} okText="删除" cancelText="取消">
+                            <Button size="small" type="text" danger icon={<DeleteOutlined />} aria-label={`删除 ${job.name}`} />
+                          </Popconfirm>
+                          <Switch size="small" checked={job.enabled} onChange={(checked) => toggleAutomationJob(job, checked)} aria-label={`启用 ${job.name}`} />
+                        </Space>
+                      </div>
+                    ))}
+                  </div>
+                ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未配置自动化任务" />}
+              </div>
+            )}
           </div>
         </div>
       </Spin>
+
+      <Modal title="创建自动化任务" open={automationOpen} onCancel={() => setAutomationOpen(false)} onOk={() => automationForm.submit()} okText="创建" cancelText="取消" destroyOnHidden>
+        <Form form={automationForm} layout="vertical" onFinish={createAutomationJob} initialValues={{ job_type: 'report_daily', cron: '0 18 * * *' }}>
+          <Alert type="info" showIcon message="按 cron 表达式自动执行" description="任务由服务端调度器执行，结果写入报告列表并通过通知中心提醒。" />
+          <Form.Item name="name" label="任务名称" rules={[{ required: true, min: 2 }]}><Input placeholder="例如：每个工作日 18 点生成日报" /></Form.Item>
+          <Form.Item name="job_type" label="任务类型" rules={[{ required: true }]}><Select options={[{ value: 'report_daily', label: '汇报日报' }, { value: 'report_weekly', label: '汇报周报' }, { value: 'business_daily_report', label: '经营日报' }, { value: 'alert_scan', label: '预警扫描' }]} /></Form.Item>
+          <Form.Item name="cron" label="cron 表达式（UTC，5 段）" rules={[{ required: true }]}><Input placeholder="0 18 * * 1-5" /></Form.Item>
+        </Form>
+      </Modal>
 
       <Modal title="登记业务数据源" open={sourceOpen} onCancel={() => setSourceOpen(false)} onOk={() => sourceForm.submit()} okText="登记" cancelText="取消" destroyOnHidden>
         <Form form={sourceForm} layout="vertical" onFinish={createSource} initialValues={{ source_type: 'oa', connection_mode: 'api', access_scope: '按最小权限授权' }}>
