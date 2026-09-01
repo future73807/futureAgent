@@ -240,6 +240,16 @@ button, input, textarea { font: inherit; }
 .header-context .ant-typography:first-child { font-size: 14px; }
 .header-context .ant-typography:last-child { overflow: hidden; max-width: 220px; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .profile-button { display: inline-flex; align-items: center; gap: 8px; height: 38px; padding-inline: 8px !important; }
+.global-search { width: 300px; max-width: 34vw; }
+.global-search .ant-select-selector { border-color: var(--border) !important; border-radius: 10px !important; background: #f3f5fa !important; transition: background .2s var(--ease), border-color .2s var(--ease); }
+.global-search:hover .ant-select-selector,
+.global-search.ant-select-focused .ant-select-selector { background: #fff !important; border-color: #c3cdf2 !important; }
+.global-search-option { display: flex; align-items: flex-start; gap: 8px; min-width: 0; padding: 3px 0; }
+.global-search-tag { flex: none; margin: 1px 0 0; }
+.global-search-copy { flex: 1; min-width: 0; }
+.global-search-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.global-search-copy small { display: block; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.messages-older-wrap { width: fit-content; margin: 0 auto 14px; }
 .workspace-content {
   min-width: 0;
   overflow: auto;

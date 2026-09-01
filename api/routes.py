@@ -1735,16 +1735,107 @@ def update_conversation(
 @router.get("/v1/conversations/{conversation_id}/messages")
 def list_conversation_messages(
     conversation_id: str,
+    limit: int = Query(0, ge=0, le=500, description="大于 0 时返回最近 limit 条消息"),
+    before_id: str | None = Query(None, description="分页游标：只返回早于该消息的内容"),
     context: WorkspaceContext = Depends(get_workspace_context),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     _conversation_or_404(session, context, conversation_id)
+    statement = select(ChatMessage).where(ChatMessage.conversation_id == conversation_id)
+    if before_id:
+        anchor = session.get(ChatMessage, before_id)
+        if anchor is None or anchor.conversation_id != conversation_id:
+            raise HTTPException(status_code=404, detail="分页锚点消息不存在")
+        statement = statement.where(ChatMessage.created_at < anchor.created_at)
+    if limit > 0:
+        recent = session.exec(
+            statement.order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc()).limit(limit + 1)
+        ).all()
+        has_more = len(recent) > limit
+        page = list(reversed(recent[:limit]))
+        return {
+            "messages": [_message_data(message) for message in page],
+            "has_more": has_more,
+        }
+    messages = session.exec(
+        statement.order_by(ChatMessage.created_at, ChatMessage.id)
+    ).all()
+    return {"messages": [_message_data(message) for message in messages], "has_more": False}
+
+
+@router.get("/v1/search")
+def workspace_search(
+    q: str = Query(min_length=1, max_length=80),
+    limit: int = Query(20, ge=1, le=50),
+    context: WorkspaceContext = Depends(get_workspace_context),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """工作区级全局搜索：任务、项目、对话、消息与附件文件名。"""
+    pattern = f"%{q.strip()}%"
+    results: list[dict[str, Any]] = []
+
+    for project in session.exec(
+        select(Project)
+        .where(Project.workspace_id == context.workspace.id, Project.name.ilike(pattern))
+        .order_by(Project.updated_at.desc())
+        .limit(limit)
+    ).all():
+        results.append(
+            {"type": "project", "id": project.id, "title": project.name, "snippet": project.description[:120], "updated_at": project.updated_at}
+        )
+    for task in session.exec(
+        select(Task)
+        .where(Task.workspace_id == context.workspace.id)
+        .where(Task.title.ilike(pattern) | Task.description.ilike(pattern) | Task.labels_json.ilike(pattern))
+        .order_by(Task.updated_at.desc())
+        .limit(limit)
+    ).all():
+        results.append(
+            {"type": "task", "id": task.id, "title": task.title, "snippet": task.description[:120], "updated_at": task.updated_at, "project_id": task.project_id}
+        )
+    conversations = session.exec(
+        select(Conversation)
+        .where(
+            Conversation.workspace_id == context.workspace.id,
+            Conversation.owner_id == context.user.id,
+            Conversation.title.ilike(pattern),
+        )
+        .order_by(Conversation.updated_at.desc())
+        .limit(limit)
+    ).all()
+    for conversation in conversations:
+        results.append(
+            {"type": "conversation", "id": conversation.id, "title": conversation.title, "snippet": "", "updated_at": conversation.updated_at}
+        )
     messages = session.exec(
         select(ChatMessage)
-        .where(ChatMessage.conversation_id == conversation_id)
-        .order_by(ChatMessage.created_at)
+        .join(Conversation, Conversation.id == ChatMessage.conversation_id)
+        .where(
+            Conversation.workspace_id == context.workspace.id,
+            Conversation.owner_id == context.user.id,
+            ChatMessage.content.ilike(pattern),
+        )
+        .order_by(ChatMessage.created_at.desc())
+        .limit(limit)
     ).all()
-    return {"messages": [_message_data(message) for message in messages]}
+    for message in messages:
+        snippet = message.content[:160]
+        results.append(
+            {"type": "message", "id": message.id, "conversation_id": message.conversation_id, "title": f"消息 · {message.created_at:%m-%d %H:%M}", "snippet": snippet, "updated_at": message.created_at}
+        )
+    attachments = session.exec(
+        select(Attachment)
+        .where(Attachment.workspace_id == context.workspace.id, Attachment.original_name.ilike(pattern))
+        .order_by(Attachment.created_at.desc())
+        .limit(limit)
+    ).all()
+    for attachment in attachments:
+        results.append(
+            {"type": "attachment", "id": attachment.id, "title": attachment.original_name, "snippet": f"{max(1, attachment.size_bytes // 1024)} KB", "updated_at": attachment.created_at, "task_id": attachment.task_id, "conversation_id": attachment.conversation_id}
+        )
+
+    results.sort(key=lambda item: item["updated_at"], reverse=True)
+    return {"query": q, "results": results[:limit]}
 
 
 @router.post("/v1/chat/completions")

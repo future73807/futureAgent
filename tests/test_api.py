@@ -825,12 +825,110 @@ class ProductApiTests(unittest.TestCase):
             )
 
         self.assertEqual(owner.status_code, 200, owner.text)
-        self.assertEqual(viewer_result.status_code, 200, viewer_result.text)
+        self.assertEqual(viewer_result.status_code, 200, owner.text)
         self.assertEqual(set(owner.json()["servers"][0]["tools"]), set(discovered["tools"]))
         self.assertEqual(
             set(viewer_result.json()["servers"][0]["tools"]),
             {"list_files", "read_file", "read_csv", "fetch_url", "web_search"},
         )
+
+    def test_conversation_message_pagination(self):
+        headers = self.auth_headers(self.owner_token, self.owner_workspace)
+        created = self.client.post(
+            "/api/v1/conversations",
+            json={"title": "分页样例对话"},
+            headers=headers,
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        conversation_id = created.json()["conversation"]["id"]
+        for index in range(8):
+            message = ChatMessage(
+                conversation_id=conversation_id,
+                role="assistant",
+                content=f"历史消息 {index}",
+            )
+            with Session(database.engine) as session:
+                session.add(message)
+                session.commit()
+
+        full = self.client.get(
+            f"/api/v1/conversations/{conversation_id}/messages",
+            headers=headers,
+        )
+        self.assertEqual(full.status_code, 200, full.text)
+        self.assertFalse(full.json()["has_more"])
+        self.assertEqual(len(full.json()["messages"]), 8)
+
+        page = self.client.get(
+            f"/api/v1/conversations/{conversation_id}/messages?limit=3",
+            headers=headers,
+        )
+        self.assertEqual(page.status_code, 200, page.text)
+        payload = page.json()
+        self.assertTrue(payload["has_more"])
+        self.assertEqual(len(payload["messages"]), 3)
+        self.assertEqual(payload["messages"][0]["content"], "历史消息 5")
+        self.assertEqual(payload["messages"][-1]["content"], "历史消息 7")
+
+        anchor = payload["messages"][-1]["id"]
+        older = self.client.get(
+            f"/api/v1/conversations/{conversation_id}/messages?limit=3&before_id={anchor}",
+            headers=headers,
+        )
+        self.assertEqual(older.status_code, 200, older.text)
+        older_payload = older.json()
+        self.assertEqual(len(older_payload["messages"]), 3)
+        self.assertEqual(older_payload["messages"][0]["content"], "历史消息 4")
+        self.assertTrue(older_payload["has_more"])
+
+    def test_workspace_search_scopes_and_types(self):
+        headers = self.auth_headers(self.owner_token, self.owner_workspace)
+        project = self.client.post(
+            "/api/v1/projects",
+            json={"name": "搜索样例项目", "description": "用于验证全局搜索"},
+            headers=headers,
+        )
+        self.assertEqual(project.status_code, 201, project.text)
+        project_id = project.json()["project"]["id"]
+        task = self.client.post(
+            "/api/v1/tasks",
+            json={"title": "搜索样例任务", "project_id": project_id, "labels": ["检索"]},
+            headers=headers,
+        )
+        self.assertEqual(task.status_code, 201, task.text)
+        conversation = self.client.post(
+            "/api/v1/conversations",
+            json={"title": "搜索样例对话"},
+            headers=headers,
+        )
+        conversation_id = conversation.json()["conversation"]["id"]
+        with Session(database.engine) as session:
+            session.add(
+                ChatMessage(
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content="这句话里藏着搜索样例关键词。",
+                )
+            )
+            session.commit()
+
+        result = self.client.get(
+            "/api/v1/search?q=%E6%90%9C%E7%B4%A2%E6%A0%B7%E4%BE%8B",
+            headers=headers,
+        )
+        self.assertEqual(result.status_code, 200, result.text)
+        found = {item["type"] for item in result.json()["results"]}
+        self.assertIn("project", found)
+        self.assertIn("task", found)
+        self.assertIn("conversation", found)
+        self.assertIn("message", found)
+
+        unrelated = self.client.get(
+            "/api/v1/search?q=%E4%B8%8D%E5%AD%98%E5%9C%A8%E7%9A%84%E5%85%B3%E9%94%AE%E8%AF%8D",
+            headers=self.auth_headers(self.owner_token, self.owner_workspace),
+        )
+        self.assertEqual(unrelated.status_code, 200, unrelated.text)
+        self.assertEqual(unrelated.json()["results"], [])
 
 
 if __name__ == "__main__":

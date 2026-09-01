@@ -1,6 +1,7 @@
 import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Alert from 'antd/es/alert'
 import AntApp from 'antd/es/app'
+import AutoComplete from 'antd/es/auto-complete'
 import Avatar from 'antd/es/avatar'
 import Badge from 'antd/es/badge'
 import Button from 'antd/es/button'
@@ -37,6 +38,7 @@ import {
   CheckCircleFilled,
   CheckCircleOutlined,
   ClockCircleOutlined,
+  SearchOutlined,
   DeleteOutlined,
   FileAddOutlined,
   FileTextOutlined,
@@ -727,6 +729,9 @@ function WorkspaceApp({ session, onLogout }) {
   const [workspaceError, setWorkspaceError] = useState('')
   const [taskDrawer, setTaskDrawer] = useState(null)
   const [mobileNav, setMobileNav] = useState(false)
+  const [hasMoreMessages, setHasMoreMessages] = useState(false)
+  const [globalQuery, setGlobalQuery] = useState('')
+  const [searchResults, setSearchResults] = useState([])
   const loadedWorkspaceIdRef = useRef('')
   const workspaceRequestIdRef = useRef(0)
   const conversationRequestIdRef = useRef(0)
@@ -805,17 +810,20 @@ function WorkspaceApp({ session, onLogout }) {
 
   useEffect(() => { setWorkspaceId(workspaceId); loadWorkspace() }, [loadWorkspace, workspaceId])
   useEffect(() => { window.scrollTo(0, 0) }, [nav])
-  const loadConversationMessages = useCallback(async (conversationId = activeConversationId, { notify = false } = {}) => {
+  const loadConversationMessages = useCallback(async (conversationId = activeConversationId, { notify = false, beforeId = '', append = false } = {}) => {
     const requestId = ++conversationRequestIdRef.current
     const requestedWorkspaceId = workspaceId
     if (!conversationId || !requestedWorkspaceId) {
       setMessages([])
+      setHasMoreMessages(false)
       return false
     }
     try {
-      const data = await apiFetch(`/api/v1/conversations/${conversationId}/messages`, { workspaceId: requestedWorkspaceId })
+      const query = beforeId ? `?limit=120&before_id=${encodeURIComponent(beforeId)}` : '?limit=120'
+      const data = await apiFetch(`/api/v1/conversations/${conversationId}/messages${query}`, { workspaceId: requestedWorkspaceId })
       if (requestId !== conversationRequestIdRef.current || currentWorkspaceIdRef.current !== requestedWorkspaceId || currentConversationIdRef.current !== conversationId) return false
-      setMessages(data.messages || [])
+      setMessages((previous) => append ? [...(data.messages || []), ...previous] : (data.messages || []))
+      setHasMoreMessages(Boolean(data.has_more))
       return true
     } catch (error) {
       const currentRequest = requestId === conversationRequestIdRef.current && currentWorkspaceIdRef.current === requestedWorkspaceId && currentConversationIdRef.current === conversationId
@@ -824,6 +832,19 @@ function WorkspaceApp({ session, onLogout }) {
       throw error
     }
   }, [activeConversationId, message, workspaceId])
+  const loadOlderMessages = useCallback(() => {
+    const oldest = messages.find((item) => item.id && !String(item.id).startsWith('local-'))
+    if (!oldest || !activeConversationId) return Promise.resolve(false)
+    return loadConversationMessages(activeConversationId, { beforeId: oldest.id, append: true })
+  }, [activeConversationId, loadConversationMessages, messages])
+  const runGlobalSearch = useCallback(async (value) => {
+    const keyword = value.trim()
+    if (!keyword) { setSearchResults([]); return }
+    try {
+      const data = await apiFetch(`/api/v1/search?q=${encodeURIComponent(keyword)}&limit=12`, { workspaceId })
+      setSearchResults(data.results || [])
+    } catch { setSearchResults([]) }
+  }, [workspaceId])
   useEffect(() => { loadConversationMessages(undefined, { notify: true }).catch(() => {}) }, [loadConversationMessages])
 
   const newConversation = async () => {
@@ -841,6 +862,33 @@ function WorkspaceApp({ session, onLogout }) {
     setActiveWorkspaceId(nextWorkspaceId)
   }
   const refreshWorkspace = () => loadWorkspace({ quiet: true })
+  const searchTypeLabels = { task: '任务', project: '项目', conversation: '对话', message: '消息', attachment: '附件' }
+  const searchOptions = useMemo(() => searchResults.map((item) => ({
+    value: `${item.type}:${item.id}`,
+    label: (
+      <div className="global-search-option">
+        <Tag color="blue" className="global-search-tag">{searchTypeLabels[item.type] || item.type}</Tag>
+        <div className="global-search-copy"><span>{item.title}</span>{item.snippet && <small>{item.snippet}</small>}</div>
+      </div>
+    ),
+  })), [searchResults])
+  const handleSearchSelect = (value) => {
+    const separator = value.indexOf(':')
+    const type = value.slice(0, separator)
+    const id = value.slice(separator + 1)
+    const item = searchResults.find((result) => result.type === type && result.id === id)
+    if (!item) return
+    if (type === 'task') { setNav('board'); setTaskDrawer(tasks.find((task) => task.id === id) || null) }
+    else if (type === 'conversation') { selectConversation(id); setNav('chat') }
+    else if (type === 'message') { if (item.conversation_id) selectConversation(item.conversation_id); setNav('chat') }
+    else if (type === 'project') setNav('board')
+    else if (type === 'attachment') {
+      if (item.task_id) { setNav('board'); setTaskDrawer(tasks.find((task) => task.id === item.task_id) || null) }
+      else if (item.conversation_id) { selectConversation(item.conversation_id); setNav('chat') }
+    }
+    setGlobalQuery('')
+    setSearchResults([])
+  }
   const sideMenu = <Menu theme="dark" mode="inline" selectedKeys={[nav]} onClick={({ key }) => { setNav(key); setMobileNav(false) }} items={navigationItems} />
   const layoutSider = <>
     <div className="workspace-brand"><Avatar icon={<RobotOutlined />} className="brand-avatar" /><div><strong>futureAgent</strong><span>团队 AI 工作空间</span></div></div>
@@ -851,7 +899,7 @@ function WorkspaceApp({ session, onLogout }) {
   </>
 
   let content
-  if (nav === 'chat') content = <ChatPage conversations={conversations} activeConversation={activeConversation} messages={messages} models={models} skills={skills} mcpServers={mcpServers} onNewConversation={newConversation} onSelectConversation={selectConversation} onRefresh={refreshWorkspace} onRefreshMessages={loadConversationMessages} workspaceRole={workspace?.role} />
+  if (nav === 'chat') content = <ChatPage conversations={conversations} activeConversation={activeConversation} messages={messages} models={models} skills={skills} mcpServers={mcpServers} hasMoreMessages={hasMoreMessages} onLoadMoreMessages={loadOlderMessages} onNewConversation={newConversation} onSelectConversation={selectConversation} onRefresh={refreshWorkspace} onRefreshMessages={loadConversationMessages} workspaceRole={workspace?.role} />
   else if (nav === 'business') content = <BusinessAssistantsPage workspaceRole={workspace?.role} members={members} currentUserId={profile?.id} />
   else if (nav === 'report') content = <ReportAssistantsPage workspaceRole={workspace?.role} members={members} currentUserId={profile?.id} />
   else if (nav === 'board') content = <BoardPage projects={projects} tasks={tasks} members={members} onRefresh={refreshWorkspace} openTask={(task) => setTaskDrawer(task)} workspaceRole={workspace?.role} />
@@ -883,6 +931,17 @@ function WorkspaceApp({ session, onLogout }) {
             <div className="header-context"><Text strong>{navigationLabels[nav]}</Text><Text type="secondary">{workspace?.name || '团队工作区'}</Text></div>
           </Flex>
           <Space size={6}>
+            <AutoComplete
+              className="global-search"
+              value={globalQuery}
+              onChange={(value) => { setGlobalQuery(value); runGlobalSearch(value) }}
+              onSelect={handleSearchSelect}
+              options={searchOptions}
+              popupMatchSelectWidth={420}
+              aria-label="全局搜索"
+            >
+              <Input allowClear prefix={<SearchOutlined />} placeholder="搜索任务、对话、消息或文件" />
+            </AutoComplete>
             <Badge className="workspace-health" status={refreshing ? 'processing' : 'success'} text={refreshing ? '正在同步' : '已安全连接'} />
             <Tooltip title="刷新工作区"><Button type="text" icon={<ReloadOutlined spin={refreshing} />} onClick={refreshWorkspace} disabled={refreshing || loading} aria-label="刷新工作区" /></Tooltip>
             <Dropdown menu={{ items: [{ key: 'profile', label: profile?.email, disabled: true }, { type: 'divider' }, { key: 'logout', icon: <LogoutOutlined />, label: '退出登录', onClick: onLogout }] }}>

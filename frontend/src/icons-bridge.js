@@ -21,6 +21,7 @@ export { default as PaperClipOutlined } from '@ant-design/icons/es/icons/PaperCl
 export { default as PlusOutlined } from '@ant-design/icons/es/icons/PlusOutlined'
 export { default as ProjectOutlined } from '@ant-design/icons/es/icons/ProjectOutlined'
 export { default as ReloadOutlined } from '@ant-design/icons/es/icons/ReloadOutlined'
+export { default as SearchOutlined } from '@ant-design/icons/es/icons/SearchOutlined'
 export { default as RobotOutlined } from '@ant-design/icons/es/icons/RobotOutlined'
 export { default as SendOutlined } from '@ant-design/icons/es/icons/SendOutlined'
 export { default as SettingOutlined } from '@ant-design/icons/es/icons/SettingOutlined'

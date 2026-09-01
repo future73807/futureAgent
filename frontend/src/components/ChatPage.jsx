@@ -32,7 +32,7 @@ function readableError(error) {
   return /[\u3400-\u9fff]/.test(text) ? text : '操作未完成，请稍后重试。'
 }
 
-function ChatContent({ conversations, activeConversation, messages, models, skills, mcpServers = [], onNewConversation, onSelectConversation, onRefresh, onRefreshMessages, workspaceRole }) {
+function ChatContent({ conversations, activeConversation, messages, models, skills, mcpServers = [], hasMoreMessages = false, onLoadMoreMessages, onNewConversation, onSelectConversation, onRefresh, onRefreshMessages, workspaceRole }) {
   const { message } = AntApp.useApp()
   const [model, setModel] = useState('')
   const [skill, setSkill] = useState('')
@@ -224,6 +224,9 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
           </Space>
         </header>
         <div className="messages">
+          {hasMoreMessages && bubbleItems.length ? (
+            <div className="messages-older-wrap"><Button size="small" onClick={() => onLoadMoreMessages?.()}>查看更早消息</Button></div>
+          ) : null}
           {bubbleItems.length ? (
             <Bubble.List
               autoScroll
