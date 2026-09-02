@@ -522,3 +522,16 @@ class Deliverable(SQLModel, table=True):
     size_bytes: int = Field(default=0)
     registered_by: str = Field(foreign_key="users.id", index=True)
     created_at: datetime = Field(default_factory=now_utc)
+
+
+class TaskComment(SQLModel, table=True):
+    """任务评论：协作讨论留在任务上，并写入工作区边界。"""
+
+    __tablename__ = "task_comments"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    workspace_id: str = Field(foreign_key="workspaces.id", index=True)
+    task_id: str = Field(foreign_key="tasks.id", index=True)
+    author_id: str = Field(foreign_key="users.id", index=True)
+    content: str = Field(max_length=4000)
+    created_at: datetime = Field(default_factory=now_utc)

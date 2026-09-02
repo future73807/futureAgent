@@ -995,6 +995,94 @@ class ProductApiTests(unittest.TestCase):
         self.assertEqual(unrelated.status_code, 200, unrelated.text)
         self.assertEqual(unrelated.json()["results"], [])
 
+    def test_task_comments_flow_and_permission(self):
+        headers = self.auth_headers(self.owner_token, self.owner_workspace)
+        # 独立成员账号，避免污染其它测试的隔离断言
+        commenter = self.client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": "comment-member@example.com",
+                "password": TEST_PASSWORD,
+                "display_name": "Comment Member",
+                "workspace_name": "Commenter home",
+            },
+        )
+        self.assertEqual(commenter.status_code, 201, commenter.text)
+        commenter_id = commenter.json()["user"]["id"]
+        commenter_token = commenter.json()["access_token"]
+        joined = self.client.post(
+            f"/api/v1/workspaces/{self.owner_workspace}/members",
+            json={"email": "comment-member@example.com", "role": "member"},
+            headers=headers,
+        )
+        self.assertIn(joined.status_code, {200, 201})
+        project = self.client.post(
+            "/api/v1/projects",
+            json={"name": "评论样例项目"},
+            headers=headers,
+        )
+        project_id = project.json()["project"]["id"]
+        task = self.client.post(
+            "/api/v1/tasks",
+            json={"title": "评论样例任务", "project_id": project_id, "assignee_id": commenter_id},
+            headers=headers,
+        )
+        self.assertEqual(task.status_code, 201, task.text)
+        task_id = task.json()["task"]["id"]
+
+        created = self.client.post(
+            f"/api/v1/tasks/{task_id}/comments",
+            json={"content": "请优先处理验收标准部分。"},
+            headers=headers,
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        self.assertEqual(created.json()["comment"]["author_name"], "Owner")
+
+        member_headers = self.auth_headers(commenter_token, self.owner_workspace)
+        listed = self.client.get(f"/api/v1/tasks/{task_id}/comments", headers=member_headers)
+        self.assertEqual(listed.status_code, 200, listed.text)
+        self.assertEqual(len(listed.json()["comments"]), 1)
+
+        member_reply = self.client.post(
+            f"/api/v1/tasks/{task_id}/comments",
+            json={"content": "收到，明天给出初稿。"},
+            headers=member_headers,
+        )
+        self.assertEqual(member_reply.status_code, 201, member_reply.text)
+
+        # 被指派人应收到评论通知
+        notifications = self.client.get(
+            "/api/v1/notifications",
+            headers=member_headers,
+        )
+        comment_notifications = [
+            item for item in notifications.json()["notifications"] if item["type"] == "task" and "新任务评论" in item["title"]
+        ]
+        self.assertTrue(comment_notifications)
+
+        # viewer 不能评论
+        viewer = self.client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": "comment-viewer2@example.com",
+                "password": TEST_PASSWORD,
+                "display_name": "Comment Viewer",
+                "workspace_name": "Viewer comments",
+            },
+        )
+        viewer_token = viewer.json()["access_token"]
+        self.client.post(
+            f"/api/v1/workspaces/{self.owner_workspace}/members",
+            json={"email": "comment-viewer@example.com", "role": "viewer"},
+            headers=headers,
+        )
+        denied = self.client.post(
+            f"/api/v1/tasks/{task_id}/comments",
+            json={"content": "只读成员尝试评论"},
+            headers=self.auth_headers(viewer_token, self.owner_workspace),
+        )
+        self.assertEqual(denied.status_code, 403)
+
 
 if __name__ == "__main__":
     unittest.main()

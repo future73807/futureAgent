@@ -22,6 +22,7 @@ import Modal from 'antd/es/modal'
 import Popconfirm from 'antd/es/popconfirm'
 import Progress from 'antd/es/progress'
 import Select from 'antd/es/select'
+import Segmented from 'antd/es/segmented'
 import Space from 'antd/es/space'
 import Spin from 'antd/es/spin'
 import Statistic from 'antd/es/statistic'
@@ -225,7 +226,17 @@ function AuthScreen({ onAuthenticated }) {
 function TaskCard({ task, members, onSelect, onMove }) {
   const assignee = members.find((item) => item.user.id === task.assignee_id)?.user
   return (
-    <Card size="small" className="task-card" hoverable onClick={() => onSelect(task)}>
+    <Card
+      size="small"
+      className="task-card"
+      hoverable
+      onClick={() => onSelect(task)}
+      draggable
+      onDragStart={(event) => {
+        event.dataTransfer.setData('text/futureagent-task', task.id)
+        event.dataTransfer.effectAllowed = 'move'
+      }}
+    >
       <Flex justify="space-between" align="start" gap={8}>
         <Text strong>{task.title}</Text>
         <Dropdown menu={{ items: columns.filter((item) => item.key !== task.status).map((item) => ({ key: item.key, label: `移动到「${item.title}」` })), onClick: ({ key }) => onMove(task, key) }} trigger={['click']}>
@@ -236,11 +247,95 @@ function TaskCard({ task, members, onSelect, onMove }) {
       <Flex justify="space-between" align="center" className="task-meta">
         <Space size={4}>{(task.labels || []).slice(0, 2).map((label) => <Tag key={label} color="blue">{label}</Tag>)}</Space>
         <Space size={4}>
+          {task.due_date && <Tag icon={<ClockCircleOutlined />} color="default">{String(task.due_date).slice(5)}</Tag>}
           <Tag color={task.priority === 'urgent' ? 'red' : task.priority === 'high' ? 'orange' : 'default'}>{priorityLabels[task.priority] || task.priority}</Tag>
-          {assignee && <Tooltip title={assignee.display_name}><Avatar size="small" icon={<UserOutlined />} /></Tooltip>}
+          {assignee && <Tooltip title={assignee.display_name}><Avatar size="small" icon={<UserOutlined />}/></Tooltip>}
         </Space>
       </Flex>
     </Card>
+  )
+}
+
+function TaskCalendarView({ tasks, members, onSelect }) {
+  const today = new Date()
+  const [cursor, setCursor] = useState({ year: today.getFullYear(), month: today.getMonth() })
+  const firstDay = new Date(cursor.year, cursor.month, 1)
+  const startOffset = (firstDay.getDay() + 6) % 7
+  const daysInMonth = new Date(cursor.year, cursor.month + 1, 0).getDate()
+  const cells = []
+  for (let index = 0; index < startOffset; index += 1) cells.push(null)
+  for (let day = 1; day <= daysInMonth; day += 1) cells.push(day)
+  while (cells.length % 7 !== 0) cells.push(null)
+  const isoDate = (day) => `${cursor.year}-${String(cursor.month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+  const weekdayLabels = ['一', '二', '三', '四', '五', '六', '日']
+  const shiftMonth = (delta) => setCursor((current) => {
+    const next = new Date(current.year, current.month + delta, 1)
+    return { year: next.getFullYear(), month: next.getMonth() }
+  })
+  return (
+    <Card size="small" className="calendar-card">
+      <Flex justify="space-between" align="center" gap={8} className="calendar-toolbar">
+        <Button size="small" onClick={() => shiftMonth(-1)} aria-label="上个月">‹</Button>
+        <Text strong>{cursor.year} 年 {cursor.month + 1} 月 · 按截止日期</Text>
+        <Button size="small" onClick={() => shiftMonth(1)} aria-label="下个月">›</Button>
+      </Flex>
+      <div className="calendar-grid">
+        {weekdayLabels.map((label) => <div key={label} className="calendar-weekday">{label}</div>)}
+        {cells.map((day, index) => {
+          if (!day) return <div key={`blank-${index}`} className="calendar-cell calendar-cell-blank" />
+          const iso = isoDate(day)
+          const dueTasks = tasks.filter((task) => String(task.due_date || '').startsWith(iso))
+          const isToday = iso === `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
+          return (
+            <div key={iso} className={`calendar-cell${isToday ? ' calendar-cell-today' : ''}`}>
+              <div className="calendar-day">{day}</div>
+              {dueTasks.slice(0, 3).map((task) => (
+                <Button key={task.id} type="text" size="small" className="calendar-task" onClick={() => onSelect(task)} title={task.title}>
+                  {task.title}
+                </Button>
+              ))}
+              {dueTasks.length > 3 && <Text type="secondary" className="calendar-more">还有 {dueTasks.length - 3} 项</Text>}
+            </div>
+          )
+        })}
+      </div>
+    </Card>
+  )
+}
+
+function TaskComments({ taskId }) {
+  const { message } = AntApp.useApp()
+  const [comments, setComments] = useState([])
+  const [value, setValue] = useState('')
+  useEffect(() => {
+    let current = true
+    setComments([])
+    if (!taskId) return () => { current = false }
+    apiFetch(`/api/v1/tasks/${taskId}/comments`)
+      .then((data) => { if (current) setComments(data.comments || []) })
+      .catch(() => { /* 评论加载失败不打开抽屉报错 */ })
+    return () => { current = false }
+  }, [taskId])
+  const submit = async () => {
+    const content = value.trim()
+    if (!content || !taskId) return
+    try {
+      const data = await apiFetch(`/api/v1/tasks/${taskId}/comments`, { method: 'POST', body: JSON.stringify({ content }) })
+      setComments((previous) => [...previous, data.comment])
+      setValue('')
+    } catch (error) { message.error(readableError(error)) }
+  }
+  return (
+    <div className="task-comments">
+      <Text strong>评论（{comments.length}）</Text>
+      <List size="small" locale={{ emptyText: '暂无评论' }} dataSource={comments} renderItem={(comment) => (
+        <List.Item><List.Item.Meta title={`${comment.author_name} · ${formatDateTime(comment.created_at)}`} description={comment.content} /></List.Item>
+      )} />
+      <Flex gap={8}>
+        <Input value={value} onChange={(event) => setValue(event.target.value)} placeholder="写下评论，回车发送" onPressEnter={submit} />
+        <Button type="primary" onClick={submit} disabled={!value.trim()}>发送</Button>
+      </Flex>
+    </div>
   )
 }
 
@@ -251,6 +346,7 @@ function BoardPage({ projects, tasks, members, onRefresh, openTask, workspaceRol
   const [projectOpen, setProjectOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
+  const [view, setView] = useState('board')
   const [form] = Form.useForm()
   const [projectForm] = Form.useForm()
 
@@ -296,9 +392,20 @@ function BoardPage({ projects, tasks, members, onRefresh, openTask, workspaceRol
           {canWrite && <Button type="primary" icon={<PlusOutlined />} disabled={!projectId} onClick={() => setTaskOpen(true)}>新建任务</Button>}
         </Space>
       </Flex>
-      {projects.length ? <Flex wrap="wrap" gap={10} className="board-filters"><Select value={projectId} onChange={setProjectId} className="project-selector" options={projects.map((item) => ({ value: item.id, label: item.name }))} /><Input.Search allowClear placeholder="搜索任务标题、上下文或标签" value={query} onChange={(event) => setQuery(event.target.value)} style={{ width: 280, maxWidth: '100%' }} /><Select value={statusFilter} onChange={setStatusFilter} style={{ width: 150 }} options={[{ value: 'all', label: '全部状态' }, ...columns.map((item) => ({ value: item.key, label: item.title }))]} /></Flex> : <Empty className="guided-empty" description="请先创建项目，再开始规划工作">{canWrite && <Button type="primary" icon={<FolderOpenOutlined />} onClick={() => setProjectOpen(true)}>创建第一个项目</Button>}</Empty>}
-      {projectId && <div className="kanban-grid">{columns.map((column) => (
-        <section key={column.key} className={`kanban-column kanban-column-${column.key}`}>
+      {projects.length ? <Flex wrap="wrap" gap={10} className="board-filters"><Select value={projectId} onChange={setProjectId} className="project-selector" options={projects.map((item) => ({ value: item.id, label: item.name }))} /><Input.Search allowClear placeholder="搜索任务标题、上下文或标签" value={query} onChange={(event) => setQuery(event.target.value)} style={{ width: 280, maxWidth: '100%' }} /><Select value={statusFilter} onChange={setStatusFilter} style={{ width: 150 }} options={[{ value: 'all', label: '全部状态' }, ...columns.map((item) => ({ value: item.key, label: item.title }))]} /><Segmented value={view} onChange={setView} options={[{ label: '看板', value: 'board' }, { label: '日历', value: 'calendar' }]} /></Flex> : <Empty className="guided-empty" description="请先创建项目，再开始规划工作">{canWrite && <Button type="primary" icon={<FolderOpenOutlined />} onClick={() => setProjectOpen(true)}>创建第一个项目</Button>}</Empty>}
+      {projectId && view === 'calendar' && <TaskCalendarView tasks={projectTasks} members={members} onSelect={openTask} />}
+      {projectId && view === 'board' && <div className="kanban-grid">{columns.map((column) => (
+        <section
+          key={column.key}
+          className={`kanban-column kanban-column-${column.key}`}
+          onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move' }}
+          onDrop={(event) => {
+            event.preventDefault()
+            const draggedId = event.dataTransfer.getData('text/futureagent-task')
+            const dragged = projectTasks.find((task) => task.id === draggedId)
+            if (dragged && dragged.status !== column.key && canWrite) moveTask(dragged, column.key)
+          }}
+        >
           <Flex justify="space-between" align="center"><Text strong>{column.title}</Text><Badge color={column.color} count={projectTasks.filter((task) => task.status === column.key).length} /></Flex>
           <div className="task-stack">
             {projectTasks.filter((task) => task.status === column.key).map((task) => <TaskCard key={task.id} task={task} members={members} onSelect={openTask} onMove={moveTask} />)}
@@ -1052,7 +1159,7 @@ function WorkspaceApp({ session, onLogout }) {
         ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无通知" />}
       </Drawer>
       <Drawer title="任务详情" open={Boolean(taskDrawer)} onClose={() => setTaskDrawer(null)} width={screens.sm ? 480 : '100%'}>
-        {taskDrawer && <Space direction="vertical" size="middle" style={{ width: '100%' }}><Title level={4}>{taskDrawer.title}</Title><Paragraph>{taskDrawer.description || '暂无任务说明。'}</Paragraph><Descriptions bordered size="small" column={1}><Descriptions.Item label="状态"><Tag>{taskStatusLabels[taskDrawer.status] || taskDrawer.status}</Tag></Descriptions.Item><Descriptions.Item label="优先级"><Tag>{priorityLabels[taskDrawer.priority] || taskDrawer.priority}</Tag></Descriptions.Item><Descriptions.Item label="截止日期">{taskDrawer.due_date || '未设置'}</Descriptions.Item></Descriptions><Button type="primary" icon={<AppstoreOutlined />} onClick={() => { setNav('work'); setTaskDrawer(null) }}>在工作模式中打开</Button></Space>}
+        {taskDrawer && <Space direction="vertical" size="middle" style={{ width: '100%' }}><Title level={4}>{taskDrawer.title}</Title><Paragraph>{taskDrawer.description || '暂无任务说明。'}</Paragraph><Descriptions bordered size="small" column={1}><Descriptions.Item label="状态"><Tag>{taskStatusLabels[taskDrawer.status] || taskDrawer.status}</Tag></Descriptions.Item><Descriptions.Item label="优先级"><Tag>{priorityLabels[taskDrawer.priority] || taskDrawer.priority}</Tag></Descriptions.Item><Descriptions.Item label="截止日期">{taskDrawer.due_date || '未设置'}</Descriptions.Item></Descriptions><TaskComments taskId={taskDrawer.id} /><Button type="primary" icon={<AppstoreOutlined />} onClick={() => { setNav('work'); setTaskDrawer(null) }}>在工作模式中打开</Button></Space>}
       </Drawer>
     </Layout>
   )

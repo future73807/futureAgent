@@ -75,6 +75,7 @@ from db.models import (
     Project,
     RefreshSession,
     Task,
+    TaskComment,
     User,
     Workspace,
     WorkPlan,
@@ -169,6 +170,10 @@ class TaskCreateRequest(RequestModel):
     assignee_id: str | None = Field(default=None, max_length=64)
     due_date: date | None = None
     labels: list[str] = Field(default_factory=list, max_length=20)
+
+
+class TaskCommentCreateRequest(RequestModel):
+    content: str = Field(min_length=1, max_length=4000)
 
 
 class TaskUpdateRequest(RequestModel):
@@ -1506,6 +1511,89 @@ def get_work_plan(
     _task_or_404(session, context.workspace.id, task_id)
     plan = session.exec(select(WorkPlan).where(WorkPlan.task_id == task_id)).first()
     return {"plan": _plan_data(session, plan)}
+
+
+@router.get("/v1/tasks/{task_id}/comments")
+def list_task_comments(
+    task_id: str,
+    context: WorkspaceContext = Depends(get_workspace_context),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    _task_or_404(session, context.workspace.id, task_id)
+    comments = session.exec(
+        select(TaskComment)
+        .where(TaskComment.workspace_id == context.workspace.id, TaskComment.task_id == task_id)
+        .order_by(TaskComment.created_at)
+        .limit(200)
+    ).all()
+    author_ids = {comment.author_id for comment in comments}
+    authors = {
+        user.id: user.display_name
+        for user in session.exec(select(User).where(User.id.in_(author_ids))).all()
+    } if author_ids else {}
+    return {
+        "comments": [
+            {
+                "id": comment.id,
+                "task_id": comment.task_id,
+                "author_id": comment.author_id,
+                "author_name": authors.get(comment.author_id, "工作区成员"),
+                "content": comment.content,
+                "created_at": comment.created_at,
+            }
+            for comment in comments
+        ]
+    }
+
+
+@router.post("/v1/tasks/{task_id}/comments", status_code=status.HTTP_201_CREATED)
+def create_task_comment(
+    task_id: str,
+    request: TaskCommentCreateRequest,
+    context: WorkspaceContext = Depends(get_workspace_context),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    require_workspace_role(context, "owner", "admin", "member")
+    task = _task_or_404(session, context.workspace.id, task_id)
+    comment = TaskComment(
+        workspace_id=context.workspace.id,
+        task_id=task_id,
+        author_id=context.user.id,
+        content=request.content,
+    )
+    session.add(comment)
+    session.flush()
+    if task.assignee_id and task.assignee_id != context.user.id:
+        push_notification(
+            session,
+            context.workspace.id,
+            task.assignee_id,
+            "task",
+            f"新任务评论：{task.title}",
+            body=f"{context.user.display_name}：{comment.content[:120]}",
+            link="board",
+            ref_id=task.id,
+        )
+    write_audit(
+        session,
+        actor_id=context.user.id,
+        workspace_id=context.workspace.id,
+        action="task.commented",
+        target_type="task",
+        target_id=task_id,
+        metadata={"comment_id": comment.id},
+    )
+    session.commit()
+    return {
+        "comment": {
+            "id": comment.id,
+            "task_id": comment.task_id,
+            "author_id": comment.author_id,
+            "author_name": context.user.display_name,
+            "content": comment.content,
+            "created_at": comment.created_at,
+        }
+    }
 
 
 @router.get("/v1/tasks/{task_id}/activity")
