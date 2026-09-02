@@ -65,6 +65,7 @@ NEWEST_FEATURE_TABLES = {
     "notification_targets",
     "scheduled_jobs",
     "deliverables",
+    "task_comments",
 }
 
 # Revision 20260725_03 adds both business tables and audit visibility columns.

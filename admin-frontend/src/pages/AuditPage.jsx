@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { App, Button, Card, Space, Table, Tag, Typography } from 'antd'
+import { App, Button, Card, DatePicker, Input, Space, Table, Tag, Typography } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 import { apiFetch, toUserErrorMessage } from '../api.js'
 import { formatDateTime } from '../formatters.js'
@@ -139,8 +139,19 @@ function metadataText(metadata) {
 }
 
 export default function AuditPage() {
-  const { message } = App.useApp(); const [events, setEvents] = useState([]); const [loading, setLoading] = useState(false)
-  const load = async () => { setLoading(true); try { setEvents((await apiFetch('/api/v1/admin/audit-events?limit=200')).events || []) } catch (error) { message.error(toUserErrorMessage(error, '加载审计轨迹失败，请稍后重试。')) } finally { setLoading(false) } }
+  const { message } = App.useApp(); const [events, setEvents] = useState([]); const [loading, setLoading] = useState(false); const [actionFilter, setActionFilter] = useState(''); const [actorFilter, setActorFilter] = useState(''); const [range, setRange] = useState(null)
+  const load = async (filters = null) => {
+    const used = filters || { actionFilter, actorFilter, range }
+    setLoading(true)
+    try {
+      const params = new URLSearchParams({ limit: '200' })
+      if (used.actionFilter?.trim()) params.set('action', used.actionFilter.trim())
+      if (used.actorFilter?.trim()) params.set('actor_id', used.actorFilter.trim())
+      if (used.range?.[0]) params.set('date_from', used.range[0].format('YYYY-MM-DD'))
+      if (used.range?.[1]) params.set('date_to', used.range[1].format('YYYY-MM-DD'))
+      setEvents((await apiFetch(`/api/v1/admin/audit-events?${params.toString()}`)).events || [])
+    } catch (error) { message.error(toUserErrorMessage(error, '加载审计轨迹失败，请稍后重试。')) } finally { setLoading(false) }
+  }
   useEffect(() => { load() }, [])
   const columns = [
     { title: '发生时间', dataIndex: 'created_at', width: 180, render: formatDateTime },
@@ -149,5 +160,15 @@ export default function AuditPage() {
     { title: '执行人', dataIndex: 'actor_id', width: 220, render: (value) => value ? <span className="code-text">账号 ID：{value}</span> : <Tag>系统</Tag> },
     { title: '附加信息', dataIndex: 'metadata', render: metadataText },
   ]
-  return <div><div className="page-heading"><div><Title level={2}>审计轨迹</Title><Text type="secondary">集中查看由 API 记录的安全、工作区、任务、计划和 AI 执行活动。</Text></div><Button icon={<ReloadOutlined />} loading={loading} onClick={load}>刷新</Button></div><Card className="admin-card"><Table rowKey="id" columns={columns} dataSource={events} loading={loading} scroll={{ x: 1300 }} pagination={{ pageSize: 25 }} locale={{ emptyText: '暂无数据' }} /></Card></div>
+  return <div><div className="page-heading"><div><Title level={2}>审计轨迹</Title><Text type="secondary">集中查看由 API 记录的安全、工作区、任务、计划和 AI 执行活动。</Text></div><Button icon={<ReloadOutlined />} loading={loading} onClick={() => load()}>刷新</Button></div>
+    <Card className="admin-card" styles={{ body: { paddingBottom: 10 } }}>
+      <Space wrap style={{ marginBottom: 14 }}>
+        <Input allowClear placeholder="按操作过滤，如 admin." value={actionFilter} onChange={(event) => setActionFilter(event.target.value)} style={{ width: 220 }} onPressEnter={() => load()} />
+        <Input allowClear placeholder="按执行人账号 ID 过滤" value={actorFilter} onChange={(event) => setActorFilter(event.target.value)} style={{ width: 260 }} onPressEnter={() => load()} />
+        <DatePicker.RangePicker value={range} onChange={setRange} placeholder={['开始日期', '结束日期']} />
+        <Button type="primary" loading={loading} onClick={() => load()}>应用筛选</Button>
+        <Button onClick={() => { setActionFilter(''); setActorFilter(''); setRange(null); load({ actionFilter: '', actorFilter: '', range: null }) }}>重置</Button>
+      </Space>
+      <Table rowKey="id" columns={columns} dataSource={events} loading={loading} scroll={{ x: 1300 }} pagination={{ pageSize: 25 }} locale={{ emptyText: '暂无数据' }} />
+    </Card></div>
 }

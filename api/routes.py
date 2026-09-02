@@ -14,7 +14,7 @@ import logging
 import re
 import secrets
 import tempfile
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, AsyncGenerator, Literal
 from urllib.parse import quote
@@ -65,15 +65,21 @@ from db.models import (
     AuditEvent,
     BusinessAlert,
     BusinessAlertRule,
+    BusinessAssistant,
     BusinessAssistantMessage,
     BusinessBossTask,
+    BusinessDailyReport,
     BusinessDataSource,
     BusinessRecord,
     ChatMessage,
     Conversation,
+    Deliverable,
     Membership,
+    Notification,
+    NotificationTarget,
     Project,
     RefreshSession,
+    ScheduledJob,
     Task,
     TaskComment,
     User,
@@ -249,6 +255,22 @@ class AdminUserUpdateRequest(RequestModel):
     display_name: str | None = Field(default=None, min_length=2, max_length=120)
     is_active: bool | None = None
     is_platform_admin: bool | None = None
+
+
+class AdminUserCreateRequest(RequestModel):
+    email: EmailStr
+    password: str = Field(min_length=10, max_length=72)
+    display_name: str = Field(min_length=2, max_length=120)
+    is_platform_admin: bool = False
+
+
+class AdminResetPasswordRequest(RequestModel):
+    password: str = Field(min_length=10, max_length=72)
+
+
+class AdminWorkspaceCreateRequest(RequestModel):
+    name: str = Field(min_length=2, max_length=120)
+    owner_user_id: str = Field(min_length=1, max_length=80)
 
 
 def get_agent_engine() -> AgentEngine:
@@ -3268,6 +3290,185 @@ def admin_update_user(
     return {"user": _user_data(target)}
 
 
+@router.post("/v1/admin/users", status_code=status.HTTP_201_CREATED)
+def admin_create_user(
+    request: AdminUserCreateRequest,
+    admin: User = Depends(require_platform_admin),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    existing = session.exec(select(User).where(User.email == request.email.lower())).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="该邮箱已注册")
+    user = User(
+        email=request.email.lower(),
+        display_name=request.display_name,
+        password_hash=hash_password(request.password),
+        is_platform_admin=request.is_platform_admin,
+    )
+    session.add(user)
+    session.flush()
+    write_audit(
+        session,
+        actor_id=admin.id,
+        action="admin.user_created",
+        target_type="user",
+        target_id=user.id,
+        metadata={"email": user.email, "is_platform_admin": user.is_platform_admin},
+    )
+    session.commit()
+    return {"user": _user_data(user)}
+
+
+@router.post("/v1/admin/users/{user_id}/reset-password")
+def admin_reset_password(
+    user_id: str,
+    request: AdminResetPasswordRequest,
+    admin: User = Depends(require_platform_admin),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    target = session.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    target.password_hash = hash_password(request.password)
+    target.updated_at = now_utc()
+    session.add(target)
+    # 重置密码后撤销全部刷新会话，强制重新登录
+    for refresh in session.exec(
+        select(RefreshSession).where(RefreshSession.user_id == target.id, RefreshSession.revoked.is_(False))
+    ).all():
+        refresh.revoked = True
+        session.add(refresh)
+    write_audit(
+        session,
+        actor_id=admin.id,
+        action="admin.password_reset",
+        target_type="user",
+        target_id=target.id,
+        metadata={"refresh_sessions_revoked": True},
+    )
+    session.commit()
+    return {"user": _user_data(target), "password_reset": True}
+
+
+@router.post("/v1/admin/workspaces", status_code=status.HTTP_201_CREATED)
+def admin_create_workspace(
+    request: AdminWorkspaceCreateRequest,
+    admin: User = Depends(require_platform_admin),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    owner = session.get(User, request.owner_user_id)
+    if not owner:
+        raise HTTPException(status_code=404, detail="所有者用户不存在")
+    base_slug = re.sub(r"[^a-z0-9]+", "-", request.name.lower()).strip("-") or "workspace"
+    slug = base_slug
+    suffix = 1
+    while session.exec(select(Workspace.id).where(Workspace.slug == slug)).first():
+        suffix += 1
+        slug = f"{base_slug}-{suffix}"
+    workspace = Workspace(name=request.name, slug=slug[:80], owner_id=owner.id)
+    session.add(workspace)
+    session.flush()
+    session.add(Membership(workspace_id=workspace.id, user_id=owner.id, role="owner"))
+    write_audit(
+        session,
+        actor_id=admin.id,
+        action="admin.workspace_created",
+        target_type="workspace",
+        target_id=workspace.id,
+        metadata={"name": workspace.name, "slug": workspace.slug, "owner_id": owner.id},
+    )
+    session.commit()
+    return {"workspace": _workspace_data(workspace)}
+
+
+@router.delete("/v1/admin/workspaces/{workspace_id}")
+def admin_delete_workspace(
+    workspace_id: str,
+    admin: User = Depends(require_platform_admin),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    from db.report_models import (
+        KnowledgeBase,
+        ReportAlert,
+        ReportAlertRule,
+        ReportAssistant,
+        ReportAssistantMessage,
+        ReportDailyReport,
+        ReportDataSource,
+        ReportRecord,
+        ReportWeeklyReport,
+    )
+
+    workspace = session.get(Workspace, workspace_id)
+    if not workspace:
+        raise HTTPException(status_code=404, detail="工作区不存在")
+
+    def drop_rows(model):
+        """ORM 逐行删除：管理操作数据量有限，全部走参数化查询。"""
+        for row in session.exec(select(model).where(model.workspace_id == workspace_id)).all():
+            session.delete(row)
+
+    plan_ids = session.exec(select(WorkPlan.id).where(WorkPlan.workspace_id == workspace_id)).all()
+    conversation_ids = session.exec(
+        select(Conversation.id).where(Conversation.workspace_id == workspace_id)
+    ).all()
+    if plan_ids:
+        for step in session.exec(select(WorkPlanStep).where(WorkPlanStep.plan_id.in_(plan_ids))).all():
+            session.delete(step)
+    if conversation_ids:
+        for message in session.exec(
+            select(ChatMessage).where(ChatMessage.conversation_id.in_(conversation_ids))
+        ).all():
+            session.delete(message)
+
+    for model in (
+        Membership,
+        TaskComment,
+        Deliverable,
+        Project,
+        Task,
+        WorkPlan,
+        Conversation,
+        AgentRun,
+        Attachment,
+        AuditEvent,
+        Notification,
+        NotificationTarget,
+        ScheduledJob,
+        BusinessAssistant,
+        BusinessAssistantMessage,
+        BusinessDataSource,
+        BusinessRecord,
+        BusinessAlertRule,
+        BusinessAlert,
+        BusinessBossTask,
+        ReportAssistant,
+        ReportAssistantMessage,
+        ReportDataSource,
+        ReportRecord,
+        KnowledgeBase,
+        ReportAlertRule,
+        ReportAlert,
+        BusinessDailyReport,
+        ReportDailyReport,
+        ReportWeeklyReport,
+    ):
+        drop_rows(model)
+
+    write_audit(
+        session,
+        actor_id=admin.id,
+        workspace_id=None,
+        action="admin.workspace_deleted",
+        target_type="workspace",
+        target_id=workspace_id,
+        metadata={"name": workspace.name, "slug": workspace.slug},
+    )
+    session.delete(workspace)
+    session.commit()
+    return {"deleted": workspace_id}
+
+
 @router.get("/v1/admin/workspaces")
 def admin_list_workspaces(
     user: User = Depends(require_platform_admin),
@@ -3285,19 +3486,43 @@ def admin_list_workspaces(
     }
 
 
+def _apply_audit_filters(
+    session: Session,
+    statement,
+    action: str | None,
+    actor_id: str | None,
+    date_from: date | None,
+    date_to: date | None,
+):
+    if action:
+        statement = statement.where(AuditEvent.action.ilike(f"%{action}%"))
+    if actor_id:
+        statement = statement.where(AuditEvent.actor_id == actor_id)
+    if date_from:
+        statement = statement.where(AuditEvent.created_at >= datetime(date_from.year, date_from.month, date_from.day, tzinfo=timezone.utc))
+    if date_to:
+        end = date_to + timedelta(days=1)
+        statement = statement.where(AuditEvent.created_at < datetime(end.year, end.month, end.day, tzinfo=timezone.utc))
+    return statement
+
+
 @router.get("/v1/audit-events")
 def list_workspace_audit_events(
     limit: int = Query(100, ge=1, le=500),
+    action: str | None = Query(None, max_length=120),
+    actor_id: str | None = Query(None, max_length=80),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
     context: WorkspaceContext = Depends(get_workspace_context),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     require_workspace_role(context, "owner", "admin")
-    events = session.exec(
+    statement = (
         select(AuditEvent)
         .where(AuditEvent.workspace_id == context.workspace.id)
         .order_by(AuditEvent.created_at.desc())
-        .limit(limit)
-    ).all()
+    )
+    events = session.exec(_apply_audit_filters(session, statement, action, actor_id, date_from, date_to).limit(limit)).all()
     return {
         "events": [
             _audit_data(event)
@@ -3310,10 +3535,15 @@ def list_workspace_audit_events(
 @router.get("/v1/admin/audit-events")
 def admin_list_audit_events(
     limit: int = Query(100, ge=1, le=500),
+    action: str | None = Query(None, max_length=120),
+    actor_id: str | None = Query(None, max_length=80),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
     user: User = Depends(require_platform_admin),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    events = session.exec(select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(limit)).all()
+    statement = select(AuditEvent).order_by(AuditEvent.created_at.desc())
+    events = session.exec(_apply_audit_filters(session, statement, action, actor_id, date_from, date_to).limit(limit)).all()
     return {
         "events": [
             _audit_data(event)
