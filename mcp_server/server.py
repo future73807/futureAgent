@@ -299,6 +299,198 @@ def scoped_read_csv(ctx: Context, path: str, limit: int = 50) -> dict:
     )
 
 
+MAX_GENERATION_ROWS = 5_000
+MAX_GENERATED_FILE_BYTES = 5_000_000
+MAX_BINARY_READ_BYTES = 2_000_000
+CHART_KINDS = {"bar", "line", "pie"}
+
+
+def _check_generated_file(resolved: Path) -> int:
+    size = resolved.stat().st_size
+    if size > MAX_GENERATED_FILE_BYTES:
+        resolved.unlink(missing_ok=True)
+        raise ValueError(f"生成文件超过 {MAX_GENERATED_FILE_BYTES} 字节限制")
+    return size
+
+
+def make_xlsx(
+    path: str,
+    rows: list[list],
+    sheet_name: str = "Sheet1",
+    *,
+    _workspace_root: Path | None = None,
+) -> str:
+    """把二维表格写入 xlsx 文件；rows 是数组的数组，推荐首行为表头。"""
+    if not rows or not isinstance(rows, list):
+        raise ValueError("rows 必须是非空的二维数组")
+    if len(rows) > MAX_GENERATION_ROWS:
+        raise ValueError(f"行数超过 {MAX_GENERATION_ROWS} 限制")
+    width = max(len(row) for row in rows if isinstance(row, list))
+    if width > 256:
+        raise ValueError("列数超过 256 限制")
+    workspace_root = _workspace_root or WORKSPACE_ROOT
+    resolved = _resolve_path(path, workspace_root)
+    if resolved.suffix.lower() != ".xlsx":
+        resolved = resolved.with_name(resolved.name + ".xlsx")
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = str(sheet_name)[:31] or "Sheet1"
+    for row in rows:
+        sheet.append(list(row)[:256])
+    _write_bytes_atomically(resolved, b"")  # 建立占位并复用原子写目录校验
+    workbook.save(resolved)
+    size = _check_generated_file(resolved)
+    return f"已生成 {resolved.relative_to(workspace_root).as_posix()}（{len(rows)} 行 × {width} 列，{size} 字节）"
+
+
+def make_docx(
+    path: str,
+    title: str,
+    paragraphs: list[str],
+    *,
+    _workspace_root: Path | None = None,
+) -> str:
+    """把标题与段落写入 docx 文件。"""
+    if not title or not title.strip():
+        raise ValueError("title 不能为空")
+    clean_paragraphs = [str(item).strip() for item in paragraphs if str(item).strip()]
+    if not clean_paragraphs:
+        raise ValueError("paragraphs 至少需要一段正文")
+    joined = "\n".join(clean_paragraphs)
+    if len(joined) > MAX_FILE_SIZE:
+        raise ValueError(f"正文超过 {MAX_FILE_SIZE} 字符限制")
+    workspace_root = _workspace_root or WORKSPACE_ROOT
+    resolved = _resolve_path(path, workspace_root)
+    if resolved.suffix.lower() != ".docx":
+        resolved = resolved.with_name(resolved.name + ".docx")
+    from docx import Document
+
+    document = Document()
+    document.add_heading(title.strip()[:240], level=0)
+    for paragraph in clean_paragraphs:
+        document.add_paragraph(paragraph[:8000])
+    _write_bytes_atomically(resolved, b"")
+    document.save(resolved)
+    size = _check_generated_file(resolved)
+    return f"已生成 {resolved.relative_to(workspace_root).as_posix()}（{len(clean_paragraphs)} 段，{size} 字节）"
+
+
+def make_chart(
+    path: str,
+    kind: str,
+    values: list[float],
+    labels: list[str],
+    title: str = "",
+    *,
+    _workspace_root: Path | None = None,
+) -> str:
+    """用 matplotlib 生成 bar/line/pie 图表 PNG。"""
+    if kind not in CHART_KINDS:
+        raise ValueError(f"kind 必须是 {'/'.join(sorted(CHART_KINDS))}")
+    if not values or len(values) > 50:
+        raise ValueError("values 需要 1 到 50 个数值")
+    if len(labels) != len(values):
+        raise ValueError("labels 数量必须与 values 一致")
+    workspace_root = _workspace_root or WORKSPACE_ROOT
+    resolved = _resolve_path(path, workspace_root)
+    if resolved.suffix.lower() != ".png":
+        resolved = resolved.with_name(resolved.name + ".png")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    figure, axis = plt.subplots(figsize=(8, 5), dpi=120)
+    try:
+        if kind == "bar":
+            axis.bar(range(len(values)), values)
+            axis.set_xticks(range(len(values)))
+            axis.set_xticklabels(labels, rotation=30, ha="right")
+            if title:
+                axis.set_title(title[:80])
+        elif kind == "line":
+            axis.plot(range(len(values)), values, marker="o")
+            axis.set_xticks(range(len(values)))
+            axis.set_xticklabels(labels, rotation=30, ha="right")
+            if title:
+                axis.set_title(title[:80])
+        else:
+            axis.pie(values, labels=labels, autopct="%1.1f%%")
+            if title:
+                axis.set_title(title[:80])
+        figure.tight_layout()
+        _write_bytes_atomically(resolved, b"")
+        figure.savefig(resolved, format="png")
+    finally:
+        plt.close(figure)
+    size = _check_generated_file(resolved)
+    return f"已生成 {resolved.relative_to(workspace_root).as_posix()}（{kind} 图，{size} 字节）"
+
+
+def read_file_base64(path: str, *, _workspace_root: Path | None = None) -> str:
+    """读取工作区文件的 base64 内容（上限 2 MB），供交付物登记使用。"""
+    import base64
+
+    resolved = _ensure_readable_file(path, _workspace_root or WORKSPACE_ROOT)
+    size = resolved.stat().st_size
+    if size > MAX_BINARY_READ_BYTES:
+        raise ValueError(f"文件超过 {MAX_BINARY_READ_BYTES} 字节读取限制")
+    return base64.b64encode(resolved.read_bytes()).decode("ascii")
+
+
+# 生成工具通过上方带 Context 的薄包装注册（FastMCP 不接受下划线参数）。
+
+
+@mcp.tool(name="make_xlsx")
+def scoped_make_xlsx(ctx: Context, path: str, rows: list[list], sheet_name: str = "Sheet1") -> str:
+    """把二维表格写为工作区内的 xlsx 文件，推荐首行为表头。"""
+    return make_xlsx(
+        path,
+        rows,
+        sheet_name,
+        _workspace_root=_workspace_root_for_context(ctx),
+    )
+
+
+@mcp.tool(name="make_docx")
+def scoped_make_docx(ctx: Context, path: str, title: str, paragraphs: list[str]) -> str:
+    """把标题与若干段落写为工作区内的 docx 文件。"""
+    return make_docx(
+        path,
+        title,
+        paragraphs,
+        _workspace_root=_workspace_root_for_context(ctx),
+    )
+
+
+@mcp.tool(name="make_chart")
+def scoped_make_chart(
+    ctx: Context,
+    path: str,
+    kind: str,
+    values: list[float],
+    labels: list[str],
+    title: str = "",
+) -> str:
+    """用工作区数据生成 bar/line/pie 图表 PNG。"""
+    return make_chart(
+        path,
+        kind,
+        values,
+        labels,
+        title,
+        _workspace_root=_workspace_root_for_context(ctx),
+    )
+
+
+@mcp.tool(name="read_file_base64")
+def scoped_read_file_base64(ctx: Context, path: str) -> str:
+    """读取工作区文件的 base64 内容（上限 2 MB）。"""
+    return read_file_base64(path, _workspace_root=_workspace_root_for_context(ctx))
+
+
 def run_python(code: str, timeout_seconds: int = 10) -> dict:
     """在 MCP 容器的工作区执行 Python 代码，最长运行 30 秒。"""
     if len(code) > 20_000:

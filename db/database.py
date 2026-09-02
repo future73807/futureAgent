@@ -58,12 +58,13 @@ REPORT_AGENT_TABLES = {
     "report_assistant_messages",
 }
 
-# 通知中心与自动化调度是最新加入的特性表。旧库识别时忽略它们：缺少这些表
-# 只说明版本停在 20260902_08 之前，升级链会以增量表把它们补齐。
+# 通知中心、自动化调度与交付物是最新加入的特性表。旧库识别时忽略它们：
+# 缺少这些表只说明版本停在迁移链早期，升级链会以增量表把它们补齐。
 NEWEST_FEATURE_TABLES = {
     "notifications",
     "notification_targets",
     "scheduled_jobs",
+    "deliverables",
 }
 
 # Revision 20260725_03 adds both business tables and audit visibility columns.

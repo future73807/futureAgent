@@ -30,6 +30,10 @@ WORKSPACE_TOOL_NAMES = frozenset(
         "edit_file",
         "read_csv",
         "run_python",
+        "make_xlsx",
+        "make_docx",
+        "make_chart",
+        "read_file_base64",
     }
 )
 TOOL_TRACE_MAX_EVENTS = 64

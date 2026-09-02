@@ -500,3 +500,23 @@ class ScheduledJob(SQLModel, table=True):
     created_by: str = Field(foreign_key="users.id", index=True)
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
+
+
+class Deliverable(SQLModel, table=True):
+    """AI 产出或工作区文件登记后的交付物，可下载、可挂到任务/对话。"""
+
+    __tablename__ = "deliverables"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    workspace_id: str = Field(foreign_key="workspaces.id", index=True)
+    task_id: str | None = Field(default=None, foreign_key="tasks.id", index=True)
+    conversation_id: str | None = Field(default=None, foreign_key="conversations.id", index=True)
+    agent_run_id: str | None = Field(default=None, foreign_key="agent_runs.id", index=True)
+    name: str = Field(max_length=255)
+    kind: str = Field(default="file", max_length=16)  # xlsx/docx/chart/image/pdf/file
+    source_path: str = Field(default="", max_length=500)
+    stored_name: str = Field(max_length=255, unique=True)
+    content_type: str = Field(default="application/octet-stream", max_length=120)
+    size_bytes: int = Field(default=0)
+    registered_by: str = Field(foreign_key="users.id", index=True)
+    created_at: datetime = Field(default_factory=now_utc)

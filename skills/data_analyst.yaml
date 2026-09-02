@@ -15,5 +15,9 @@ allowed_tool_names:
   - write_file
   - edit_file
   - read_file
+  - read_file_base64
+  - make_xlsx
+  - make_docx
+  - make_chart
   - web_search
   - fetch_url

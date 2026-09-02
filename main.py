@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
 from api.docs_catalog import render_api_catalog
 from api.automation_routes import router as automation_router
+from api.deliverables import router as deliverables_router
 from api.notifications import router as notifications_router
 from api.openapi import API_TITLE, build_openapi_schema
 from api.routes import router
@@ -58,6 +59,7 @@ app.include_router(router, prefix="/api")
 app.include_router(report_router, prefix="/api/v1/report")
 app.include_router(notifications_router, prefix="/api")
 app.include_router(automation_router, prefix="/api")
+app.include_router(deliverables_router, prefix="/api")
 
 
 def _root_path(request: Request, path: str) -> str:

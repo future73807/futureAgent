@@ -2722,7 +2722,8 @@ def download_attachment(
         raise HTTPException(status_code=404, detail="附件文件当前不可用") from exc
     except StorageError as exc:
         raise HTTPException(status_code=503, detail="附件存储当前不可用") from exc
-    safe_filename = re.sub(r'[\\"\r\n]+', "_", attachment.original_name) or "attachment"
+    # HTTP 头只能 latin-1 编码：filename 回退保留 ASCII，UTF-8 名称走 filename*
+    safe_filename = re.sub(r"[^ \"'*+,\-./:;<=>?@^\_~0-9A-Za-z]", "_", attachment.original_name) or "attachment"
     disposition = f"attachment; filename=\"{safe_filename}\"; filename*=UTF-8''{quote(attachment.original_name)}"
     return StreamingResponse(
         stream,

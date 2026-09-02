@@ -17,6 +17,11 @@ p, user, tool:read_file, use
 p, user, tool:read_csv, use
 p, user, tool:web_search, use
 p, user, tool:fetch_url, use
+p, user, tool:read_file_base64, use
+# 工作区内的交付物生成工具（输出受租户目录与大小上限约束）
+p, user, tool:make_xlsx, use
+p, user, tool:make_docx, use
+p, user, tool:make_chart, use
 
 # 角色继承：admin 继承 developer
 g, admin, developer

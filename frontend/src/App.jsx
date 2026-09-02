@@ -326,6 +326,10 @@ function TaskResultsPanel({ taskId, canWrite, members, refreshKey }) {
   const { message } = AntApp.useApp()
   const [attachments, setAttachments] = useState([])
   const [events, setEvents] = useState([])
+  const [deliverables, setDeliverables] = useState([])
+  const [workspaceFiles, setWorkspaceFiles] = useState([])
+  const [workspaceFilesLoading, setWorkspaceFilesLoading] = useState(false)
+  const [registerOpen, setRegisterOpen] = useState(false)
   const [preview, setPreview] = useState(null)
   const [loading, setLoading] = useState(false)
   const previewUrlRef = useRef('')
@@ -347,16 +351,18 @@ function TaskResultsPanel({ taskId, canWrite, members, refreshKey }) {
   }
   const loadResults = useCallback(async (requestedTaskId = taskId) => {
     const requestId = ++resultsRequestIdRef.current
-    if (!requestedTaskId) { setAttachments([]); setEvents([]); setLoading(false); return false }
+    if (!requestedTaskId) { setAttachments([]); setEvents([]); setDeliverables([]); setLoading(false); return false }
     setLoading(true)
     try {
-      const [files, activity] = await Promise.all([
+      const [files, activity, deliverableData] = await Promise.all([
         apiFetch(`/api/v1/attachments?task_id=${requestedTaskId}`),
         apiFetch(`/api/v1/tasks/${requestedTaskId}/activity`),
+        apiFetch(`/api/v1/deliverables?task_id=${requestedTaskId}`),
       ])
       if (requestId !== resultsRequestIdRef.current || currentTaskIdRef.current !== requestedTaskId) return false
       setAttachments(files.attachments || [])
       setEvents(activity.events || [])
+      setDeliverables(deliverableData.deliverables || [])
       return true
     } catch (error) {
       if (requestId === resultsRequestIdRef.current && currentTaskIdRef.current === requestedTaskId) message.error(readableError(error))
@@ -406,15 +412,52 @@ function TaskResultsPanel({ taskId, canWrite, members, refreshKey }) {
   const download = async (attachment) => {
     try { await downloadAttachment(attachment); message.success('已开始下载') } catch (error) { message.error(readableError(error)) }
   }
+  const loadWorkspaceFiles = async () => {
+    setWorkspaceFilesLoading(true)
+    try {
+      const data = await apiFetch('/api/v1/workspace/files')
+      setWorkspaceFiles(data.files || [])
+    } catch (error) {
+      setWorkspaceFiles([])
+      message.warning(readableError(error))
+    } finally {
+      setWorkspaceFilesLoading(false)
+    }
+  }
+  const registerDeliverable = async (file) => {
+    try {
+      await apiFetch('/api/v1/deliverables', {
+        method: 'POST',
+        body: JSON.stringify({ path: file.path, name: file.name, task_id: taskId }),
+      })
+      message.success(`已登记交付物：${file.name}`)
+      await loadResults(taskId)
+      setRegisterOpen(false)
+    } catch (error) { message.error(readableError(error)) }
+  }
+  const downloadDeliverable = async (deliverable) => {
+    try { await downloadAttachment({ ...deliverable, original_name: deliverable.name }); message.success('已开始下载') } catch (error) { message.error(readableError(error)) }
+  }
   const files = <List loading={loading} size="small" locale={{ emptyText: '暂无任务文件' }} dataSource={attachments} renderItem={(attachment) => <List.Item actions={[attachment.preview_available ? <Button key="preview" type="link" size="small" onClick={() => showPreview(attachment)}>预览</Button> : null, <Button key="download" type="link" size="small" onClick={() => download(attachment)}>下载</Button>].filter(Boolean)}><List.Item.Meta title={attachment.original_name} description={`${Math.ceil(attachment.size_bytes / 1024)} KB · ${formatDateTime(attachment.created_at)}`} /></List.Item>} />
+  const deliverableList = <List loading={loading} size="small" locale={{ emptyText: '尚无交付物；AI 执行或登记工作区文件后会出现在这里' }} dataSource={deliverables} renderItem={(deliverable) => <List.Item actions={[<Button key="download" type="link" size="small" onClick={() => downloadDeliverable(deliverable)}>下载</Button>]}><List.Item.Meta title={<Space size={6}><Tag color={deliverable.kind === 'image' ? 'blue' : deliverable.kind === 'file' ? 'default' : 'purple'}>{deliverable.kind}</Tag>{deliverable.name}</Space>} description={`${Math.ceil(deliverable.size_bytes / 1024)} KB · 来源 ${deliverable.source_path || '工作区'} · ${formatDateTime(deliverable.created_at)}`} /></List.Item>} />
   const activity = <List loading={loading} size="small" locale={{ emptyText: '暂无任务动态' }} dataSource={events} renderItem={(event) => {
     const actor = members.find((member) => member.user.id === event.actor_id)?.user.display_name || '工作区成员'
     const status = event.metadata?.status ? ` · ${readableStatus(event.metadata.status)}` : ''
     return <List.Item><List.Item.Meta title={activityLabels[event.action] || '工作区记录已更新'} description={`${actor} · ${formatDateTime(event.created_at)}${status}`} /></List.Item>
   }} />
   const previewContent = !preview ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请选择任务文件进行预览" /> : <Space direction="vertical" size="small" style={{ width: '100%' }}><Text strong>{preview.attachment.original_name}</Text>{preview.preview_kind === 'image' ? <img className="artifact-image-preview" src={preview.objectUrl} alt={preview.attachment.original_name} /> : preview.preview_kind === 'pdf' ? <iframe className="artifact-pdf-preview" title={preview.attachment.original_name} src={preview.objectUrl} /> : preview.preview_available ? <pre className="attachment-preview">{preview.text}</pre> : <Text type="secondary">{chineseMessage(preview.message, '此文件暂不支持在线预览。')}</Text>}</Space>
-  return <Card className="work-results" title="成果与文件" extra={canWrite && <Upload showUploadList={false} customRequest={attach}><Button size="small" icon={<PaperClipOutlined />}>添加上下文或交付物</Button></Upload>}>
-    <Tabs size="small" items={[{ key: 'files', label: `文件（${attachments.length}）`, children: files }, { key: 'preview', label: '预览', children: previewContent }, { key: 'activity', label: `动态（${events.length}）`, children: activity }]} />
+  return <Card className="work-results" title="成果与文件" extra={canWrite && <Space><Button size="small" icon={<FileAddOutlined />} onClick={() => { setRegisterOpen(true); loadWorkspaceFiles() }}>登记交付物</Button><Upload showUploadList={false} customRequest={attach}><Button size="small" icon={<PaperClipOutlined />}>添加上下文</Button></Upload></Space>}>
+    <Tabs size="small" items={[{ key: 'deliverables', label: `交付物（${deliverables.length}）`, children: deliverableList }, { key: 'files', label: `文件（${attachments.length}）`, children: files }, { key: 'preview', label: '预览', children: previewContent }, { key: 'activity', label: `动态（${events.length}）`, children: activity }]} />
+    <Modal title="从工作区登记交付物" open={registerOpen} onCancel={() => setRegisterOpen(false)} footer={null} destroyOnHidden>
+      <Alert type="info" showIcon message="这里列出 AI 执行期间在工作区生成的文件" description="登记后会复制到交付物库，可随时下载，并随任务留痕。" style={{ marginBottom: 12 }} />
+      {workspaceFilesLoading ? <div style={{ textAlign: 'center', padding: 24 }}><Spin /></div> : workspaceFiles.length ? (
+        <List size="small" dataSource={workspaceFiles} renderItem={(file) => (
+          <List.Item actions={[<Button key="register" type="link" size="small" onClick={() => registerDeliverable(file)}>登记</Button>]}>
+            <List.Item.Meta title={file.name} description={`${file.path} · ${Math.max(1, Math.ceil((file.size_bytes || 0) / 1024))} KB`} />
+          </List.Item>
+        )} />
+      ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="工作区暂无文件；先在工作模式执行一次 AI 任务" />}
+    </Modal>
   </Card>
 }
 
