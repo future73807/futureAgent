@@ -37,6 +37,7 @@ import {
   AppstoreOutlined,
   BarChartOutlined,
   BellOutlined,
+  BulbOutlined,
   CheckCircleFilled,
   CheckCircleOutlined,
   ClockCircleOutlined,

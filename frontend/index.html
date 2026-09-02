@@ -7,6 +7,16 @@
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="icon" type="image/svg+xml" href="/icon.svg" />
   <title>futureAgent 智能助手</title>
+  <script>
+    // 轻量运行时错误留痕：便于白屏问题诊断，可接入上报。
+    window.__runtimeErrors = [];
+    window.addEventListener('error', (event) => {
+      window.__runtimeErrors.push(String(event.message || event.error));
+    });
+    window.addEventListener('unhandledrejection', (event) => {
+      window.__runtimeErrors.push('unhandled rejection: ' + String(event.reason));
+    });
+  </script>
 </head>
 <body>
   <div id="root"></div>
