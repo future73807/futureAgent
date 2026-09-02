@@ -135,6 +135,8 @@ class Conversation(SQLModel, table=True):
     model_id: str = Field(default="gpt-4o-mini", max_length=120)
     skill_name: str = Field(default="chatbot", max_length=120)
     archived: bool = Field(default=False)
+    # 滚动摘要：长对话按阈值压缩为要点，替代无限平铺历史。
+    summary: str = Field(default="", max_length=8000)
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
 

@@ -17,6 +17,7 @@ from api.routes import router
 from api.report_routes import router as report_router
 from config import settings
 from core.observability import install_observability
+from core.checkpointer import aclose_checkpointer
 from core.scheduler import shutdown_scheduler, start_scheduler
 from db.database import init_db
 import os
@@ -28,6 +29,7 @@ async def lifespan(_: FastAPI):
     start_scheduler()
     yield
     shutdown_scheduler()
+    await aclose_checkpointer()
 
 app = FastAPI(
     title=API_TITLE,

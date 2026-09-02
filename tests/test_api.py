@@ -337,6 +337,25 @@ class ProductApiTests(unittest.TestCase):
         self.assertIn("Commercial acceptance criteria", prompt)
         self.assertIn("Review the brief", prompt)
 
+        with Session(database.engine) as session:
+            conversation = session.get(Conversation, conversation_id)
+            conversation.summary = "关键结论：发射窗口已确认。"
+            session.add(conversation)
+            session.commit()
+            prompt_with_summary = _conversation_agent_query(
+                session,
+                session.get(Conversation, conversation_id),
+                "Review the brief",
+            )
+        self.assertIn("关键结论：发射窗口已确认。", prompt_with_summary)
+
+        from core.checkpointer import get_checkpointer
+
+        with patch("core.checkpointer.settings", SimpleNamespace(checkpoint_conn_str="sqlite:///memory")):
+            import asyncio
+
+            self.assertIsNone(asyncio.run(get_checkpointer()))
+
         audits = self.client.get("/api/v1/audit-events", headers=headers)
         self.assertEqual(audits.status_code, 200, audits.text)
         self.assertTrue(any(event["action"] == "attachment.uploaded" for event in audits.json()["events"]))

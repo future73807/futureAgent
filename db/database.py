@@ -88,6 +88,17 @@ PRE_AGENT_RUN_MCP_MISSING_COLUMNS = {
     "agent_runs": {"mcp_servers_json", "tool_trace_json"},
 }
 
+# 滚动摘要是 conversations 的最新增量列；旧库识别时统一忽略。
+PRE_SUMMARY_MISSING_COLUMNS = {"conversations": {"summary"}}
+
+
+def _ignored_columns(*ignored_sets: dict[str, set[str]]) -> dict[str, set[str]]:
+    merged: dict[str, set[str]] = {}
+    for ignored in ignored_sets:
+        for table_name, columns in ignored.items():
+            merged.setdefault(table_name, set()).update(columns)
+    return merged
+
 
 def get_session() -> Generator[Session, None, None]:
     with Session(engine) as session:
@@ -140,25 +151,25 @@ def _upgrade_schema() -> None:
         if _matches_schema(
             inspector,
             core_current,
-            ignored_columns=PRE_AGENT_RUN_TRACE_MISSING_COLUMNS,
+            ignored_columns=_ignored_columns(PRE_AGENT_RUN_TRACE_MISSING_COLUMNS, PRE_SUMMARY_MISSING_COLUMNS),
         ):
             command.stamp(alembic_config, "20260809_05")
         elif _matches_schema(
             inspector,
             core_current,
-            ignored_columns=PRE_AGENT_RUN_MCP_MISSING_COLUMNS,
+            ignored_columns=_ignored_columns(PRE_AGENT_RUN_MCP_MISSING_COLUMNS, PRE_SUMMARY_MISSING_COLUMNS),
         ):
             command.stamp(alembic_config, "20260726_04")
         elif not (existing_tables & REPORT_AGENT_TABLES) and _matches_schema(
             inspector,
             pre_report_tables,
-            ignored_columns=PRE_AGENT_RUN_MCP_MISSING_COLUMNS,
+            ignored_columns=_ignored_columns(PRE_AGENT_RUN_MCP_MISSING_COLUMNS, PRE_SUMMARY_MISSING_COLUMNS),
         ):
             command.stamp(alembic_config, "20260725_03")
         elif _matches_schema(
             inspector,
             non_agent_tables,
-            ignored_columns=PRE_BUSINESS_MISSING_COLUMNS,
+            ignored_columns=_ignored_columns(PRE_BUSINESS_MISSING_COLUMNS, PRE_SUMMARY_MISSING_COLUMNS),
         ):
             # The immediately preceding commercial schema has all governed
             # AgentRun columns but not the operating-agent tables.
@@ -168,7 +179,7 @@ def _upgrade_schema() -> None:
             if _matches_schema(
                 inspector,
                 legacy_tables,
-                ignored_columns=PRE_BUSINESS_MISSING_COLUMNS,
+                ignored_columns=_ignored_columns(PRE_BUSINESS_MISSING_COLUMNS, PRE_SUMMARY_MISSING_COLUMNS),
             ):
                 # The pre-Alembic product schema is known and complete. Stamp
                 # that immutable baseline, then apply additive revisions.
