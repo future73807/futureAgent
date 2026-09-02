@@ -74,6 +74,7 @@ import {
   uploadAttachment,
 } from './api.js'
 import { mcpOptionLabel, mcpServerUnavailable, skillDisplayName } from './ui-labels.js'
+import { applyThemeMode, getThemeMode, toggleThemeMode } from './theme.js'
 
 const { Header, Sider, Content } = Layout
 const { Title, Text, Paragraph } = Typography
@@ -886,6 +887,7 @@ function WorkspaceApp({ session, onLogout }) {
   const [notifications, setNotifications] = useState([])
   const [unreadCount, setUnreadCount] = useState(0)
   const [notificationOpen, setNotificationOpen] = useState(false)
+  const [themeTick, setThemeTick] = useState(0)
   const loadedWorkspaceIdRef = useRef('')
   const workspaceRequestIdRef = useRef(0)
   const conversationRequestIdRef = useRef(0)
@@ -1128,6 +1130,14 @@ function WorkspaceApp({ session, onLogout }) {
               <Input allowClear prefix={<SearchOutlined />} placeholder="搜索任务、对话、消息或文件" />
             </AutoComplete>
             <Badge className="workspace-health" status={refreshing ? 'processing' : 'success'} text={refreshing ? '正在同步' : '已安全连接'} />
+            <Tooltip title={getThemeMode() === 'dark' ? '切换到浅色' : '切换到深色'}>
+              <Button
+                type="text"
+                icon={<BulbOutlined />}
+                onClick={() => { toggleThemeMode(); setThemeTick((tick) => tick + 1) }}
+                aria-label="切换深浅色主题"
+              />
+            </Tooltip>
             <Tooltip title="刷新工作区"><Button type="text" icon={<ReloadOutlined spin={refreshing} />} onClick={refreshWorkspace} disabled={refreshing || loading} aria-label="刷新工作区" /></Tooltip>
             <Dropdown menu={{ items: [{ key: 'profile', label: profile?.email, disabled: true }, { type: 'divider' }, { key: 'logout', icon: <LogoutOutlined />, label: '退出登录', onClick: onLogout }] }}>
               <Button type="text" className="profile-button" aria-label={`账号菜单：${profile?.display_name || '当前用户'}`}><Avatar size="small" icon={<UserOutlined />} /><span>{profile?.display_name}</span></Button>
@@ -1185,5 +1195,36 @@ export default function App() {
 }
 
 export function Root() {
-  return <ConfigProvider locale={zhCN} theme={{ algorithm: theme.defaultAlgorithm, token: { colorPrimary: '#4f5fd5', colorInfo: '#4f5fd5', colorSuccess: '#1f9d72', colorWarning: '#d97706', colorError: '#d14343', colorText: '#172033', colorTextSecondary: '#667085', colorBorder: '#e0e6ef', colorBorderSecondary: '#eaeef6', colorBgLayout: '#f4f6fb', borderRadius: 10, controlHeight: 36, fontFamily: '"PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif' }, components: { Button: { primaryShadow: '0 6px 16px rgba(79, 95, 213, .22)', fontWeight: 500 }, Card: { headerFontSize: 15 }, Menu: { darkItemBg: '#101624', darkItemSelectedBg: '#4f5fd5' } } }}><AntApp><App /></AntApp></ConfigProvider>
+  const [themeMode, setThemeMode] = useState(getThemeMode)
+  useEffect(() => {
+    applyThemeMode(getThemeMode())
+    const listener = (event) => setThemeMode(event.detail || getThemeMode())
+    window.addEventListener('futureagent-theme', listener)
+    return () => window.removeEventListener('futureagent-theme', listener)
+  }, [])
+  const isDark = themeMode === 'dark'
+  return <ConfigProvider locale={zhCN} theme={{
+    algorithm: isDark ? theme.darkAlgorithm : theme.defaultAlgorithm,
+    token: {
+      colorPrimary: '#4f5fd5',
+      colorInfo: '#4f5fd5',
+      colorSuccess: '#1f9d72',
+      colorWarning: '#d97706',
+      colorError: '#d14343',
+      colorText: isDark ? '#e6eaf2' : '#172033',
+      colorTextSecondary: isDark ? '#9aa4b8' : '#667085',
+      colorBorder: isDark ? '#39435c' : '#e0e6ef',
+      colorBorderSecondary: isDark ? '#2a3346' : '#eaeef6',
+      colorBgLayout: isDark ? '#0f1420' : '#f4f6fb',
+      colorBgContainer: isDark ? '#171e2e' : '#ffffff',
+      borderRadius: 10,
+      controlHeight: 36,
+      fontFamily: '"PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif',
+    },
+    components: {
+      Button: { primaryShadow: '0 6px 16px rgba(79, 95, 213, .22)', fontWeight: 500 },
+      Card: { headerFontSize: 15 },
+      Menu: { darkItemBg: '#101624', darkItemSelectedBg: '#4f5fd5' },
+    },
+  }}><AntApp><App /></AntApp></ConfigProvider>
 }

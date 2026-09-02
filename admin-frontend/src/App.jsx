@@ -1,8 +1,9 @@
 import React, { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import zhCN from 'antd/es/locale/zh_CN'
-import { App as AntApp, Avatar, Badge, Button, Card, ConfigProvider, Drawer, Dropdown, Form, Grid, Input, Layout, Menu, Select, Space, Spin, Typography, theme } from 'antd'
-import { ApiOutlined, AppstoreOutlined, AuditOutlined, CheckCircleFilled, DashboardOutlined, ExportOutlined, LogoutOutlined, MenuOutlined, RobotOutlined, SafetyOutlined, SettingOutlined, TeamOutlined, ToolOutlined, UserOutlined } from '@ant-design/icons'
+import { App as AntApp, Avatar, Badge, Button, Card, ConfigProvider, Drawer, Dropdown, Form, Grid, Input, Layout, Menu, Select, Space, Spin, Tooltip, Typography, theme } from 'antd'
+import { ApiOutlined, AppstoreOutlined, AuditOutlined, BulbOutlined, CheckCircleFilled, DashboardOutlined, ExportOutlined, LogoutOutlined, MenuOutlined, RobotOutlined, SafetyOutlined, SettingOutlined, TeamOutlined, ToolOutlined, UserOutlined } from '@ant-design/icons'
 import { apiFetch, applyAuthSession, clearAuthSession, getAccessToken, getWorkspaceId, refreshAccessToken, setWorkspaceId, toUserErrorMessage, userFrontendUrl } from './api.js'
+import { applyThemeMode, getThemeMode, toggleThemeMode } from './theme.js'
 
 const DashboardPage = lazy(() => import('./pages/DashboardPage.jsx'))
 const ModelsPage = lazy(() => import('./pages/ModelsPage.jsx'))
@@ -94,6 +95,9 @@ function AdminShell({ profile, workspaces, onLogout }) {
       <Header className="admin-header">
         <div className="admin-header-title">{!screens.lg && <Button type="text" icon={<MenuOutlined />} onClick={() => setMobileNav(true)} aria-label="打开管理导航" />}<Text strong>{pageLabels[selectedKey]}</Text><Badge status={online ? 'success' : 'error'} text={online ? 'API 正常' : 'API 异常'} /></div>
         <Space className="admin-header-actions" size={10}>
+          <Tooltip title={getThemeMode() === 'dark' ? '切换到浅色' : '切换到深色'}>
+            <Button type="text" icon={<BulbOutlined />} onClick={() => toggleThemeMode()} aria-label="切换深浅色主题" />
+          </Tooltip>
           <div className="admin-workspace-switch"><Text type="secondary">当前工作区</Text><Select aria-label="切换当前工作区" value={workspaceId || undefined} onChange={setCurrentWorkspace} placeholder="选择工作区" notFoundContent="暂无可切换的工作区" options={workspaces.map((item) => ({ value: item.id, label: item.name }))} /></div>
           <Button icon={<ExportOutlined />} href={userAppUrl} target="_blank" rel="noreferrer" aria-label="打开用户端"><span className="admin-action-label">用户端</span></Button>
           <Dropdown menu={accountMenu} placement="bottomRight" trigger={['click']}><Button type="text" className="admin-account-button" aria-label={`账号菜单：${profile.display_name}`}><Avatar size={30}>{profile.display_name?.slice(0, 1)}</Avatar><span className="admin-account-name">{profile.display_name}</span></Button></Dropdown>
@@ -113,4 +117,25 @@ function AdminApp() {
   return session ? <AdminShell profile={session.user} workspaces={session.workspaces || []} onLogout={logout} /> : <Login onLogin={loggedIn} />
 }
 
-export default function App() { return <ConfigProvider locale={zhCN} theme={{ algorithm: theme.defaultAlgorithm, token: { colorPrimary: '#4f5fd5', colorInfo: '#4f5fd5', colorBgLayout: '#f4f6fb', borderRadius: 14, fontFamily: '"PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif' } }}><AntApp><AdminApp /></AntApp></ConfigProvider> }
+export default function App() {
+  const [themeMode, setThemeMode] = useState(getThemeMode)
+  useEffect(() => {
+    applyThemeMode(getThemeMode())
+    const listener = (event) => setThemeMode(event.detail || getThemeMode())
+    window.addEventListener('futureagent-admin-theme', listener)
+    return () => window.removeEventListener('futureagent-admin-theme', listener)
+  }, [])
+  const isDark = themeMode === 'dark'
+  return <ConfigProvider locale={zhCN} theme={{
+    algorithm: isDark ? theme.darkAlgorithm : theme.defaultAlgorithm,
+    token: {
+      colorPrimary: '#4f5fd5',
+      colorInfo: '#4f5fd5',
+      colorBgLayout: isDark ? '#0e1420' : '#f4f7fc',
+      colorBgContainer: isDark ? '#151c2b' : '#ffffff',
+      colorText: isDark ? '#e3e8f2' : '#15233d',
+      borderRadius: 14,
+      fontFamily: '"PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif',
+    },
+  }}><AntApp><AdminApp /></AntApp></ConfigProvider>
+}

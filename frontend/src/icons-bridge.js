@@ -5,6 +5,7 @@ export { default as AudioMutedOutlined } from '@ant-design/icons/es/icons/AudioM
 export { default as AudioOutlined } from '@ant-design/icons/es/icons/AudioOutlined'
 export { default as BarChartOutlined } from '@ant-design/icons/es/icons/BarChartOutlined'
 export { default as BellOutlined } from '@ant-design/icons/es/icons/BellOutlined'
+export { default as BulbOutlined } from '@ant-design/icons/es/icons/BulbOutlined'
 export { default as CheckCircleFilled } from '@ant-design/icons/es/icons/CheckCircleFilled'
 export { default as CheckCircleOutlined } from '@ant-design/icons/es/icons/CheckCircleOutlined'
 export { default as ClearOutlined } from '@ant-design/icons/es/icons/ClearOutlined'

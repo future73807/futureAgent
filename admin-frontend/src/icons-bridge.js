@@ -2,6 +2,7 @@
 export { default as ApiOutlined } from '@ant-design/icons/es/icons/ApiOutlined'
 export { default as AppstoreOutlined } from '@ant-design/icons/es/icons/AppstoreOutlined'
 export { default as AuditOutlined } from '@ant-design/icons/es/icons/AuditOutlined'
+export { default as BulbOutlined } from '@ant-design/icons/es/icons/BulbOutlined'
 export { default as CheckCircleFilled } from '@ant-design/icons/es/icons/CheckCircleFilled'
 export { default as DashboardOutlined } from '@ant-design/icons/es/icons/DashboardOutlined'
 export { default as DeleteOutlined } from '@ant-design/icons/es/icons/DeleteOutlined'
