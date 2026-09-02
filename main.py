@@ -56,6 +56,9 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-Workspace-ID"],
 )
 install_observability(app)
+from core.rate_limit import rate_limit_auth_middleware  # noqa: E402
+
+app.middleware("http")(rate_limit_auth_middleware)
 
 app.include_router(router, prefix="/api")
 app.include_router(report_router, prefix="/api/v1/report")

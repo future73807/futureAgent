@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     # deliberately applied server-side, rather than trusting a browser timer.
     agent_run_timeout_seconds: int = 180
     max_concurrent_agent_runs_per_workspace: int = 2
+    # 认证接口每 IP 每分钟最大尝试次数；0 关闭限流
+    auth_rate_limit_per_minute: int = 60
     storage_backend: str = "local"
     storage_s3_bucket: str = ""
     storage_s3_endpoint_url: str = ""
