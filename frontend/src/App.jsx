@@ -238,6 +238,7 @@ function TaskCard({ task, members, onSelect, onMove }) {
       hoverable
       onClick={() => onSelect(task)}
       draggable
+      data-task-id={task.id}
       onDragStart={(event) => {
         event.dataTransfer.setData('text/futureagent-task', task.id)
         event.dataTransfer.effectAllowed = 'move'
@@ -388,6 +389,21 @@ function BoardPage({ projects, tasks, members, onRefresh, openTask, workspaceRol
       onRefresh()
     } catch (error) { message.error(readableError(error)) }
   }
+  const reorderTask = async (dragged, overTask, columnKey) => {
+    try {
+      if (dragged.status === columnKey) {
+        // 同列：与目标卡片交换排序值
+        await Promise.all([
+          apiFetch(`/api/v1/tasks/${dragged.id}`, { method: 'PATCH', body: JSON.stringify({ sort_order: overTask.sort_order ?? 0 }) }),
+          apiFetch(`/api/v1/tasks/${overTask.id}`, { method: 'PATCH', body: JSON.stringify({ sort_order: dragged.sort_order ?? 0 }) }),
+        ])
+      } else {
+        // 跨列：落到目标卡片的位置
+        await apiFetch(`/api/v1/tasks/${dragged.id}`, { method: 'PATCH', body: JSON.stringify({ status: columnKey, sort_order: overTask.sort_order ?? 0 }) })
+      }
+      onRefresh()
+    } catch (error) { message.error(readableError(error)) }
+  }
   const canWrite = workspaceRole !== 'viewer'
   return (
     <div className="page-shell">
@@ -408,9 +424,14 @@ function BoardPage({ projects, tasks, members, onRefresh, openTask, workspaceRol
           onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move' }}
           onDrop={(event) => {
             event.preventDefault()
+            if (!canWrite) return
             const draggedId = event.dataTransfer.getData('text/futureagent-task')
             const dragged = projectTasks.find((task) => task.id === draggedId)
-            if (dragged && dragged.status !== column.key && canWrite) moveTask(dragged, column.key)
+            if (!dragged) return
+            const overCard = event.target.closest?.('.task-card[data-task-id]')
+            const overTask = overCard ? projectTasks.find((task) => task.id === overCard.dataset.taskId) : null
+            if (overTask && overTask.id !== dragged.id) reorderTask(dragged, overTask, column.key)
+            else if (dragged.status !== column.key) moveTask(dragged, column.key)
           }}
         >
           <Flex justify="space-between" align="center"><Text strong>{column.title}</Text><Badge color={column.color} count={projectTasks.filter((task) => task.status === column.key).length} /></Flex>
@@ -1053,6 +1074,17 @@ function WorkspaceApp({ session, onLogout }) {
   const [unreadCount, setUnreadCount] = useState(0)
   const [notificationOpen, setNotificationOpen] = useState(false)
   const [themeTick, setThemeTick] = useState(0)
+  const searchInputRef = useRef(null)
+  useEffect(() => {
+    const handler = (event) => {
+      if ((event.ctrlKey || event.metaKey) && String(event.key).toLowerCase() === 'k') {
+        event.preventDefault()
+        document.querySelector('.global-search input')?.focus()
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
   const loadedWorkspaceIdRef = useRef('')
   const workspaceRequestIdRef = useRef(0)
   const conversationRequestIdRef = useRef(0)
@@ -1269,6 +1301,19 @@ function WorkspaceApp({ session, onLogout }) {
     </>
   )
 
+  const updateDrawerTask = async (patch) => {
+    if (!taskDrawer) return
+    try {
+      await apiFetch(`/api/v1/tasks/${taskDrawer.id}`, { method: 'PATCH', body: JSON.stringify(patch) })
+      message.success('任务已更新')
+      refreshWorkspace()
+    } catch (error) { message.error(readableError(error)) }
+  }
+  const activeDrawerTask = taskDrawer ? tasks.find((task) => task.id === taskDrawer.id) || taskDrawer : null
+  const drawerTask = taskDrawer && {
+    ...activeDrawerTask,
+    assignee_id: activeDrawerTask.assignee_id,
+  }
   return (
     <Layout className="workspace-layout">
       {screens.lg ? (
@@ -1295,7 +1340,7 @@ function WorkspaceApp({ session, onLogout }) {
               onSelect={handleSearchSelect}
               options={searchOptions}
               popupMatchSelectWidth={420}
-              aria-label="全局搜索"
+              aria-label="全局搜索（Ctrl+K）"
             >
               <Input allowClear prefix={<SearchOutlined />} placeholder="搜索任务、对话、消息或文件" />
             </AutoComplete>
@@ -1339,7 +1384,12 @@ function WorkspaceApp({ session, onLogout }) {
         ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无通知" />}
       </Drawer>
       <Drawer title="任务详情" open={Boolean(taskDrawer)} onClose={() => setTaskDrawer(null)} width={screens.sm ? 480 : '100%'}>
-        {taskDrawer && <Space direction="vertical" size="middle" style={{ width: '100%' }}><Title level={4}>{taskDrawer.title}</Title><Paragraph>{taskDrawer.description || '暂无任务说明。'}</Paragraph><Descriptions bordered size="small" column={1}><Descriptions.Item label="状态"><Tag>{taskStatusLabels[taskDrawer.status] || taskDrawer.status}</Tag></Descriptions.Item><Descriptions.Item label="优先级"><Tag>{priorityLabels[taskDrawer.priority] || taskDrawer.priority}</Tag></Descriptions.Item><Descriptions.Item label="截止日期">{taskDrawer.due_date || '未设置'}</Descriptions.Item></Descriptions><TaskComments taskId={taskDrawer.id} /><Button type="primary" icon={<AppstoreOutlined />} onClick={() => { setNav('work'); setTaskDrawer(null) }}>在工作模式中打开</Button></Space>}
+        {drawerTask && <Space direction="vertical" size="middle" style={{ width: '100%' }}><Title level={4}>{drawerTask.title}</Title><Paragraph>{drawerTask.description || '暂无任务说明。'}</Paragraph><Descriptions bordered size="small" column={1}>
+          <Descriptions.Item label="状态"><Select size="small" value={drawerTask.status} style={{ width: 110 }} onChange={(value) => updateDrawerTask({ status: value })} options={Object.entries(taskStatusLabels).map(([value, label]) => ({ value, label }))} /></Descriptions.Item>
+          <Descriptions.Item label="优先级"><Select size="small" value={drawerTask.priority} style={{ width: 110 }} onChange={(value) => updateDrawerTask({ priority: value })} options={Object.entries(priorityLabels).map(([value, label]) => ({ value, label }))} /></Descriptions.Item>
+          <Descriptions.Item label="负责人"><Select size="small" value={drawerTask.assignee_id || undefined} allowClear style={{ width: 140 }} placeholder="未分配" onChange={(value) => updateDrawerTask({ assignee_id: value || null })} options={members.map((item) => ({ value: item.user.id, label: item.user.display_name }))} /></Descriptions.Item>
+          <Descriptions.Item label="截止日期">{drawerTask.due_date || '未设置'}</Descriptions.Item>
+        </Descriptions><TaskComments taskId={drawerTask.id} /><Button type="primary" icon={<AppstoreOutlined />} onClick={() => { setNav('work'); setTaskDrawer(null) }}>在工作模式中打开</Button></Space>}
       </Drawer>
     </Layout>
   )
