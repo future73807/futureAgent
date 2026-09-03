@@ -655,6 +655,43 @@ html[data-theme='dark'] .chat-sender { background: linear-gradient(180deg, rgba(
 .settings-danger { border-color: #edb9b9 !important; }
 html[data-theme='dark'] .settings-danger { border-color: #6b3540 !important; }
 
+/* Markdown rendering in assistant bubbles */
+.markdown-body { overflow-wrap: break-word; }
+.markdown-body > :first-child { margin-top: 0; }
+.markdown-body > :last-child { margin-bottom: 0; }
+.markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 { margin: 14px 0 8px; line-height: 1.4; }
+.markdown-body h1 { font-size: 1.35em; }
+.markdown-body h2 { font-size: 1.22em; }
+.markdown-body h3 { font-size: 1.1em; }
+.markdown-body p { margin: 8px 0; }
+.markdown-body ul, .markdown-body ol { margin: 8px 0; padding-inline-start: 22px; }
+.markdown-body li { margin: 3px 0; }
+.markdown-body a { color: #4f5fd5; text-underline-offset: 2px; }
+.markdown-body code {
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: rgba(79, 95, 213, .1);
+  font: .92em ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.markdown-body pre {
+  margin: 10px 0;
+  padding: 12px 14px;
+  overflow-x: auto;
+  border-radius: 10px;
+  background: #111827;
+  scrollbar-width: thin;
+}
+.markdown-body pre code { padding: 0; background: transparent; color: #e7edf7; font-size: 12.5px; line-height: 1.65; }
+.markdown-body blockquote { margin: 10px 0; padding: 4px 12px; border-inline-start: 3px solid #aab5ec; color: inherit; opacity: .85; }
+.markdown-body table { margin: 10px 0; border-collapse: collapse; width: 100%; }
+.markdown-body th, .markdown-body td { padding: 6px 10px; border: 1px solid var(--border); text-align: left; }
+.markdown-body th { background: rgba(79, 95, 213, .07); font-weight: 600; }
+.markdown-body img { max-width: 100%; border-radius: 8px; }
+.markdown-body hr { margin: 14px 0; border: 0; border-top: 1px solid var(--border); }
+html[data-theme='dark'] .markdown-body code { background: rgba(134, 148, 214, .18); }
+html[data-theme='dark'] .markdown-body pre { background: #0d1322; }
+html[data-theme='dark'] .markdown-body a { color: #9daaff; }
+
 @media (max-width: 1180px) {
   .kanban-grid { grid-template-columns: repeat(5, 225px); }
   .business-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

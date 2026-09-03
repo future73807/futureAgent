@@ -5,12 +5,15 @@ import Button from 'antd/es/button'
 import Drawer from 'antd/es/drawer'
 import Empty from 'antd/es/empty'
 import Flex from 'antd/es/flex'
+import Form from 'antd/es/form'
 import Image from 'antd/es/image'
+import Input from 'antd/es/input'
+import Modal from 'antd/es/modal'
 import Select from 'antd/es/select'
 import Space from 'antd/es/space'
 import Typography from 'antd/es/typography'
 import Upload from 'antd/es/upload'
-import { DownloadOutlined, FileTextOutlined, MenuOutlined, MessageOutlined, PaperClipOutlined, PlusOutlined, RobotOutlined, ToolOutlined, UserOutlined } from '@ant-design/icons'
+import { DeleteOutlined, DownloadOutlined, EditOutlined, FileTextOutlined, MenuOutlined, MessageOutlined, PaperClipOutlined, PlusOutlined, RobotOutlined, ToolOutlined, UserOutlined } from '@ant-design/icons'
 import Bubble from '@ant-design/x/es/bubble'
 import Conversations from '@ant-design/x/es/conversations'
 import Sender from '@ant-design/x/es/sender'
@@ -19,6 +22,8 @@ import XProvider from '@ant-design/x/es/x-provider'
 import zhCN from 'antd/es/locale/zh_CN'
 import { apiFetch, downloadAttachment, getAttachmentBlob, streamSSE, uploadAttachment } from '../api.js'
 import { mcpOptionLabel, mcpServerUnavailable, skillDisplayName } from '../ui-labels.js'
+import { renderMarkdown } from '../markdown.js'
+import { validateUpload } from '../upload-guard.js'
 
 const { Title, Text } = Typography
 const promptSuggestions = [
@@ -34,7 +39,7 @@ function readableError(error) {
 }
 
 function ChatContent({ conversations, activeConversation, messages, models, skills, mcpServers = [], hasMoreMessages = false, onLoadMoreMessages, onNewConversation, onSelectConversation, onRefresh, onRefreshMessages, workspaceRole }) {
-  const { message } = AntApp.useApp()
+  const { message, modal } = AntApp.useApp()
   const [model, setModel] = useState('')
   const [skill, setSkill] = useState('')
   const [selectedMcpServers, setSelectedMcpServers] = useState([])
@@ -45,6 +50,8 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
   const [thumbnails, setThumbnails] = useState({})
   const [attachmentsLoading, setAttachmentsLoading] = useState(false)
   const [conversationOpen, setConversationOpen] = useState(false)
+  const [renameTarget, setRenameTarget] = useState(null)
+  const [renameForm] = Form.useForm()
   const abortRef = useRef(null)
   const canWrite = workspaceRole !== 'viewer'
   const modelOptions = useMemo(() => models.map((item) => ({
@@ -144,6 +151,8 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
     } finally { abortRef.current = null; setStreaming(false) }
   }
   const attach = async ({ file, onSuccess, onError }) => {
+    const invalid = validateUpload(file)
+    if (invalid) { message.error(invalid); onError?.(new Error(invalid)); return }
     try {
       const payload = await uploadAttachment(file, { conversation_id: activeConversation?.id })
       if (payload?.attachment) setAttachments((current) => [...current, payload.attachment])
@@ -162,6 +171,40 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
     setConversationOpen(false)
     onSelectConversation(conversationId)
   }
+  const openRename = (conversation) => {
+    setRenameTarget(conversation)
+    renameForm.setFieldsValue({ title: conversation.label })
+  }
+  const submitRename = async (values) => {
+    const title = (values.title || '').trim()
+    if (!renameTarget || !title) return
+    try {
+      await apiFetch(`/api/v1/conversations/${renameTarget.key}`, { method: 'PATCH', body: JSON.stringify({ title }) })
+      message.success('对话已重命名')
+      setRenameTarget(null)
+      onRefresh?.()
+    } catch (error) { message.error(readableError(error)) }
+  }
+  const confirmDelete = (conversation) => {
+    modal.confirm({
+      title: `删除对话「${conversation.label}」？`,
+      content: '对话消息与已上传附件会一并删除，且不可恢复。',
+      okText: '删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          await apiFetch(`/api/v1/conversations/${conversation.key}`, { method: 'DELETE' })
+          message.success('对话已删除')
+          if (activeConversation?.id === conversation.key) {
+            const remaining = conversations.find((item) => item.id !== conversation.key)
+            if (remaining) onSelectConversation(remaining.id)
+          }
+          onRefresh?.()
+        } catch (error) { message.error(readableError(error)) }
+      },
+    })
+  }
   const conversationPane = (
     <aside className="conversation-pane">
       <Button type="primary" icon={<PlusOutlined />} block onClick={createConversation} disabled={!canWrite}>新建对话</Button>
@@ -175,6 +218,19 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
           items={conversations.map((item) => ({ key: item.id, label: item.title, timestamp: item.updated_at, icon: <MessageOutlined /> }))}
           activeKey={activeConversation?.id}
           onActiveChange={selectConversation}
+          menu={(conversation) => ({
+            items: [
+              { key: 'rename', label: '重命名', icon: <EditOutlined />, disabled: !canWrite },
+              { key: 'delete', label: '删除', icon: <DeleteOutlined />, danger: true, disabled: !canWrite },
+            ],
+            onClick: ({ key }) => {
+              const target = conversations.find((item) => item.id === conversation.key)
+              if (!target) return
+              const wrapped = { key: target.id, label: target.title }
+              if (key === 'rename') openRename(wrapped)
+              else if (key === 'delete') confirmDelete(wrapped)
+            },
+          })}
         />
       ) : <Empty className="conversation-empty" image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无对话，创建一个开始协作" />}
     </aside>
@@ -251,7 +307,15 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
               autoScroll
               items={bubbleItems}
               roles={{
-                assistant: { placement: 'start', avatar: { icon: <RobotOutlined />, className: 'assistant-avatar' }, variant: 'borderless', shape: 'corner' },
+                assistant: {
+                  placement: 'start',
+                  avatar: { icon: <RobotOutlined />, className: 'assistant-avatar' },
+                  variant: 'borderless',
+                  shape: 'corner',
+                  messageRender: (content) => (
+                    <div className="markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />
+                  ),
+                },
                 user: { placement: 'end', avatar: { icon: <UserOutlined /> }, variant: 'filled', shape: 'corner' },
               }}
             />
@@ -289,7 +353,7 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
           </div>}
           <Flex justify="space-between" align="center" gap={12} wrap>
             <Text type="secondary">对话与附件均保存于当前工作区。</Text>
-            <Upload showUploadList={false} customRequest={attach} disabled={!activeConversation || !canWrite}>
+            <Upload showUploadList={false} customRequest={attach} beforeUpload={(file) => { const invalid = validateUpload(file); if (invalid) { message.error(invalid); return Upload.LIST_IGNORE } return true }} disabled={!activeConversation || !canWrite}>
               <Button size="small" icon={<PaperClipOutlined />} disabled={!activeConversation || !canWrite}>添加附件</Button>
             </Upload>
           </Flex>
@@ -305,6 +369,21 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
             actions={(_, { components: { SendButton, LoadingButton } }) => streaming ? <LoadingButton aria-label="停止生成" /> : <SendButton aria-label="发送消息" />}
           />
         </div>
+        <Modal
+          title="重命名对话"
+          open={Boolean(renameTarget)}
+          onCancel={() => setRenameTarget(null)}
+          onOk={() => renameForm.submit()}
+          okText="保存"
+          cancelText="取消"
+          destroyOnHidden
+        >
+          <Form form={renameForm} layout="vertical" onFinish={submitRename}>
+            <Form.Item name="title" label="对话标题" rules={[{ required: true, min: 2, message: '标题至少 2 个字符' }]}>
+              <Input placeholder="输入新的对话标题" maxLength={120} />
+            </Form.Item>
+          </Form>
+        </Modal>
       </section>
     </div>
   )

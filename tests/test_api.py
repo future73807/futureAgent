@@ -1083,6 +1083,66 @@ class ProductApiTests(unittest.TestCase):
         )
         self.assertEqual(denied.status_code, 403)
 
+    def test_conversation_delete_cascades_and_isolates(self):
+        headers = self.auth_headers(self.owner_token, self.owner_workspace)
+        created = self.client.post(
+            "/api/v1/conversations",
+            json={"title": "待删除对话"},
+            headers=headers,
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        conversation_id = created.json()["conversation"]["id"]
+
+        upload = self.client.post(
+            "/api/v1/attachments",
+            data={"conversation_id": conversation_id},
+            files={"file": ("delete-me.txt", b"temporary attachment", "text/plain")},
+            headers=headers,
+        )
+        self.assertEqual(upload.status_code, 201, upload.text)
+
+        with Session(database.engine) as session:
+            session.add(ChatMessage(conversation_id=conversation_id, role="assistant", content="临时消息"))
+            session.commit()
+
+        # 非所有者不可见也不可删除
+        other = self.client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": "delete-outsider@example.com",
+                "password": TEST_PASSWORD,
+                "display_name": "Delete Outsider",
+                "workspace_name": "Outsider home",
+            },
+        )
+        outsider_token = other.json()["access_token"]
+        forbidden = self.client.delete(
+            f"/api/v1/conversations/{conversation_id}",
+            headers=self.auth_headers(outsider_token, self.owner_workspace),
+        )
+        self.assertIn(forbidden.status_code, {403, 404})
+
+        deleted = self.client.delete(
+            f"/api/v1/conversations/{conversation_id}",
+            headers=headers,
+        )
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+
+        gone = self.client.get(
+            f"/api/v1/conversations/{conversation_id}/messages",
+            headers=headers,
+        )
+        self.assertEqual(gone.status_code, 404, gone.text)
+        attachments_after = self.client.get(
+            f"/api/v1/attachments?conversation_id={conversation_id}",
+            headers=headers,
+        )
+        # 会话删除后，附件查询要么 404，要么返回空列表
+        if attachments_after.status_code == 200:
+            self.assertEqual(attachments_after.json()["attachments"], [])
+        else:
+            self.assertEqual(attachments_after.status_code, 404)
+
 
 if __name__ == "__main__":
     unittest.main()

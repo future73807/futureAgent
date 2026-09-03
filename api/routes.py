@@ -2027,6 +2027,45 @@ def workspace_search(
     return {"query": q, "results": results[:limit]}
 
 
+@router.delete("/v1/conversations/{conversation_id}")
+def delete_conversation(
+    conversation_id: str,
+    context: WorkspaceContext = Depends(get_workspace_context),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    conversation = _conversation_or_404(session, context, conversation_id)
+    attachments = session.exec(
+        select(Attachment).where(Attachment.conversation_id == conversation_id)
+    ).all()
+    for message in session.exec(
+        select(ChatMessage).where(ChatMessage.conversation_id == conversation_id)
+    ).all():
+        session.delete(message)
+    for attachment in attachments:
+        session.delete(attachment)
+    session.delete(conversation)
+    write_audit(
+        session,
+        actor_id=context.user.id,
+        workspace_id=context.workspace.id,
+        action="conversation.deleted",
+        target_type="conversation",
+        target_id=conversation_id,
+        metadata={"title": conversation.title, "attachment_count": len(attachments)},
+    )
+    session.commit()
+    storage_errors = 0
+    storage = get_storage()
+    for attachment in attachments:
+        try:
+            storage.delete(attachment.stored_name)
+        except (StorageError, ObjectNotFound):
+            storage_errors += 1
+    if storage_errors:
+        logger.warning("conversation %s: %s attachment files could not be removed", conversation_id, storage_errors)
+    return {"deleted": conversation_id}
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(
     request: ChatCompletionRequest,

@@ -13,6 +13,7 @@ export { default as ClockCircleOutlined } from '@ant-design/icons/es/icons/Clock
 export { default as CloseOutlined } from '@ant-design/icons/es/icons/CloseOutlined'
 export { default as DeleteOutlined } from '@ant-design/icons/es/icons/DeleteOutlined'
 export { default as DownloadOutlined } from '@ant-design/icons/es/icons/DownloadOutlined'
+export { default as EditOutlined } from '@ant-design/icons/es/icons/EditOutlined'
 export { default as EllipsisOutlined } from '@ant-design/icons/es/icons/EllipsisOutlined'
 export { default as FileAddOutlined } from '@ant-design/icons/es/icons/FileAddOutlined'
 export { default as FolderOpenOutlined } from '@ant-design/icons/es/icons/FolderOpenOutlined'
