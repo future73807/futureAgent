@@ -4,6 +4,14 @@ import DOMPurify from 'dompurify'
 
 marked.setOptions({ breaks: true, gfm: true })
 
+// 外部链接统一新窗口打开并携带 rel，防止反向标签注入
+DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+  if (node.tagName === 'A' && node.getAttribute('href')) {
+    node.setAttribute('target', '_blank')
+    node.setAttribute('rel', 'noopener noreferrer nofollow')
+  }
+})
+
 export function renderMarkdown(text) {
   const raw = marked.parse(String(text ?? ''))
   return DOMPurify.sanitize(raw, {

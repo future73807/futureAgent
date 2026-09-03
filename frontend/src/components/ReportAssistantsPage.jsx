@@ -252,7 +252,7 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
   const counts = {
     sources: Number(dashboard?.source_count ?? dashboard?.data_source_count ?? sources.length ?? 0),
     activeAlerts: Number(dashboard?.active_alert_count ?? dashboard?.alert_count ?? alerts.filter((item) => !['acknowledged', 'closed', 'resolved'].includes(String(item.status || '').toLowerCase())).length ?? 0),
-    reports: Number(dashboard?.report_count ?? dashboard?.daily_report_count ?? reports.length ?? 0),
+    reports: Number(dashboard?.report_count ?? dashboard?.daily_report_count ?? reports.length ?? 0) + weeklyReports.length + monthlyReports.length,
     weeklyReports: Number(dashboard?.weekly_report_count ?? weeklyReports.length ?? 0),
     knowledgeBases: Number(dashboard?.knowledge_base_count ?? knowledgeBases.length ?? 0),
   }
@@ -543,7 +543,7 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
                 <div className="stat-icon-wrap"><ProjectOutlined /></div>
                 <div className="stat-info">
                   <div className="stat-number">{apiUnavailable ? '—' : counts.reports}</div>
-                  <div className="stat-label">生产日报</div>
+                  <div className="stat-label">定期报告（日/周/月）</div>
                 </div>
               </div>
               <div className="stat-item">
