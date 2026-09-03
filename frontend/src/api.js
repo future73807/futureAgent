@@ -133,6 +133,19 @@ export async function getAttachmentBlob(attachment) {
   return response.blob()
 }
 
+export async function downloadCsv(path, filename) {
+  const response = await fetch(path, { headers: requestHeaders(), credentials: 'include' })
+  if (!response.ok) throw await errorFrom(response)
+  const blob = await response.blob()
+  const link = document.createElement('a')
+  link.href = URL.createObjectURL(blob)
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(link.href)
+}
+
 export async function streamSSE(path, body, handlers = {}, retried = false) {
   const response = await fetch(path, {
     method: 'POST',

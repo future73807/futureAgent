@@ -66,6 +66,7 @@ import {
   applyAuthSession,
   clearAuthSession,
   downloadAttachment,
+  downloadCsv,
   getAttachmentBlob,
   getAccessToken,
   getWorkspaceId,
@@ -109,6 +110,7 @@ const navigationItems = [
   { key: 'board', icon: <ProjectOutlined />, label: '项目看板' },
   { key: 'work', icon: <AppstoreOutlined />, label: '工作模式' },
   { key: 'team', icon: <TeamOutlined />, label: '团队成员' },
+  { key: 'settings', icon: <SettingOutlined />, label: '工作区设置' },
 ]
 
 const navigationLabels = Object.fromEntries(navigationItems.map((item) => [item.key, item.label]))
@@ -390,6 +392,7 @@ function BoardPage({ projects, tasks, members, onRefresh, openTask, workspaceRol
       <Flex justify="space-between" align="center" wrap="wrap" gap={12} className="page-heading">
         <div><Title level={2}>项目看板</Title><Text type="secondary">把目标变成可见、可负责的工作；每一次变更都会写入工作区审计记录。</Text></div>
         <Space>
+          <Button icon={<FileAddOutlined />} onClick={async () => { try { await downloadCsv(`/api/v1/tasks/export${projectId ? `?project_id=${projectId}` : ''}`, 'tasks.csv'); message.success('任务清单已导出') } catch (error) { message.error(readableError(error)) } }}>导出任务</Button>
           {canWrite && <Button icon={<FolderOpenOutlined />} onClick={() => setProjectOpen(true)}>新建项目</Button>}
           {canWrite && <Button type="primary" icon={<PlusOutlined />} disabled={!projectId} onClick={() => setTaskOpen(true)}>新建任务</Button>}
         </Space>
@@ -861,6 +864,163 @@ function TeamPage({ workspace, members, workspaceRole, onRefresh }) {
   return <div className="page-shell"><Flex justify="space-between" align="center" wrap="wrap" gap={12} className="page-heading"><div><Title level={2}>团队成员</Title><Text type="secondary">成员归属工作区管理；管理员可添加已注册用户，并按最小权限原则分配角色。</Text></div>{manager && <Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>添加成员</Button>}</Flex><Card><List dataSource={members} renderItem={(member) => <List.Item actions={manager && member.role !== 'owner' ? [<Popconfirm key="remove" title="确认移除此成员？" onConfirm={() => removeMember(member)} okText="确认" cancelText="取消"><Button danger type="link">移除</Button></Popconfirm>] : []}><List.Item.Meta avatar={<Avatar icon={<UserOutlined />} />} title={<Space><Text strong>{member.user.display_name}</Text>{member.user.is_platform_admin && <Tag color="purple">平台管理员</Tag>}</Space>} description={member.user.email} /><Tag color={member.role === 'owner' ? 'gold' : member.role === 'admin' ? 'blue' : 'default'}>{roleLabels[member.role] || member.role}</Tag></List.Item>} /></Card><Modal title="添加已注册成员" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} okText="确认" cancelText="取消" destroyOnHidden><Form form={form} layout="vertical" onFinish={addMember} initialValues={{ role: 'member' }}><Form.Item name="email" label="邮箱" rules={[{ required: true, type: 'email' }]}><Input placeholder="对方需要先完成注册" /></Form.Item><Form.Item name="role" label="角色"><Select options={['admin', 'member', 'viewer'].map((value) => ({ value, label: roleLabels[value] }))} /></Form.Item></Form></Modal></div>
 }
 
+function WorkspaceSettingsPage({ workspace, members, workspaceRole, onRefresh }) {
+  const { message, modal } = AntApp.useApp()
+  const isOwner = workspaceRole === 'owner'
+  const isManager = ['owner', 'admin'].includes(workspaceRole)
+  const [name, setName] = useState(workspace?.name || '')
+  const [savingName, setSavingName] = useState(false)
+  const [targets, setTargets] = useState([])
+  const [targetsLoading, setTargetsLoading] = useState(false)
+  const [targetOpen, setTargetOpen] = useState(false)
+  const [creatingTarget, setCreatingTarget] = useState(false)
+  const [transferMemberId, setTransferMemberId] = useState('')
+  const [form] = Form.useForm()
+  const [targetForm] = Form.useForm()
+  useEffect(() => { setName(workspace?.name || '') }, [workspace?.id, workspace?.name])
+  const loadTargets = useCallback(async () => {
+    if (!isManager) return
+    setTargetsLoading(true)
+    try {
+      const data = await apiFetch('/api/v1/notifications/targets')
+      setTargets(data.targets || [])
+    } catch { setTargets([]) } finally { setTargetsLoading(false) }
+  }, [isManager])
+  useEffect(() => { loadTargets() }, [loadTargets])
+  const saveName = async () => {
+    const next = name.trim()
+    if (!next || next === workspace?.name) return
+    setSavingName(true)
+    try {
+      await apiFetch(`/api/v1/workspaces/${workspace.id}`, { method: 'PATCH', body: JSON.stringify({ name: next }) })
+      message.success('工作区名称已更新')
+      onRefresh()
+    } catch (error) { message.error(readableError(error)) } finally { setSavingName(false) }
+  }
+  const transferOwnership = async () => {
+    const target = members.find((m) => m.id === transferMemberId)
+    if (!target) return
+    modal.confirm({
+      title: `确认把所有权转移给「${target.user.display_name}」？`,
+      content: '转移后你将变为管理员；若存在老板/私事经营数据，系统会拒绝转移并给出处理指引。',
+      okText: '确认转移',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          await apiFetch(`/api/v1/workspaces/${workspace.id}/transfer-owner`, { method: 'POST', body: JSON.stringify({ member_id: transferMemberId }) })
+          message.success('所有权已转移')
+          setTransferMemberId('')
+          onRefresh()
+        } catch (error) { message.error(readableError(error)) }
+      },
+    })
+  }
+  const createTarget = async (values) => {
+    setCreatingTarget(true)
+    try {
+      await apiFetch('/api/v1/notifications/targets', { method: 'POST', body: JSON.stringify(values) })
+      message.success('通知出口已创建')
+      setTargetOpen(false)
+      targetForm.resetFields()
+      loadTargets()
+    } catch (error) { message.error(readableError(error)) } finally { setCreatingTarget(false) }
+  }
+  const toggleTarget = async (target, enabled) => {
+    try {
+      await apiFetch(`/api/v1/notifications/targets/${target.id}`, { method: 'PATCH', body: JSON.stringify({ enabled }) })
+      loadTargets()
+    } catch (error) { message.error(readableError(error)) }
+  }
+  const testTarget = async (target) => {
+    const hide = message.loading('正在发送测试推送…', 0)
+    try {
+      await apiFetch(`/api/v1/notifications/targets/${target.id}/test`, { method: 'POST' })
+      message.success('测试推送已送达')
+    } catch (error) { message.error(readableError(error)) } finally { hide() }
+  }
+  const removeTarget = (target) => {
+    modal.confirm({
+      title: `删除通知出口「${target.name}」？`,
+      okText: '删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        try { await apiFetch(`/api/v1/notifications/targets/${target.id}`, { method: 'DELETE' }); message.success('已删除'); loadTargets() } catch (error) { message.error(readableError(error)) }
+      },
+    })
+  }
+  const deleteWorkspace = () => {
+    modal.confirm({
+      title: `确认删除工作区「${workspace?.name}」？`,
+      content: '将永久删除全部成员、项目、任务、对话、附件与审计记录，且不可恢复。',
+      okText: '永久删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          await apiFetch(`/api/v1/workspaces/${workspace.id}`, { method: 'DELETE' })
+          message.success('工作区已删除')
+          setTimeout(() => window.location.reload(), 600)
+        } catch (error) { message.error(readableError(error)) }
+      },
+    })
+  }
+  const transferCandidates = members.filter((m) => m.id !== workspace?.owner_id && m.role !== 'viewer')
+  const targetKindLabels = { webhook: 'Webhook', wecom: '企业微信', feishu: '飞书', dingtalk: '钉钉' }
+  return (
+    <div className="page-shell settings-page">
+      <Flex justify="space-between" align="center" wrap="wrap" gap={12} className="page-heading">
+        <div><Title level={2}>工作区设置</Title><Text type="secondary">名称、所有权与通知出口都在这里集中管理；关键操作会写入审计记录。</Text></div>
+      </Flex>
+      <Card className="settings-card" title="基本信息">
+        <Flex gap={10} wrap="wrap">
+          <Input value={name} onChange={(event) => setName(event.target.value)} style={{ width: 320, maxWidth: '100%' }} placeholder="工作区名称" disabled={!isManager} />
+          <Button type="primary" loading={savingName} disabled={!isManager || !name.trim() || name.trim() === workspace?.name} onClick={saveName}>保存名称</Button>
+        </Flex>
+        <Paragraph type="secondary" style={{ marginTop: 10, marginBottom: 0 }}><Text type="secondary">标识：{workspace?.slug || '-'} · 所有者：{members.find((m) => m.id === workspace?.owner_id)?.user.display_name || '未知'}</Text></Paragraph>
+      </Card>
+      {isManager && (
+        <Card className="settings-card" title="通知出口" extra={<Button size="small" icon={<PlusOutlined />} onClick={() => setTargetOpen(true)}>新建出口</Button>}>
+          <Paragraph type="secondary" style={{ marginTop: 0 }}>预警扫描与关键事件可推送到企业微信群机器人、飞书、钉钉或任意 Webhook。</Paragraph>
+          {targetsLoading ? <Spin /> : targets.length ? (
+            <List size="small" dataSource={targets} renderItem={(target) => (
+              <List.Item actions={[
+                <Button key="test" size="small" onClick={() => testTarget(target)}>测试</Button>,
+                <Button key="delete" size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => removeTarget(target)} aria-label={`删除 ${target.name}`} />,
+                <Switch key="switch" size="small" checked={target.enabled} onChange={(checked) => toggleTarget(target, checked)} aria-label={`启用 ${target.name}`} />,
+              ]}>
+                <List.Item.Meta title={<Space size={6}><Tag color="purple">{targetKindLabels[target.kind] || target.kind}</Tag>{target.name}</Space>} description={target.url} />
+              </List.Item>
+            )} />
+          ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未配置通知出口" />}
+        </Card>
+      )}
+      {isOwner && (
+        <>
+          <Card className="settings-card" title="所有权转移">
+            <Paragraph type="secondary" style={{ marginTop: 0 }}>转移后你将变为管理员。存在老板/私事经营数据时系统会拒绝转移，需先归档或交接。</Paragraph>
+            <Flex gap={10} wrap="wrap">
+              <Select value={transferMemberId || undefined} onChange={setTransferMemberId} style={{ width: 280, maxWidth: '100%' }} placeholder="选择新的所有者（工作区成员）" options={transferCandidates.map((m) => ({ value: m.id, label: `${m.user.display_name}（${m.user.email}）` }))} />
+              <Button type="primary" disabled={!transferMemberId} onClick={transferOwnership}>转移所有权</Button>
+            </Flex>
+          </Card>
+          <Card className="settings-card settings-danger" title="危险区">
+            <Paragraph type="secondary" style={{ marginTop: 0 }}>删除工作区会永久清除全部成员、项目、任务、对话、附件、交付物与审计记录。</Paragraph>
+            <Button danger onClick={deleteWorkspace}>删除此工作区</Button>
+          </Card>
+        </>
+      )}
+      <Modal title="新建通知出口" open={targetOpen} onCancel={() => setTargetOpen(false)} onOk={() => targetForm.submit()} confirmLoading={creatingTarget} okText="创建" cancelText="取消" destroyOnHidden>
+        <Form form={targetForm} layout="vertical" onFinish={createTarget} initialValues={{ kind: 'wecom' }}>
+          <Form.Item name="name" label="出口名称" rules={[{ required: true, min: 2 }]}><Input placeholder="例如：运维值班群机器人" /></Form.Item>
+          <Form.Item name="kind" label="类型" rules={[{ required: true }]}><Select options={[{ value: 'wecom', label: '企业微信群机器人' }, { value: 'feishu', label: '飞书群机器人' }, { value: 'dingtalk', label: '钉钉群机器人' }, { value: 'webhook', label: '自定义 Webhook' }]} /></Form.Item>
+          <Form.Item name="url" label="Webhook 地址" rules={[{ required: true, min: 10 }]}><Input placeholder="https://..." /></Form.Item>
+        </Form>
+      </Modal>
+    </div>
+  )
+}
+
 function WorkspaceApp({ session, onLogout }) {
   const { message } = AntApp.useApp()
   const screens = Grid.useBreakpoint()
@@ -1087,7 +1247,8 @@ function WorkspaceApp({ session, onLogout }) {
   else if (nav === 'report') content = <ReportAssistantsPage workspaceRole={workspace?.role} members={members} currentUserId={profile?.id} />
   else if (nav === 'board') content = <BoardPage projects={projects} tasks={tasks} members={members} onRefresh={refreshWorkspace} openTask={(task) => setTaskDrawer(task)} workspaceRole={workspace?.role} />
   else if (nav === 'work') content = <WorkModePage tasks={tasks} members={members} models={models} skills={skills} mcpServers={mcpServers} workspaceRole={workspace?.role} profile={profile} onRefresh={refreshWorkspace} onOpenBoard={() => setNav('board')} />
-  else content = <TeamPage workspace={workspace} members={members} workspaceRole={workspace?.role} onRefresh={refreshWorkspace} />
+  else if (nav === 'team') content = <TeamPage workspace={workspace} members={members} workspaceRole={workspace?.role} onRefresh={refreshWorkspace} />
+  else if (nav === 'settings') content = <WorkspaceSettingsPage workspace={workspace} members={members} workspaceRole={workspace?.role} onRefresh={refreshWorkspace} />
 
   const workspaceContent = loading ? (
     <div className="workspace-loading"><Space direction="vertical" align="center"><Spin size="large" /><Text type="secondary">正在加载工作区</Text></Space></div>

@@ -3403,8 +3403,81 @@ def admin_delete_workspace(
     if not workspace:
         raise HTTPException(status_code=404, detail="工作区不存在")
 
+    purge_workspace_data(session, workspace_id, extra_models=(KnowledgeBase, ReportAlert, ReportAlertRule, ReportAssistant, ReportAssistantMessage, ReportDailyReport, ReportDataSource, ReportRecord, ReportWeeklyReport))
+
+    write_audit(
+        session,
+        actor_id=admin.id,
+        workspace_id=None,
+        action="admin.workspace_deleted",
+        target_type="workspace",
+        target_id=workspace_id,
+        metadata={"name": workspace.name, "slug": workspace.slug},
+    )
+    session.delete(workspace)
+    session.commit()
+    return {"deleted": workspace_id}
+
+
+@router.delete("/v1/workspaces/{workspace_id}")
+def delete_own_workspace(
+    workspace_id: str,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """所有者自删工作区：与管理员删除共用同一条级联清理路径。"""
+    from db.report_models import (
+        KnowledgeBase,
+        ReportAlert,
+        ReportAlertRule,
+        ReportAssistant,
+        ReportAssistantMessage,
+        ReportDailyReport,
+        ReportDataSource,
+        ReportRecord,
+        ReportWeeklyReport,
+    )
+
+    workspace = _workspace_or_404(session, workspace_id)
+    membership = _membership_for_workspace(session, user, workspace_id)
+    if membership.role != "owner":
+        raise HTTPException(status_code=403, detail="只有工作区所有者可以删除工作区")
+
+    purge_workspace_data(session, workspace_id, extra_models=(KnowledgeBase, ReportAlert, ReportAlertRule, ReportAssistant, ReportAssistantMessage, ReportDailyReport, ReportDataSource, ReportRecord, ReportWeeklyReport))
+
+    write_audit(
+        session,
+        actor_id=user.id,
+        workspace_id=None,
+        action="workspace.deleted_by_owner",
+        target_type="workspace",
+        target_id=workspace_id,
+        metadata={"name": workspace.name, "slug": workspace.slug},
+    )
+    session.delete(workspace)
+    session.commit()
+    return {"deleted": workspace_id}
+
+
+def purge_workspace_data(session: Session, workspace_id: str, *, extra_models: tuple = ()) -> None:
+    """按 workspace_id 逐表清理工作区数据（全部走参数化查询）。
+
+    ``extra_models`` 是位于 db.report_models 等模块、避免在模块顶层
+    引入循环导入的表；调用方按需传入。
+    """
+    from db.report_models import (
+        KnowledgeBase,
+        ReportAlert,
+        ReportAlertRule,
+        ReportAssistant,
+        ReportAssistantMessage,
+        ReportDailyReport,
+        ReportDataSource,
+        ReportRecord,
+        ReportWeeklyReport,
+    )
+
     def drop_rows(model):
-        """ORM 逐行删除：管理操作数据量有限，全部走参数化查询。"""
         for row in session.exec(select(model).where(model.workspace_id == workspace_id)).all():
             session.delete(row)
 
@@ -3442,31 +3515,10 @@ def admin_delete_workspace(
         BusinessAlertRule,
         BusinessAlert,
         BusinessBossTask,
-        ReportAssistant,
-        ReportAssistantMessage,
-        ReportDataSource,
-        ReportRecord,
-        KnowledgeBase,
-        ReportAlertRule,
-        ReportAlert,
         BusinessDailyReport,
-        ReportDailyReport,
-        ReportWeeklyReport,
+        *extra_models,
     ):
         drop_rows(model)
-
-    write_audit(
-        session,
-        actor_id=admin.id,
-        workspace_id=None,
-        action="admin.workspace_deleted",
-        target_type="workspace",
-        target_id=workspace_id,
-        metadata={"name": workspace.name, "slug": workspace.slug},
-    )
-    session.delete(workspace)
-    session.commit()
-    return {"deleted": workspace_id}
 
 
 @router.get("/v1/admin/workspaces")
@@ -3504,6 +3556,103 @@ def _apply_audit_filters(
         end = date_to + timedelta(days=1)
         statement = statement.where(AuditEvent.created_at < datetime(end.year, end.month, end.day, tzinfo=timezone.utc))
     return statement
+
+
+@router.get("/v1/admin/audit-events/export")
+def export_admin_audit_events(
+    action: str | None = Query(None, max_length=120),
+    actor_id: str | None = Query(None, max_length=80),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    user: User = Depends(require_platform_admin),
+    session: Session = Depends(get_session),
+) -> StreamingResponse:
+    """导出审计轨迹 CSV（沿用列表筛选条件，上限 5000 条；带 BOM 便于 Excel）。"""
+    import csv
+    import io
+
+    statement = select(AuditEvent).order_by(AuditEvent.created_at.desc())
+    events = session.exec(
+        _apply_audit_filters(session, statement, action, actor_id, date_from, date_to).limit(5000)
+    ).all()
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["发生时间", "操作", "对象类型", "对象ID", "执行人", "可见性", "附加信息"])
+    for event in events:
+        writer.writerow([
+            event.created_at.isoformat(),
+            event.action,
+            event.target_type,
+            event.target_id,
+            event.actor_id or "system",
+            event.visibility,
+            event.metadata_json,
+        ])
+    payload = buffer.getvalue().encode("utf-8-sig")
+    return StreamingResponse(
+        io.BytesIO(payload),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=\"audit-events.csv\""},
+    )
+
+
+@router.get("/v1/tasks/export")
+def export_workspace_tasks(
+    project_id: str | None = Query(None),
+    context: WorkspaceContext = Depends(get_workspace_context),
+    session: Session = Depends(get_session),
+) -> StreamingResponse:
+    """导出工作区任务 CSV，供离线汇报与归档。"""
+    import csv
+    import io
+
+    statement = select(Task).where(Task.workspace_id == context.workspace.id)
+    if project_id:
+        statement = statement.where(Task.project_id == project_id)
+    tasks = session.exec(statement.order_by(Task.sort_order, Task.updated_at.desc())).all()
+    member_user_ids = {
+        membership.user_id
+        for membership in session.exec(
+            select(Membership).where(Membership.workspace_id == context.workspace.id)
+        ).all()
+    }
+    assignee_names = {
+        user_row.id: user_row.display_name
+        for user_row in session.exec(select(User).where(User.id.in_(member_user_ids))).all()
+    } if member_user_ids else {}
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["标题", "状态", "优先级", "负责人", "截止日期", "标签", "描述", "更新时间"])
+    for task in tasks:
+        try:
+            labels = "、".join(json.loads(task.labels_json or "[]"))
+        except ValueError:
+            labels = ""
+        writer.writerow([
+            task.title,
+            taskStatusCsvLabels.get(task.status, task.status),
+            task.priority,
+            assignee_names.get(task.assignee_id, "未分配"),
+            task.due_date or "",
+            labels,
+            task.description,
+            task.updated_at.isoformat(),
+        ])
+    payload = buffer.getvalue().encode("utf-8-sig")
+    return StreamingResponse(
+        io.BytesIO(payload),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=\"tasks.csv\""},
+    )
+
+
+taskStatusCsvLabels = {
+    "backlog": "待梳理",
+    "todo": "待处理",
+    "in_progress": "进行中",
+    "review": "待审核",
+    "done": "已完成",
+}
 
 
 @router.get("/v1/audit-events")

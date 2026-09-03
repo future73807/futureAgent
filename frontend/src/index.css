@@ -649,6 +649,12 @@ html[data-theme='dark'] .chat-sender { background: linear-gradient(180deg, rgba(
 .automation-copy small { display: block; overflow: hidden; margin-top: 2px; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .automation-copy small.automation-error { color: #cf4a4a; }
 
+/* Workspace settings */
+.settings-page { max-width: 920px; }
+.settings-card { margin-bottom: 14px; border-radius: var(--radius) !important; }
+.settings-danger { border-color: #edb9b9 !important; }
+html[data-theme='dark'] .settings-danger { border-color: #6b3540 !important; }
+
 @media (max-width: 1180px) {
   .kanban-grid { grid-template-columns: repeat(5, 225px); }
   .business-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
