@@ -41,6 +41,25 @@ const actionLabels = {
   'policy.created': '创建权限策略',
   'policy.deleted': '删除权限策略',
   'admin.user_updated': '更新账号管理状态',
+  'admin.user_created': '创建账号',
+  'admin.password_reset': '重置账号密码',
+  'admin.workspace_created': '创建工作区',
+  'admin.workspace_deleted': '删除工作区',
+  'workspace.deleted_by_owner': '所有者删除工作区',
+  'conversation.deleted': '删除对话',
+  'task.commented': '评论任务',
+  'automation_job.created': '创建自动化任务',
+  'automation_job.updated': '更新自动化任务',
+  'automation_job.deleted': '删除自动化任务',
+  'automation_job.executed': '执行自动化任务',
+  'notification_target.created': '创建通知出口',
+  'notification_target.updated': '更新通知出口',
+  'notification_target.deleted': '删除通知出口',
+  'deliverable.registered': '登记交付物',
+  'deliverable.deleted': '删除交付物',
+  'report.monthly_report.generated': '生成月报',
+  'report.daily_report.generated': '生成汇报日报',
+  'report.weekly_report.generated': '生成汇报周报',
 }
 
 const targetLabels = {
@@ -57,6 +76,10 @@ const targetLabels = {
   model: '模型',
   skill: '技能',
   policy: '权限策略',
+  scheduled_job: '自动化任务',
+  notification_target: '通知出口',
+  deliverable: '交付物',
+  report_monthly_report: '月报',
 }
 
 const metadataLabels = {

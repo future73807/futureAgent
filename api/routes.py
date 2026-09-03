@@ -3560,6 +3560,69 @@ def purge_workspace_data(session: Session, workspace_id: str, *, extra_models: t
         drop_rows(model)
 
 
+@router.get("/v1/admin/users/{user_id}/sessions")
+def admin_list_user_sessions(
+    user_id: str,
+    admin: User = Depends(require_platform_admin),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    target = session.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    now = now_utc()
+    sessions = session.exec(
+        select(RefreshSession)
+        .where(
+            RefreshSession.user_id == user_id,
+            RefreshSession.revoked.is_(False),
+            RefreshSession.expires_at > now,
+        )
+        .order_by(RefreshSession.created_at.desc())
+    ).all()
+    return {
+        "active_sessions": [
+            {
+                "id": item.id,
+                "created_at": item.created_at,
+                "expires_at": item.expires_at,
+            }
+            for item in sessions
+        ]
+    }
+
+
+@router.post("/v1/admin/users/{user_id}/revoke-sessions")
+def admin_revoke_user_sessions(
+    user_id: str,
+    admin: User = Depends(require_platform_admin),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    target = session.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    active = session.exec(
+        select(RefreshSession)
+        .where(
+            RefreshSession.user_id == user_id,
+            RefreshSession.revoked.is_(False),
+            RefreshSession.expires_at > now_utc(),
+        )
+    ).all()
+    for item in active:
+        item.revoked = True
+        session.add(item)
+    write_audit(
+        session,
+        actor_id=admin.id,
+        action="admin.sessions_revoked",
+        target_type="user",
+        target_id=user_id,
+        metadata={"revoked_count": len(active)},
+    )
+    session.commit()
+    return {"revoked": len(active)}
+
+
 @router.get("/v1/admin/workspaces")
 def admin_list_workspaces(
     user: User = Depends(require_platform_admin),
