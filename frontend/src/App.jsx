@@ -78,6 +78,7 @@ import {
 } from './api.js'
 import { mcpOptionLabel, mcpServerUnavailable, skillDisplayName } from './ui-labels.js'
 import { applyThemeMode, getThemeMode, toggleThemeMode } from './theme.js'
+import { validateUpload } from './upload-guard.js'
 
 const { Header, Sider, Content } = Layout
 const { Title, Text, Paragraph } = Typography
@@ -494,6 +495,8 @@ function TaskResultsPanel({ taskId, canWrite, members, refreshKey }) {
   useEffect(() => () => { if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current) }, [])
   const attach = async ({ file, onSuccess, onError }) => {
     const requestedTaskId = taskId
+    const invalid = validateUpload(file)
+    if (invalid) { message.error(invalid); onError?.(new Error(invalid)); return }
     try {
       await uploadAttachment(file, { task_id: requestedTaskId })
       await loadResults(requestedTaskId)
@@ -559,7 +562,7 @@ function TaskResultsPanel({ taskId, canWrite, members, refreshKey }) {
     return <List.Item><List.Item.Meta title={activityLabels[event.action] || '工作区记录已更新'} description={`${actor} · ${formatDateTime(event.created_at)}${status}`} /></List.Item>
   }} />
   const previewContent = !preview ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请选择任务文件进行预览" /> : <Space direction="vertical" size="small" style={{ width: '100%' }}><Text strong>{preview.attachment.original_name}</Text>{preview.preview_kind === 'image' ? <img className="artifact-image-preview" src={preview.objectUrl} alt={preview.attachment.original_name} /> : preview.preview_kind === 'pdf' ? <iframe className="artifact-pdf-preview" title={preview.attachment.original_name} src={preview.objectUrl} /> : preview.preview_available ? <pre className="attachment-preview">{preview.text}</pre> : <Text type="secondary">{chineseMessage(preview.message, '此文件暂不支持在线预览。')}</Text>}</Space>
-  return <Card className="work-results" title="成果与文件" extra={canWrite && <Space><Button size="small" icon={<FileAddOutlined />} onClick={() => { setRegisterOpen(true); loadWorkspaceFiles() }}>登记交付物</Button><Upload showUploadList={false} customRequest={attach}><Button size="small" icon={<PaperClipOutlined />}>添加上下文</Button></Upload></Space>}>
+  return <Card className="work-results" title="成果与文件" extra={canWrite && <Space><Button size="small" icon={<FileAddOutlined />} onClick={() => { setRegisterOpen(true); loadWorkspaceFiles() }}>登记交付物</Button><Upload showUploadList={false} customRequest={attach} beforeUpload={(file) => { const invalid = validateUpload(file); if (invalid) { message.error(invalid); return Upload.LIST_IGNORE } return true }}><Button size="small" icon={<PaperClipOutlined />}>添加上下文</Button></Upload></Space>}>
     <Tabs size="small" items={[{ key: 'deliverables', label: `交付物（${deliverables.length}）`, children: deliverableList }, { key: 'files', label: `文件（${attachments.length}）`, children: files }, { key: 'preview', label: '预览', children: previewContent }, { key: 'activity', label: `动态（${events.length}）`, children: activity }]} />
     <Modal title="从工作区登记交付物" open={registerOpen} onCancel={() => setRegisterOpen(false)} footer={null} destroyOnHidden>
       <Alert type="info" showIcon message="这里列出 AI 执行期间在工作区生成的文件" description="登记后会复制到交付物库，可随时下载，并随任务留痕。" style={{ marginBottom: 12 }} />
@@ -1155,13 +1158,17 @@ function WorkspaceApp({ session, onLogout }) {
     if (!oldest || !activeConversationId) return Promise.resolve(false)
     return loadConversationMessages(activeConversationId, { beforeId: oldest.id, append: true })
   }, [activeConversationId, loadConversationMessages, messages])
-  const runGlobalSearch = useCallback(async (value) => {
+  const searchTimerRef = useRef('')
+  const runGlobalSearch = useCallback((value) => {
+    clearTimeout(searchTimerRef.current)
     const keyword = value.trim()
     if (!keyword) { setSearchResults([]); return }
-    try {
-      const data = await apiFetch(`/api/v1/search?q=${encodeURIComponent(keyword)}&limit=12`, { workspaceId })
-      setSearchResults(data.results || [])
-    } catch { setSearchResults([]) }
+    searchTimerRef.current = setTimeout(async () => {
+      try {
+        const data = await apiFetch(`/api/v1/search?q=${encodeURIComponent(keyword)}&limit=12`, { workspaceId })
+        setSearchResults(data.results || [])
+      } catch { setSearchResults([]) }
+    }, 300)
   }, [workspaceId])
   const loadNotifications = useCallback(async () => {
     if (!workspaceId) return
