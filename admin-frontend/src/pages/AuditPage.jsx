@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { App, Button, Card, DatePicker, Input, Space, Table, Tag, Typography } from 'antd'
-import { ReloadOutlined } from '@ant-design/icons'
-import { apiFetch, toUserErrorMessage } from '../api.js'
+import { DownloadOutlined, ReloadOutlined } from '@ant-design/icons'
+import { apiFetch, downloadAuditCsv, toUserErrorMessage } from '../api.js'
 import { formatDateTime } from '../formatters.js'
 
 const { Title, Text } = Typography
@@ -160,7 +160,7 @@ export default function AuditPage() {
     { title: '执行人', dataIndex: 'actor_id', width: 220, render: (value) => value ? <span className="code-text">账号 ID：{value}</span> : <Tag>系统</Tag> },
     { title: '附加信息', dataIndex: 'metadata', render: metadataText },
   ]
-  return <div><div className="page-heading"><div><Title level={2}>审计轨迹</Title><Text type="secondary">集中查看由 API 记录的安全、工作区、任务、计划和 AI 执行活动。</Text></div><Button icon={<ReloadOutlined />} loading={loading} onClick={() => load()}>刷新</Button></div>
+  return <div><div className="page-heading"><div><Title level={2}>审计轨迹</Title><Text type="secondary">集中查看由 API 记录的安全、工作区、任务、计划和 AI 执行活动。</Text></div><Space><Button icon={<DownloadOutlined />} onClick={async () => { try { await downloadAuditCsv({ action: actionFilter.trim(), actor_id: actorFilter.trim(), date_from: range?.[0]?.format('YYYY-MM-DD'), date_to: range?.[1]?.format('YYYY-MM-DD') }); message.success('审计轨迹已导出') } catch (error) { message.error(toUserErrorMessage(error, '导出失败，请稍后重试。')) } }}>导出 CSV</Button><Button icon={<ReloadOutlined />} loading={loading} onClick={() => load()}>刷新</Button></Space></div>
     <Card className="admin-card" styles={{ body: { paddingBottom: 10 } }}>
       <Space wrap style={{ marginBottom: 14 }}>
         <Input allowClear placeholder="按操作过滤，如 admin." value={actionFilter} onChange={(event) => setActionFilter(event.target.value)} style={{ width: 220 }} onPressEnter={() => load()} />

@@ -60,6 +60,25 @@ export async function apiFetch(path, options = {}, retry = true) {
   return response.json()
 }
 
+export async function downloadAuditCsv(params = {}) {
+  const search = new URLSearchParams()
+  Object.entries(params).forEach(([key, value]) => { if (value) search.set(key, value) })
+  const response = await fetch(`/api/v1/admin/audit-events/export?${search.toString()}`, {
+    headers: { Authorization: `Bearer ${getAccessToken()}` },
+    credentials: 'include',
+  })
+  if (response.status === 401) { await refreshAccessToken(); return downloadAuditCsv(params) }
+  if (!response.ok) throw await readError(response)
+  const blob = await response.blob()
+  const link = document.createElement('a')
+  link.href = URL.createObjectURL(blob)
+  link.download = 'audit-events.csv'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(link.href)
+}
+
 export function serviceUrl(port, path = '') {
   const normalizedPort = String(port ?? '').trim()
   const portSuffix = normalizedPort ? `:${normalizedPort}` : ''

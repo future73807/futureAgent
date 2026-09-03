@@ -5,6 +5,7 @@ import Button from 'antd/es/button'
 import Drawer from 'antd/es/drawer'
 import Empty from 'antd/es/empty'
 import Flex from 'antd/es/flex'
+import Image from 'antd/es/image'
 import Select from 'antd/es/select'
 import Space from 'antd/es/space'
 import Typography from 'antd/es/typography'
@@ -16,7 +17,7 @@ import Sender from '@ant-design/x/es/sender'
 import Welcome from '@ant-design/x/es/welcome'
 import XProvider from '@ant-design/x/es/x-provider'
 import zhCN from 'antd/es/locale/zh_CN'
-import { apiFetch, downloadAttachment, streamSSE, uploadAttachment } from '../api.js'
+import { apiFetch, downloadAttachment, getAttachmentBlob, streamSSE, uploadAttachment } from '../api.js'
 import { mcpOptionLabel, mcpServerUnavailable, skillDisplayName } from '../ui-labels.js'
 
 const { Title, Text } = Typography
@@ -41,6 +42,7 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
   const [streaming, setStreaming] = useState(false)
   const [liveMessages, setLiveMessages] = useState([])
   const [attachments, setAttachments] = useState([])
+  const [thumbnails, setThumbnails] = useState({})
   const [attachmentsLoading, setAttachmentsLoading] = useState(false)
   const [conversationOpen, setConversationOpen] = useState(false)
   const abortRef = useRef(null)
@@ -86,6 +88,7 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
     let current = true
     const conversationId = activeConversation?.id
     setAttachments([])
+    setThumbnails({})
     if (!conversationId) {
       setAttachmentsLoading(false)
       return () => { current = false }
@@ -97,6 +100,22 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
       .finally(() => { if (current) setAttachmentsLoading(false) })
     return () => { current = false }
   }, [activeConversation?.id])
+  // 为图片类附件生成缩略图 objectUrl；切换对话时统一回收
+  useEffect(() => {
+    const urls = []
+    let current = true
+    attachments.filter((item) => item.preview_kind === 'image').slice(0, 12).forEach((item) => {
+      getAttachmentBlob(item)
+        .then((blob) => {
+          if (!current) { URL.revokeObjectURL(URL.createObjectURL(blob)); return }
+          const url = URL.createObjectURL(blob)
+          urls.push(url)
+          setThumbnails((previous) => ({ ...previous, [item.id]: url }))
+        })
+        .catch(() => { /* 单张缩略图失败不影响列表 */ })
+    })
+    return () => { current = false; urls.forEach((url) => URL.revokeObjectURL(url)) }
+  }, [attachments])
   const bubbleItems = useMemo(() => [...messages, ...liveMessages].map((item) => ({ key: item.id, role: item.role, content: item.content, loading: item.loading, className: item.error ? 'error-bubble' : undefined })), [liveMessages, messages])
   const send = async (value) => {
     const query = value.trim()
@@ -250,9 +269,22 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
           {(attachmentsLoading || attachments.length > 0) && <div className="chat-attachment-strip" aria-label="对话附件">
             <Text type="secondary">{attachmentsLoading ? '正在加载附件…' : `附件 ${attachments.length}`}</Text>
             <div className="chat-attachment-list">
-              {attachments.map((attachment) => <Button key={attachment.id} size="small" icon={<FileTextOutlined />} onClick={() => download(attachment)} title={`下载 ${attachment.original_name}`}>
-                <span>{attachment.original_name}</span><DownloadOutlined />
-              </Button>)}
+              {attachments.map((attachment) => thumbnails[attachment.id] ? (
+                <Image
+                  key={attachment.id}
+                  className="chat-attachment-thumb"
+                  src={thumbnails[attachment.id]}
+                  alt={attachment.original_name}
+                  width={44}
+                  height={44}
+                  style={{ objectFit: 'cover', borderRadius: 8, cursor: 'zoom-in' }}
+                  preview={{ mask: <DownloadOutlined onClick={(event) => { event.stopPropagation(); download(attachment) }} /> }}
+                />
+              ) : (
+                <Button key={attachment.id} size="small" icon={<FileTextOutlined />} onClick={() => download(attachment)} title={`下载 ${attachment.original_name}`}>
+                  <span>{attachment.original_name}</span><DownloadOutlined />
+                </Button>
+              ))}
             </div>
           </div>}
           <Flex justify="space-between" align="center" gap={12} wrap>
