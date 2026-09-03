@@ -32,6 +32,7 @@ JOB_TYPES: dict[str, str] = {
     "business_daily_report": "经营日报（按公司已授权数据）",
     "report_daily": "汇报日报",
     "report_weekly": "汇报周报",
+    "report_monthly": "汇报月报",
     "alert_scan": "预警扫描（未闭环预警推送通知）",
 }
 
@@ -149,6 +150,19 @@ def execute_job(session: Session, job: ScheduledJob) -> tuple[str, str]:
             )
             session.commit()
             return "ok", f"汇报周报已生成（{report.week_start} ~ {report.week_end}）"
+        if job.job_type == "report_monthly":
+            from api.report_routes import _generate_monthly_report
+
+            today = date.today()
+            report = _generate_monthly_report(
+                session,
+                workspace_id=job.workspace_id,
+                period_year=today.year,
+                period_month=today.month,
+                generated_by=job.created_by,
+            )
+            session.commit()
+            return "ok", f"汇报月报已生成（{report.period_year}-{report.period_month:02d}）"
         if job.job_type == "alert_scan":
             return execute_alert_scan(session, job)
         return "failed", f"未知任务类型：{job.job_type}"

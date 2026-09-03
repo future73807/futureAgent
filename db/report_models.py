@@ -206,6 +206,31 @@ class ReportWeeklyReport(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=now_utc)
 
 
+class ReportMonthlyReport(SQLModel, table=True):
+    """按自然月生成的总结报告。"""
+
+    __tablename__ = "report_monthly_reports"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "period_year",
+            "period_month",
+            name="uq_report_monthly_reports_workspace_period",
+        ),
+    )
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    workspace_id: str = Field(foreign_key="workspaces.id", index=True)
+    period_year: int = Field(index=True)
+    period_month: int = Field(index=True)
+    title: str = Field(max_length=240)
+    summary: str = Field(default="", max_length=12000)
+    metrics_json: str = Field(default="{}", max_length=12000)
+    generated_by: str = Field(foreign_key="users.id", index=True)
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)
+
+
 class ReportAssistantMessage(SQLModel, table=True):
     """汇报智能体对话消息。"""
 

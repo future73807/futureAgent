@@ -35,6 +35,7 @@ from db.report_models import (
     ReportAssistantMessage,
     ReportDailyReport,
     ReportDataSource,
+    ReportMonthlyReport,
     ReportRecord,
     ReportWeeklyReport,
     new_id,
@@ -181,6 +182,11 @@ class KnowledgeBaseUpdateRequest(ReportRequest):
     title: str | None = Field(default=None, min_length=2, max_length=240)
     description: str | None = Field(default=None, max_length=2000)
     content: str | None = Field(default=None, max_length=100_000)
+
+
+class MonthlyReportGenerateRequest(ReportRequest):
+    year: int | None = Field(default=None, ge=2000, le=2100)
+    month: int | None = Field(default=None, ge=1, le=12)
 
 
 class ChatRequest(ReportRequest):
@@ -1632,6 +1638,139 @@ def generate_report_weekly_report(
 # ---------------------------------------------------------------------------
 # 汇报智能体对话
 # ---------------------------------------------------------------------------
+
+
+def _generate_monthly_report(
+    session: Session,
+    *,
+    workspace_id: str,
+    period_year: int,
+    period_month: int,
+    generated_by: str,
+) -> ReportMonthlyReport:
+    month_start = date(period_year, period_month, 1)
+    next_month = date(period_year + (period_month == 12), (period_month % 12) + 1, 1)
+    month_end = date.fromordinal(next_month.toordinal() - 1)
+    records = session.exec(
+        select(ReportRecord).where(
+            ReportRecord.workspace_id == workspace_id,
+            ReportRecord.occurred_on >= month_start,
+            ReportRecord.occurred_on <= month_end,
+        )
+    ).all()
+    alerts = session.exec(
+        select(ReportAlert).where(ReportAlert.workspace_id == workspace_id)
+    ).all()
+    open_alerts = [alert for alert in alerts if alert.status == "open"]
+    record_types = Counter(record.record_type for record in records)
+    alert_levels = Counter(alert.level for alert in open_alerts)
+    metrics = {
+        "record_count": len(records),
+        "record_types": dict(sorted(record_types.items())),
+        "open_alert_count": len(open_alerts),
+        "open_alert_levels": dict(sorted(alert_levels.items())),
+        "filters": {
+            "period_year": period_year,
+            "period_month": period_month,
+            "month_start": month_start.isoformat(),
+            "month_end": month_end.isoformat(),
+        },
+    }
+    type_summary = "、".join(f"{name} {count} 条" for name, count in sorted(record_types.items())) or "无"
+    alert_summary = "、".join(f"{name} {count} 条" for name, count in sorted(alert_levels.items())) or "无"
+    title = f"{period_year} 年 {period_month} 月 月报"
+    summary = (
+        f"{period_year} 年 {period_month} 月（{month_start.isoformat()} 至 {month_end.isoformat()}）月报："
+        f"仅汇总已授权且可追溯的数据。本月记录 {len(records)} 条（{type_summary}）；"
+        f"当前未闭环预警 {len(open_alerts)} 条（{alert_summary}）。该月报由规则引擎生成，发布前需人工复核。"
+    )
+    report = session.exec(
+        select(ReportMonthlyReport).where(
+            ReportMonthlyReport.workspace_id == workspace_id,
+            ReportMonthlyReport.period_year == period_year,
+            ReportMonthlyReport.period_month == period_month,
+        )
+    ).first()
+    if not report:
+        report = ReportMonthlyReport(
+            workspace_id=workspace_id,
+            period_year=period_year,
+            period_month=period_month,
+            title=title,
+            summary=summary,
+            metrics_json=json.dumps(metrics, ensure_ascii=False),
+            generated_by=generated_by,
+        )
+    else:
+        report.summary = summary
+        report.metrics_json = json.dumps(metrics, ensure_ascii=False)
+        report.generated_by = generated_by
+        report.updated_at = now_utc()
+    session.add(report)
+    session.flush()
+    return report
+
+
+def _monthly_report_data(report: ReportMonthlyReport) -> dict[str, Any]:
+    return {
+        "id": report.id,
+        "title": report.title or f"{report.period_year}-{report.period_month:02d} 月报",
+        "period_year": report.period_year,
+        "period_month": report.period_month,
+        "summary": report.summary,
+        "metrics": _json_load_dict(report.metrics_json),
+        "status": "generated",
+        "generated_by": report.generated_by,
+        "created_at": report.created_at,
+        "updated_at": report.updated_at,
+    }
+
+
+@router.get("/monthly-reports")
+def list_report_monthly_reports(
+    limit: int = Query(24, ge=1, le=120),
+    context: WorkspaceContext = Depends(get_workspace_context),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    reports = session.exec(
+        select(ReportMonthlyReport)
+        .where(ReportMonthlyReport.workspace_id == context.workspace.id)
+        .order_by(ReportMonthlyReport.period_year.desc(), ReportMonthlyReport.period_month.desc())
+        .limit(limit)
+    ).all()
+    result = [_monthly_report_data(report) for report in reports]
+    return {"monthly_reports": result, "reports": result, "items": result}
+
+
+@router.post("/monthly-reports/generate")
+@router.post("/monthly-reports")
+def generate_report_monthly_report(
+    payload: MonthlyReportGenerateRequest,
+    context: WorkspaceContext = Depends(get_workspace_context),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    _require_workspace_manager(context)
+    today = date.today()
+    period_year = payload.year or today.year
+    period_month = payload.month or today.month
+    report = _generate_monthly_report(
+        session,
+        workspace_id=context.workspace.id,
+        period_year=period_year,
+        period_month=period_month,
+        generated_by=context.user.id,
+    )
+    _write_report_audit(
+        session,
+        actor_id=context.user.id,
+        workspace_id=context.workspace.id,
+        action="report.monthly_report.generated",
+        target_type="report_monthly_report",
+        target_id=report.id,
+        metadata={"period_year": period_year, "period_month": period_month},
+    )
+    session.commit()
+    return {"monthly_report": _monthly_report_data(report)}
 
 
 def _deterministic_reply(

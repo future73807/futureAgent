@@ -122,6 +122,7 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
   const [alerts, setAlerts] = useState([])
   const [reports, setReports] = useState([])
   const [weeklyReports, setWeeklyReports] = useState([])
+  const [monthlyReports, setMonthlyReports] = useState([])
   const [knowledgeBases, setKnowledgeBases] = useState([])
   const [chatMessages, setChatMessages] = useState([])
   const [chatInput, setChatInput] = useState('')
@@ -144,12 +145,13 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
     setLoadError('')
     try {
       const dashboardPayload = await apiFetch('/api/v1/report/dashboard')
-      const [sourcesPayload, alertsPayload, reportsPayload, weeklyReportsPayload, kbPayload] = await Promise.all([
+      const [sourcesPayload, alertsPayload, reportsPayload, weeklyReportsPayload, kbPayload, monthlyPayload] = await Promise.all([
         apiFetch('/api/v1/report/data-sources'),
         apiFetch('/api/v1/report/alerts'),
         apiFetch('/api/v1/report/daily-reports'),
         apiFetch('/api/v1/report/weekly-reports'),
         apiFetch('/api/v1/report/knowledge-bases'),
+        apiFetch('/api/v1/report/monthly-reports'),
       ])
       setDashboard(dashboardPayload || {})
       setSources(pickArray(sourcesPayload, ['data_sources', 'sources']))
@@ -157,6 +159,7 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
       setReports(pickArray(reportsPayload, ['daily_reports', 'reports']))
       setWeeklyReports(pickArray(weeklyReportsPayload, ['weekly_reports']))
       setKnowledgeBases(pickArray(kbPayload, ['knowledge_bases']))
+      setMonthlyReports(pickArray(monthlyPayload, ['monthly_reports']))
       setApiUnavailable(false)
     } catch (error) {
       if (apiNotAvailable(error)) {
@@ -375,6 +378,16 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
     }
   }
 
+  const generateMonthlyReport = async () => {
+    try {
+      await apiFetch('/api/v1/report/monthly-reports/generate', { method: 'POST', body: JSON.stringify({}) })
+      message.success('月报已生成，请人工复核后再分发。')
+      loadReport({ quiet: true })
+    } catch (error) {
+      message.error(readableError(error))
+    }
+  }
+
   const copyCredential = async (value, label) => {
     if (!value) return
     try {
@@ -409,12 +422,20 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
     icon: <Avatar size="small" icon={<ClockCircleOutlined />} />,
   }))
 
-  const reportItems = reports.slice(0, 4).map((report) => ({
-    key: report.id,
-    label: compactText(report.title, '生产日报'),
-    description: formatDate(report.report_date || report.created_at),
-    icon: <Avatar size="small" icon={<ProjectOutlined />} />,
-  }))
+  const reportItems = [
+    ...monthlyReports.slice(0, 3).map((report) => ({
+      key: `m-${report.id}`,
+      label: compactText(report.title, '月报'),
+      description: `月报 · ${report.period_year}-${String(report.period_month).padStart(2, '0')}`,
+      icon: <Avatar size="small" icon={<FileTextOutlined />} />,
+    })),
+    ...reports.slice(0, 4).map((report) => ({
+      key: report.id,
+      label: compactText(report.title, '生产日报'),
+      description: formatDate(report.report_date || report.created_at),
+      icon: <Avatar size="small" icon={<ProjectOutlined />} />,
+    })),
+  ]
 
   const kbItems = knowledgeBases.slice(0, 5).map((kb) => ({
     key: kb.id,
@@ -562,7 +583,7 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
             <div className="report-panel-section">
               <div className="report-panel-header">
                 <Text strong>生产日报</Text>
-                {canManage && <Space><Button size="small" onClick={generateReport}>日报</Button><Button size="small" onClick={generateWeeklyReport}>周报</Button></Space>}
+                {canManage && <Space><Button size="small" onClick={generateReport}>日报</Button><Button size="small" onClick={generateWeeklyReport}>周报</Button><Button size="small" onClick={generateMonthlyReport}>月报</Button></Space>}
               </div>
               {apiUnavailable ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="服务未部署" /> : reportItems.length ? (
                 <Conversations items={reportItems} />
