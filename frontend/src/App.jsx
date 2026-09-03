@@ -27,6 +27,7 @@ import Space from 'antd/es/space'
 import Spin from 'antd/es/spin'
 import Statistic from 'antd/es/statistic'
 import Steps from 'antd/es/steps'
+import Switch from 'antd/es/switch'
 import Tabs from 'antd/es/tabs'
 import Tag from 'antd/es/tag'
 import Tooltip from 'antd/es/tooltip'
@@ -977,7 +978,7 @@ function WorkspaceSettingsPage({ workspace, members, workspaceRole, onRefresh })
           <Input value={name} onChange={(event) => setName(event.target.value)} style={{ width: 320, maxWidth: '100%' }} placeholder="工作区名称" disabled={!isManager} />
           <Button type="primary" loading={savingName} disabled={!isManager || !name.trim() || name.trim() === workspace?.name} onClick={saveName}>保存名称</Button>
         </Flex>
-        <Paragraph type="secondary" style={{ marginTop: 10, marginBottom: 0 }}><Text type="secondary">标识：{workspace?.slug || '-'} · 所有者：{members.find((m) => m.id === workspace?.owner_id)?.user.display_name || '未知'}</Text></Paragraph>
+        <Paragraph type="secondary" style={{ marginTop: 10, marginBottom: 0 }}><Text type="secondary">标识：{workspace?.slug || '-'} · 所有者：{members.find((m) => m.user.id === workspace?.owner_id)?.user.display_name || '未知'}</Text></Paragraph>
       </Card>
       {isManager && (
         <Card className="settings-card" title="通知出口" extra={<Button size="small" icon={<PlusOutlined />} onClick={() => setTargetOpen(true)}>新建出口</Button>}>
