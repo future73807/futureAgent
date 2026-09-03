@@ -442,6 +442,7 @@ button, input, textarea { font: inherit; }
 .conversation-section-label { padding: 1px 7px 0; }
 .conversation-section-label .ant-typography { font-size: 11px; }
 .conversation-empty { margin: auto 0; padding: 12px 4px; }
+.archived-link { margin-top: auto; justify-content: flex-start; color: var(--muted) !important; }
 .chat-stage { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--surface-2); }
 .chat-title {
   min-height: 74px;

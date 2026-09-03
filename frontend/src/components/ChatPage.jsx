@@ -8,12 +8,14 @@ import Flex from 'antd/es/flex'
 import Form from 'antd/es/form'
 import Image from 'antd/es/image'
 import Input from 'antd/es/input'
+import List from 'antd/es/list'
 import Modal from 'antd/es/modal'
 import Select from 'antd/es/select'
+import Spin from 'antd/es/spin'
 import Space from 'antd/es/space'
 import Typography from 'antd/es/typography'
 import Upload from 'antd/es/upload'
-import { DeleteOutlined, DownloadOutlined, EditOutlined, FileTextOutlined, MenuOutlined, MessageOutlined, PaperClipOutlined, PlusOutlined, RobotOutlined, ToolOutlined, UserOutlined } from '@ant-design/icons'
+import { DeleteOutlined, DownloadOutlined, EditOutlined, FileExcelOutlined, FilePdfOutlined, FileTextOutlined, FileWordOutlined, FolderOutlined, MenuOutlined, MessageOutlined, PaperClipOutlined, PlusOutlined, RobotOutlined, ToolOutlined, UserOutlined } from '@ant-design/icons'
 import Bubble from '@ant-design/x/es/bubble'
 import Conversations from '@ant-design/x/es/conversations'
 import Sender from '@ant-design/x/es/sender'
@@ -51,6 +53,9 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
   const [attachmentsLoading, setAttachmentsLoading] = useState(false)
   const [conversationOpen, setConversationOpen] = useState(false)
   const [renameTarget, setRenameTarget] = useState(null)
+  const [archivedOpen, setArchivedOpen] = useState(false)
+  const [archivedList, setArchivedList] = useState([])
+  const [archivedLoading, setArchivedLoading] = useState(false)
   const [renameForm] = Form.useForm()
   const abortRef = useRef(null)
   const canWrite = workspaceRole !== 'viewer'
@@ -163,6 +168,40 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
   const download = async (attachment) => {
     try { await downloadAttachment(attachment); message.success('已开始下载') } catch (error) { message.error(readableError(error)) }
   }
+  const archiveConversation = async (conversation) => {
+    try {
+      await apiFetch(`/api/v1/conversations/${conversation.key}`, { method: 'PATCH', body: JSON.stringify({ archived: true }) })
+      message.success('对话已归档，可在「已归档对话」中查看')
+      if (activeConversation?.id === conversation.key) {
+        const remaining = conversations.find((item) => item.id !== conversation.key)
+        if (remaining) onSelectConversation(remaining.id)
+      }
+      onRefresh?.()
+    } catch (error) { message.error(readableError(error)) }
+  }
+  const loadArchived = async () => {
+    setArchivedLoading(true)
+    try {
+      const data = await apiFetch('/api/v1/conversations?include_archived=true')
+      setArchivedList((data.conversations || []).filter((item) => item.archived))
+    } catch { setArchivedList([]) } finally { setArchivedLoading(false) }
+  }
+  const openArchived = () => { setArchivedOpen(true); loadArchived() }
+  const unarchiveConversation = async (conversation) => {
+    try {
+      await apiFetch(`/api/v1/conversations/${conversation.id}`, { method: 'PATCH', body: JSON.stringify({ archived: false }) })
+      message.success('对话已恢复')
+      loadArchived()
+      onRefresh?.()
+    } catch (error) { message.error(readableError(error)) }
+  }
+  const attachmentIcon = (name) => {
+    const ext = String(name || '').toLowerCase().split('.').pop()
+    if (ext === 'pdf') return <FilePdfOutlined style={{ color: '#e05252' }} />
+    if (['xlsx', 'csv'].includes(ext)) return <FileExcelOutlined style={{ color: '#1f9d72' }} />
+    if (['docx', 'doc', 'md'].includes(ext)) return <FileWordOutlined style={{ color: '#3a6fd8' }} />
+    return <FileTextOutlined />
+  }
   const createConversation = () => {
     setConversationOpen(false)
     onNewConversation()
@@ -221,6 +260,7 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
           menu={(conversation) => ({
             items: [
               { key: 'rename', label: '重命名', icon: <EditOutlined />, disabled: !canWrite },
+              { key: 'archive', label: '归档', icon: <FolderOutlined />, disabled: !canWrite },
               { key: 'delete', label: '删除', icon: <DeleteOutlined />, danger: true, disabled: !canWrite },
             ],
             onClick: ({ key }) => {
@@ -228,11 +268,13 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
               if (!target) return
               const wrapped = { key: target.id, label: target.title }
               if (key === 'rename') openRename(wrapped)
+              else if (key === 'archive') archiveConversation(wrapped)
               else if (key === 'delete') confirmDelete(wrapped)
             },
           })}
         />
       ) : <Empty className="conversation-empty" image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无对话，创建一个开始协作" />}
+      <Button type="text" size="small" icon={<FolderOutlined />} onClick={openArchived} className="archived-link">已归档对话</Button>
     </aside>
   )
   return (
@@ -345,7 +387,7 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
                   preview={{ mask: <DownloadOutlined onClick={(event) => { event.stopPropagation(); download(attachment) }} /> }}
                 />
               ) : (
-                <Button key={attachment.id} size="small" icon={<FileTextOutlined />} onClick={() => download(attachment)} title={`下载 ${attachment.original_name}`}>
+                <Button key={attachment.id} size="small" icon={attachmentIcon(attachment.original_name)} onClick={() => download(attachment)} title={`下载 ${attachment.original_name}`}>
                   <span>{attachment.original_name}</span><DownloadOutlined />
                 </Button>
               ))}
@@ -369,6 +411,20 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
             actions={(_, { components: { SendButton, LoadingButton } }) => streaming ? <LoadingButton aria-label="停止生成" /> : <SendButton aria-label="发送消息" />}
           />
         </div>
+        <Drawer
+          title="已归档对话"
+          open={archivedOpen}
+          onClose={() => setArchivedOpen(false)}
+          width="min(88vw, 360px)"
+        >
+          {archivedLoading ? <div style={{ textAlign: 'center', padding: 24 }}><Spin /></div> : archivedList.length ? (
+            <List size="small" dataSource={archivedList} renderItem={(item) => (
+              <List.Item actions={[<Button key="restore" size="small" onClick={() => unarchiveConversation(item)}>恢复</Button>]}>
+                <List.Item.Meta title={item.title} description={new Date(item.updated_at).toLocaleString('zh-CN', { hour12: false })} />
+              </List.Item>
+            )} />
+          ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无归档对话" />}
+        </Drawer>
         <Modal
           title="重命名对话"
           open={Boolean(renameTarget)}
