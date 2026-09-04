@@ -118,7 +118,9 @@ docker compose config --quiet
 
 ## 10. 功能路线图
 
-对标分析见 `docs/workbuddy-gap-analysis.md`。已完成的 P0/P1 能力：智能体 LLM 化与知识检索、定时自动化、交付物中心、通知中心、消息分页与全局搜索、PDF 解析、看板拖拽/日历/评论、暗色模式、PWA 清单、管理端运营闭环、认证限流。后续候选：pgvector 向量召回、多 Agent 并行编排、IM 入站指令闭环。
+对标分析见 `docs/workbuddy-gap-analysis.md`。已完成的 P0/P1 能力：智能体 LLM 化与知识检索、定时自动化、交付物中心、通知中心、消息分页与全局搜索、PDF 解析、看板拖拽/日历/评论、暗色模式、PWA、管理端运营闭环、认证限流、多 Agent 并行编排、本地 Qwen 向量召回（混合检索）、对话归档/重命名/删除、Markdown 渲染、会话吊销、报告详情与 CSV 导出。
+
+后续候选：pgvector 原生向量列（当前为 JSON 存储 + 进程内余弦，量大便迁移）、IM 入站指令闭环、i18n、批次执行历史持久化。
 
 ## 许可证
 
