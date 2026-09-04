@@ -693,6 +693,9 @@ html[data-theme='dark'] .markdown-body code { background: rgba(134, 148, 214, .1
 html[data-theme='dark'] .markdown-body pre { background: #0d1322; }
 html[data-theme='dark'] .markdown-body a { color: #9daaff; }
 
+/* Batch drill-down rows */
+.batch-run-row { display: grid; gap: 2px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-subtle); }
+
 /* Parallel batch execution */
 .batch-output { display: grid; gap: 10px; }
 .batch-step-card { border-radius: 10px !important; }

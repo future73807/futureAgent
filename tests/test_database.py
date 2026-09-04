@@ -337,6 +337,41 @@ class MigrationBaselineTests(unittest.TestCase):
                 database.engine = original_engine
                 migration_engine.dispose()
 
+    def test_half_applied_migration_self_heals(self):
+        """复现强杀场景：表已建但 alembic_version 未写 → 启动时自动对齐。"""
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "half-migrated.db"
+            url = f"sqlite:///{database_path.as_posix()}"
+            config = Config("alembic.ini")
+            config.set_main_option("sqlalchemy.url", url)
+            # 正常升到 _10（conversation summary），随后模拟强杀：手写 _11 的表但不写版本
+            command.upgrade(config, "20260902_10")
+            bootstrap_engine = create_engine(url)
+            try:
+                with bootstrap_engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        "create table task_comments (id varchar primary key, workspace_id varchar, "
+                        "task_id varchar, author_id varchar, content varchar, created_at timestamp)"
+                    )
+                    connection.exec_driver_sql("drop table alembic_version")
+            finally:
+                bootstrap_engine.dispose()
+
+            original_engine = database.engine
+            migration_engine = create_engine(url, connect_args={"check_same_thread": False})
+            database.engine = migration_engine
+            try:
+                with patch.object(settings, "database_url", url):
+                    database._upgrade_schema()
+                with migration_engine.connect() as connection:
+                    self.assertEqual(
+                        connection.exec_driver_sql("select version_num from alembic_version").scalar_one(),
+                        CURRENT_HEAD,
+                    )
+            finally:
+                database.engine = original_engine
+                migration_engine.dispose()
+
 
 if __name__ == "__main__":
     unittest.main()

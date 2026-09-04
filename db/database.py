@@ -124,6 +124,47 @@ def get_session() -> Generator[Session, None, None]:
         yield session
 
 
+def _read_alembic_version() -> str | None:
+    """读取当前 alembic 版本；无版本表时返回 None。"""
+    if "alembic_version" not in set(inspect(engine).get_table_names()):
+        return None
+    from sqlalchemy import text
+
+    with engine.connect() as connection:
+        row = connection.execute(text("select version_num from alembic_version")).first()
+    return row[0] if row else None
+
+
+def _upgrade_stepwise(alembic_config, start_after: str | None) -> None:
+    """从 start_after 之后的版本逐个升级。
+
+    单版失败且错误为对象已存在（半迁移：效果已落库但版本未写）时，
+    记录该版本为已应用并继续，从而自愈强杀进程留下的中间状态。
+    """
+    from alembic import command
+    from alembic.script import ScriptDirectory
+
+    script = ScriptDirectory.from_config(alembic_config)
+    chain = []
+    revision = script.get_revision("head")
+    while revision is not None:
+        chain.append(revision.revision)
+        revision = script.get_revision(revision.down_revision) if revision.down_revision else None
+    chain.reverse()
+    if start_after in chain:
+        chain = chain[chain.index(start_after) + 1 :]
+    for rev in chain:
+        try:
+            command.upgrade(alembic_config, rev)
+        except Exception as exc:  # noqa: BLE001
+            message = str(exc).lower()
+            if "already exists" in message or "duplicate column" in message:
+                # 半迁移自愈：该版本的效果已在库中，记录版本继续
+                command.stamp(alembic_config, rev)
+            else:
+                raise
+
+
 def init_db() -> None:
     if settings.run_migrations_on_startup:
         _upgrade_schema()
@@ -214,7 +255,9 @@ def _upgrade_schema() -> None:
                     # The pre-Alembic product schema is known and complete. Stamp
                     # that immutable baseline, then apply additive revisions.
                     command.stamp(alembic_config, "20260725_00")
-    command.upgrade(alembic_config, "head")
+    # 半迁移感知的逐版升级：单版对象已存在时记录版本并继续
+    start_after = _read_alembic_version()
+    _upgrade_stepwise(alembic_config, start_after)
 
 
 def _matches_schema(

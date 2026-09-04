@@ -630,6 +630,7 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
   const [batchRunning, setBatchRunning] = useState(false)
   const [activeBatchId, setActiveBatchId] = useState('')
   const [batchHistory, setBatchHistory] = useState([])
+  const [batchDetails, setBatchDetails] = useState({})
   const loadBatchHistory = useCallback(async (requestedTaskId = taskId) => {
     if (!requestedTaskId) { setBatchHistory([]); return }
     try {
@@ -637,6 +638,16 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
       setBatchHistory(data.batches || [])
     } catch { setBatchHistory([]) }
   }, [taskId])
+  const fetchBatchRuns = useCallback(async (batchId) => {
+    if (batchDetails[batchId]) return
+    setBatchDetails((previous) => ({ ...previous, [batchId]: { loading: true, runs: [] } }))
+    try {
+      const data = await apiFetch(`/api/v1/tasks/${taskId}/batches/${batchId}`)
+      setBatchDetails((previous) => ({ ...previous, [batchId]: { loading: false, runs: data.runs || [] } }))
+    } catch {
+      setBatchDetails((previous) => ({ ...previous, [batchId]: { loading: false, runs: [], error: true } }))
+    }
+  }, [taskId, batchDetails])
   useEffect(() => { loadBatchHistory() }, [loadBatchHistory])
   useEffect(() => { if (!batchRunning) loadBatchHistory() }, [batchRunning, loadBatchHistory])
   const executionAbortRef = useRef(null)
@@ -816,11 +827,33 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
       <Card key={item.stepId} size="small" className={`batch-step-card batch-step-${item.status}`} title={<Space size={6}>{item.title}<Tag color={item.status === 'succeeded' ? 'success' : item.status === 'failed' ? 'error' : item.status === 'cancelled' ? 'default' : 'processing'}>{item.status === 'running' ? '执行中' : item.status === 'succeeded' ? '已完成' : item.status === 'failed' ? '失败' : '已取消'}</Tag></Space>} extra={item.error ? <Text type="danger">{item.error}</Text> : undefined}>
         {item.text ? <pre className="attachment-preview">{item.text}</pre> : <Text type="secondary">等待模型输出…</Text>}
       </Card>
-    ))}</div>}<Flex gap={8} wrap="wrap" className="execution-controls"><Select value={stepId || undefined} onChange={setStepId} placeholder="选择计划步骤" options={(plan?.steps || []).filter((step) => step.status !== 'done').map((step) => ({ value: step.id, label: `${stepStatusLabels[step.status] || step.status} · ${step.title}` }))} /><Select value={modelId || undefined} onChange={setModelId} placeholder="选择模型" options={models.map((item) => ({ value: item.id, label: `${item.id}${item.ready ? '' : '（未就绪）'}`, disabled: !item.ready }))} /><Select value={skillName || undefined} onChange={setSkillName} placeholder="选择技能" options={skills.map((item) => ({ value: item.name, label: skillDisplayName(item.name) }))} /><Select mode="multiple" value={selectedMcpServers} onChange={setSelectedMcpServers} maxTagCount="responsive" placeholder={mcpServers.length ? '按需启用 MCP 工具' : '暂无 MCP 工具'} disabled={!mcpServers.length} options={mcpServers.map((item) => ({ value: item.name || item, label: mcpOptionLabel(item), title: mcpOptionLabel(item), tools: Array.isArray(item.tools) ? item.tools : [], disabled: mcpServerUnavailable(item) }))} optionRender={(option) => <div className="mcp-option"><span>{option.label}</span><small>{option.data?.tools?.length ? option.data.tools.join(' · ') : option.data?.disabled ? '连接不可用' : '工具清单将在连接后显示'}</small></div>} /></Flex>{liveOutput && <pre className="attachment-preview">{liveOutput}</pre>}{batchHistory.length > 0 && <Collapse size="small" className="batch-history" items={batchHistory.map((batch) => ({
-  key: batch.id,
-  label: <Space size={6}><Tag color={batch.status === 'succeeded' ? 'success' : batch.status === 'failed' ? 'error' : batch.status === 'cancelled' ? 'default' : 'processing'}>{batch.status === 'running' ? '执行中' : batch.status === 'succeeded' ? '全部成功' : batch.status === 'partial' ? '部分失败' : batch.status === 'failed' ? '全部失败' : '已取消'}</Tag>批次 · {formatDateTime(batch.created_at)}</Space>,
-  children: <Text type="secondary">{batch.total_steps} 个步骤：成功 {batch.succeeded_count}、失败 {batch.failed_count}、取消 {batch.cancelled_count} · 模型 {batch.model_id}</Text>,
-}))} />}{runItems.length ? <Tabs size="small" items={runItems} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="此任务尚无 AI 执行记录" />}</Space>
+    ))}</div>}<Flex gap={8} wrap="wrap" className="execution-controls"><Select value={stepId || undefined} onChange={setStepId} placeholder="选择计划步骤" options={(plan?.steps || []).filter((step) => step.status !== 'done').map((step) => ({ value: step.id, label: `${stepStatusLabels[step.status] || step.status} · ${step.title}` }))} /><Select value={modelId || undefined} onChange={setModelId} placeholder="选择模型" options={models.map((item) => ({ value: item.id, label: `${item.id}${item.ready ? '' : '（未就绪）'}`, disabled: !item.ready }))} /><Select value={skillName || undefined} onChange={setSkillName} placeholder="选择技能" options={skills.map((item) => ({ value: item.name, label: skillDisplayName(item.name) }))} /><Select mode="multiple" value={selectedMcpServers} onChange={setSelectedMcpServers} maxTagCount="responsive" placeholder={mcpServers.length ? '按需启用 MCP 工具' : '暂无 MCP 工具'} disabled={!mcpServers.length} options={mcpServers.map((item) => ({ value: item.name || item, label: mcpOptionLabel(item), title: mcpOptionLabel(item), tools: Array.isArray(item.tools) ? item.tools : [], disabled: mcpServerUnavailable(item) }))} optionRender={(option) => <div className="mcp-option"><span>{option.label}</span><small>{option.data?.tools?.length ? option.data.tools.join(' · ') : option.data?.disabled ? '连接不可用' : '工具清单将在连接后显示'}</small></div>} /></Flex>{liveOutput && <pre className="attachment-preview">{liveOutput}</pre>}{batchHistory.length > 0 && <Collapse size="small" className="batch-history" items={batchHistory.map((batch) => {
+  const detail = batchDetails[batch.id]
+  return {
+    key: batch.id,
+    label: <Space size={6}><Tag color={batch.status === 'succeeded' ? 'success' : batch.status === 'failed' ? 'error' : batch.status === 'cancelled' ? 'default' : 'processing'}>{batch.status === 'running' ? '执行中' : batch.status === 'succeeded' ? '全部成功' : batch.status === 'partial' ? '部分失败' : batch.status === 'failed' ? '全部失败' : '已取消'}</Tag>批次 · {formatDateTime(batch.created_at)}</Space>,
+    children: (
+      <Space direction="vertical" size={6} style={{ width: '100%' }}>
+        <Text type="secondary">{batch.total_steps} 个步骤：成功 {batch.succeeded_count}、失败 {batch.failed_count}、取消 {batch.cancelled_count} · 模型 {batch.model_id}</Text>
+        {detail === undefined ? (
+          <Button size="small" onClick={() => fetchBatchRuns(batch.id)}>加载本批执行明细</Button>
+        ) : detail.loading ? <Spin size="small" /> : (detail.runs || []).map((run) => {
+          const stepTitle = plan?.steps?.find((step) => step.id === run.step_id)?.title || run.step_id || '未绑定步骤'
+          const statusLabel = run.status === 'succeeded' ? '成功' : run.status === 'failed' ? '失败' : run.status === 'cancelled' ? '已取消' : run.status
+          return (
+            <div key={run.id} className="batch-run-row">
+              <Space size={6} wrap>
+                <Tag color={run.status === 'succeeded' ? 'success' : run.status === 'failed' ? 'error' : run.status === 'cancelled' ? 'default' : 'processing'}>{statusLabel}</Tag>
+                <Text strong>{stepTitle}</Text>
+              </Space>
+              {run.error_message ? <Text type="danger">{run.error_message}</Text> : null}
+            </div>
+          )
+        })}
+      </Space>
+    ),
+  }
+})} />}{runItems.length ? <Tabs size="small" items={runItems} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="此任务尚无 AI 执行记录" />}</Space>
   </Card>
 }
 
