@@ -122,6 +122,10 @@ class ImIngestTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json().get("challenge"), "ajls38afk12")
+        # 握手在鉴权之前处理：平台验证回调 URL 时可能尚未配置 token
+        no_token = self._ingest({"type": "url_verification", "challenge": "xyz"})
+        self.assertEqual(no_token.status_code, 200, no_token.text)
+        self.assertEqual(no_token.json().get("challenge"), "xyz")
 
     def test_invalid_token_rejected(self):
         response = self._ingest({"text": "未授权消息"}, token="wrong-token")
