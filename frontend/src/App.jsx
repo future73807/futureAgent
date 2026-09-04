@@ -601,8 +601,8 @@ function TaskResultsPanel({ taskId, canWrite, members, refreshKey }) {
     return <List.Item><List.Item.Meta title={activityLabels[event.action] || '工作区记录已更新'} description={`${actor} · ${formatDateTime(event.created_at)}${status}`} /></List.Item>
   }} />
   const previewContent = !preview ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请选择任务文件进行预览" /> : <Space direction="vertical" size="small" style={{ width: '100%' }}><Text strong>{preview.attachment.original_name}</Text>{preview.preview_kind === 'image' ? <img className="artifact-image-preview" src={preview.objectUrl} alt={preview.attachment.original_name} /> : preview.preview_kind === 'pdf' ? <iframe className="artifact-pdf-preview" title={preview.attachment.original_name} src={preview.objectUrl} /> : preview.preview_available ? <pre className="attachment-preview">{preview.text}</pre> : <Text type="secondary">{chineseMessage(preview.message, '此文件暂不支持在线预览。')}</Text>}</Space>
-  return <Card className="work-results" title="成果与文件" extra={canWrite && <Space><Button size="small" icon={<FileAddOutlined />} onClick={() => { setRegisterOpen(true); loadWorkspaceFiles() }}>登记交付物</Button><Upload showUploadList={false} customRequest={attach} beforeUpload={(file) => { const invalid = validateUpload(file); if (invalid) { message.error(invalid); return Upload.LIST_IGNORE } return true }}><Button size="small" icon={<PaperClipOutlined />}>添加上下文</Button></Upload></Space>}>
-    <Tabs size="small" items={[{ key: 'deliverables', label: `交付物（${deliverables.length}）`, children: deliverableList }, { key: 'files', label: `文件（${attachments.length}）`, children: files }, { key: 'preview', label: '预览', children: previewContent }, { key: 'activity', label: `动态（${events.length}）`, children: activity }]} />
+  return <Card className="work-results" title={t('work.card.results')} extra={canWrite && <Space><Button size="small" icon={<FileAddOutlined />} onClick={() => { setRegisterOpen(true); loadWorkspaceFiles() }}>{t('work.btn.registerDeliverable')}</Button><Upload showUploadList={false} customRequest={attach} beforeUpload={(file) => { const invalid = validateUpload(file); if (invalid) { message.error(invalid); return Upload.LIST_IGNORE } return true }}><Button size="small" icon={<PaperClipOutlined />}>{t('work.btn.addContext')}</Button></Upload></Space>}>
+    <Tabs size="small" items={[{ key: 'deliverables', label: `${t('work.tab.deliverables')}（${deliverables.length}）`, children: deliverableList }, { key: 'files', label: `${t('work.tab.files')}（${attachments.length}）`, children: files }, { key: 'preview', label: t('work.tab.preview'), children: previewContent }, { key: 'activity', label: `${t('work.tab.activity')}（${events.length}）`, children: activity }]} />
     <Modal title="从工作区登记交付物" open={registerOpen} onCancel={() => setRegisterOpen(false)} footer={null} destroyOnHidden>
       <Alert type="info" showIcon message="这里列出 AI 执行期间在工作区生成的文件" description="登记后会复制到交付物库，可随时下载，并随任务留痕。" style={{ marginBottom: 12 }} />
       {workspaceFilesLoading ? <div style={{ textAlign: 'center', padding: 24 }}><Spin /></div> : workspaceFiles.length ? (
@@ -811,7 +811,7 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
       await loadRuns(taskId)
     } catch (error) { message.error(readableError(error)) }
   }
-  return <Card className="work-results" title="AI 执行" extra={<Space><Button type="primary" icon={<RobotOutlined />} loading={running} disabled={!executable} onClick={() => execute()}>执行选中步骤</Button>{pendingSteps.length >= 2 && <Tooltip title={`并行执行 ${pendingSteps.length} 个待执行步骤，整批占用一个并发槽`}><Button icon={<ThunderboltOutlined />} loading={batchRunning} disabled={!batchExecutable || running} onClick={executeParallel}>并行执行（{pendingSteps.length} 步）</Button></Tooltip>}{batchRunning && activeBatchId && <Button danger onClick={cancelBatch}>取消整批</Button>}{running && activeRunId && <Button danger icon={<StopOutlined />} onClick={() => cancelRun(activeRunId)}>取消</Button>}</Space>}>
+  return <Card className="work-results" title={t('work.card.ai')} extra={<Space><Button type="primary" icon={<RobotOutlined />} loading={running} disabled={!executable} onClick={() => execute()}>{t('work.btn.executeStep')}</Button>{pendingSteps.length >= 2 && <Tooltip title={`并行执行 ${pendingSteps.length} 个待执行步骤，整批占用一个并发槽`}><Button icon={<ThunderboltOutlined />} loading={batchRunning} disabled={!batchExecutable || running} onClick={executeParallel}>{t('work.btn.executeParallel')}（{pendingSteps.length}）</Button></Tooltip>}{batchRunning && activeBatchId && <Button danger onClick={cancelBatch}>取消整批</Button>}{running && activeRunId && <Button danger icon={<StopOutlined />} onClick={() => cancelRun(activeRunId)}>取消</Button>}</Space>}>
     <Space direction="vertical" size="small" style={{ width: '100%' }}><Text type="secondary">AI 只会接收已批准任务、选中计划步骤和附件中的有限文本上下文；结果保存后必须由人工审核，不会自动通过步骤。</Text>{batchRunning && <Alert type="info" showIcon message={`并行批次执行中：${batchOutput.filter((item) => item.status !== 'running').length}/${batchOutput.length} 个步骤已完成`} />}{batchOutput.length > 0 && <div className="batch-output">{batchOutput.map((item) => (
       <Card key={item.stepId} size="small" className={`batch-step-card batch-step-${item.status}`} title={<Space size={6}>{item.title}<Tag color={item.status === 'succeeded' ? 'success' : item.status === 'failed' ? 'error' : item.status === 'cancelled' ? 'default' : 'processing'}>{item.status === 'running' ? '执行中' : item.status === 'succeeded' ? '已完成' : item.status === 'failed' ? '失败' : '已取消'}</Tag></Space>} extra={item.error ? <Text type="danger">{item.error}</Text> : undefined}>
         {item.text ? <pre className="attachment-preview">{item.text}</pre> : <Text type="secondary">等待模型输出…</Text>}
@@ -948,24 +948,24 @@ function WorkModePage({ tasks, members, models, skills, mcpServers, workspaceRol
   const progress = plan?.steps?.length ? Math.round((plan.steps.filter((item) => item.status === 'done').length / plan.steps.length) * 100) : 0
   return (
     <div className="page-shell work-mode">
-      <Flex justify="space-between" align="center" wrap="wrap" gap={12} className="page-heading"><div><Title level={2}>工作模式</Title><Text type="secondary">先制定执行计划，再批准执行；每个步骤都有明确责任与可追溯记录。</Text></div><Badge status={plan?.status === 'approved' || plan?.status === 'in_progress' ? 'processing' : plan?.status === 'completed' ? 'success' : 'default'} text={plan ? (planStatusLabels[plan.status] || plan.status) : '尚未创建计划'} /></Flex>
+      <Flex justify="space-between" align="center" wrap="wrap" gap={12} className="page-heading"><div><Title level={2}>{t('work.title')}</Title><Text type="secondary">{t('work.subtitle')}</Text></div><Badge status={plan?.status === 'approved' || plan?.status === 'in_progress' ? 'processing' : plan?.status === 'completed' ? 'success' : 'default'} text={plan ? (planStatusLabels[plan.status] || plan.status) : '尚未创建计划'} /></Flex>
       {!tasks.length ? <Empty className="guided-empty" description="请先在项目看板中创建任务">{canWrite && <Button type="primary" icon={<ProjectOutlined />} onClick={onOpenBoard}>前往项目看板</Button>}</Empty> : <>
         <Select value={taskId} onChange={selectTask} disabled={executionRunning} title={executionRunning ? 'AI 执行期间不可切换任务' : undefined} className="project-selector" options={tasks.map((task) => ({ value: task.id, label: task.title }))} />
         <Card className="work-context" size="small"><Descriptions size="small" column={{ xs: 1, md: 3 }}><Descriptions.Item label="任务">{selectedTask?.title}</Descriptions.Item><Descriptions.Item label="发起人">{members.find((item) => item.user.id === selectedTask?.reporter_id)?.user.display_name || '-'}</Descriptions.Item><Descriptions.Item label="状态"><Tag>{taskStatusLabels[selectedTask?.status] || selectedTask?.status}</Tag></Descriptions.Item></Descriptions></Card>
         <Spin spinning={loading}>
           {(plan?.status === 'approved' || plan?.status === 'in_progress' || plan?.status === 'completed') ? (
-            <Card className="plan-execution" title="已批准的工作计划" extra={<Tag color={plan.status === 'completed' ? 'success' : 'processing'}>{planStatusLabels[plan.status] || plan.status}</Tag>}>
+            <Card className="plan-execution" title={t('work.card.approved')} extra={<Tag color={plan.status === 'completed' ? 'success' : 'processing'}>{planStatusLabels[plan.status] || plan.status}</Tag>}>
               <Paragraph>{plan.objective || '尚未记录目标。'}</Paragraph>
               <Progress percent={progress} status={progress === 100 ? 'success' : 'active'} />
               <Steps direction="vertical" size="small" current={Math.min(plan.steps.findIndex((step) => step.status !== 'done'), Math.max(plan.steps.length - 1, 0))} items={plan.steps.map((step) => ({ title: <Flex justify="space-between" gap={8}><span>{step.title}</span><Select value={step.status} size="small" style={{ width: 124 }} disabled={!canUpdateStep(step)} onChange={(value) => updateStep(step, { status: value })} options={['pending', 'running', 'blocked', 'done'].map((value) => ({ value, label: stepStatusLabels[value] }))} /></Flex>, description: <Space direction="vertical" size={2}><Text type="secondary">{step.instructions || '暂无补充说明。'}</Text><Text type="secondary">负责人：{members.find((item) => item.user.id === step.assignee_id)?.user.display_name || '未分配'}</Text>{step.output_summary && <Text>执行证据：{step.output_summary}</Text>}{canUpdateStep(step) && <Button type="link" size="small" style={{ paddingInline: 0, width: 'fit-content' }} onClick={() => openEvidence(step)}>记录结果或证据</Button>}</Space>, status: step.status === 'done' ? 'finish' : step.status === 'blocked' ? 'error' : step.status === 'running' ? 'process' : 'wait' }))} />
             </Card>
           ) : (
-            <Card title="执行前计划" extra={plan && <Tag color="gold">草稿</Tag>}>
+            <Card title={t('work.card.plan')} extra={plan && <Tag color="gold">草稿</Tag>}>
               <Form form={form} layout="vertical" onFinish={savePlan}>
                 <Form.Item label="选择可复用流程"><Select placeholder="选择交付、调研或故障响应流程" onChange={applyTemplate} disabled={!canWrite} options={planTemplates.map((item) => ({ value: item.value, label: item.label }))} /></Form.Item>
                 <Form.Item name="objective" label="目标" rules={[{ required: true, min: 4 }]}><Input.TextArea rows={3} placeholder="这项工作要交付什么结果？" disabled={!canWrite} /></Form.Item>
                 <Form.List name="steps">{(fields, { add, remove }) => <div className="plan-form-list"><Flex justify="space-between" align="center"><Text strong>执行步骤</Text>{canWrite && <Button size="small" icon={<PlusOutlined />} onClick={() => add({ title: '', instructions: '' })}>添加步骤</Button>}</Flex>{fields.map((field, index) => <Card size="small" key={field.key} className="plan-step-editor"><Flex gap={10} align="start"><Tag>{index + 1}</Tag><div className="plan-step-fields"><Form.Item name={[field.name, 'id']} hidden><Input /></Form.Item><Form.Item name={[field.name, 'title']} rules={[{ required: true, min: 2 }]}><Input placeholder="步骤标题" disabled={!canWrite} /></Form.Item><Form.Item name={[field.name, 'instructions']}><Input.TextArea rows={2} placeholder="预期工作、输入和验收证据" disabled={!canWrite} /></Form.Item><Form.Item name={[field.name, 'assignee_id']}><Select allowClear placeholder="负责人" disabled={!canWrite} options={members.map((item) => ({ value: item.user.id, label: item.user.display_name }))} /></Form.Item></div>{canWrite && <Button type="text" danger icon={<DeleteOutlined />} onClick={() => remove(field.name)} />}</Flex></Card>)}</div>}</Form.List>
-                <Flex justify="end" gap={8}><Button htmlType="submit" disabled={!canWrite}>保存草稿</Button>{canApprove && plan && <Button type="primary" icon={<CheckCircleOutlined />} onClick={approve}>批准执行</Button>}</Flex>
+                <Flex justify="end" gap={8}><Button htmlType="submit" disabled={!canWrite}>{t('work.btn.saveDraft')}</Button>{canApprove && plan && <Button type="primary" icon={<CheckCircleOutlined />} onClick={approve}>{t('work.btn.approve')}</Button>}</Flex>
               </Form>
             </Card>
           )}
@@ -1100,17 +1100,17 @@ function WorkspaceSettingsPage({ workspace, members, workspaceRole, onRefresh })
   return (
     <div className="page-shell settings-page">
       <Flex justify="space-between" align="center" wrap="wrap" gap={12} className="page-heading">
-        <div><Title level={2}>工作区设置</Title><Text type="secondary">名称、所有权与通知出口都在这里集中管理；关键操作会写入审计记录。</Text></div>
+        <div><Title level={2}>{t('settings.title')}</Title><Text type="secondary">{t('settings.subtitle')}</Text></div>
       </Flex>
-      <Card className="settings-card" title="基本信息">
+      <Card className="settings-card" title={t("settings.card.basic")}>
         <Flex gap={10} wrap="wrap">
           <Input value={name} onChange={(event) => setName(event.target.value)} style={{ width: 320, maxWidth: '100%' }} placeholder="工作区名称" disabled={!isManager} />
-          <Button type="primary" loading={savingName} disabled={!isManager || !name.trim() || name.trim() === workspace?.name} onClick={saveName}>保存名称</Button>
+          <Button type="primary" loading={savingName} disabled={!isManager || !name.trim() || name.trim() === workspace?.name} onClick={saveName}>{t('settings.btn.saveName')}</Button>
         </Flex>
         <Paragraph type="secondary" style={{ marginTop: 10, marginBottom: 0 }}><Text type="secondary">标识：{workspace?.slug || '-'} · 所有者：{members.find((m) => m.user.id === workspace?.owner_id)?.user.display_name || '未知'}</Text></Paragraph>
       </Card>
       {isManager && (
-        <Card className="settings-card" title="通知出口" extra={<Button size="small" icon={<PlusOutlined />} onClick={() => setTargetOpen(true)}>新建出口</Button>}>
+        <Card className="settings-card" title={t("settings.card.targets")} extra={<Button size="small" icon={<PlusOutlined />} onClick={() => setTargetOpen(true)}>{t('settings.btn.newTarget')}</Button>}>
           <Paragraph type="secondary" style={{ marginTop: 0 }}>预警扫描与关键事件可推送到企业微信群机器人、飞书、钉钉或任意 Webhook。</Paragraph>
           {targetsLoading ? <Spin /> : targets.length ? (
             <List size="small" dataSource={targets} renderItem={(target) => (
@@ -1127,16 +1127,16 @@ function WorkspaceSettingsPage({ workspace, members, workspaceRole, onRefresh })
       )}
       {isOwner && (
         <>
-          <Card className="settings-card" title="所有权转移">
+          <Card className="settings-card" title={t("settings.card.transfer")}>
             <Paragraph type="secondary" style={{ marginTop: 0 }}>转移后你将变为管理员。存在老板/私事经营数据时系统会拒绝转移，需先归档或交接。</Paragraph>
             <Flex gap={10} wrap="wrap">
               <Select value={transferMemberId || undefined} onChange={setTransferMemberId} style={{ width: 280, maxWidth: '100%' }} placeholder="选择新的所有者（工作区成员）" options={transferCandidates.map((m) => ({ value: m.id, label: `${m.user.display_name}（${m.user.email}）` }))} />
               <Button type="primary" disabled={!transferMemberId} onClick={transferOwnership}>转移所有权</Button>
             </Flex>
           </Card>
-          <Card className="settings-card settings-danger" title="危险区">
+          <Card className="settings-card settings-danger" title={t("settings.card.danger")}>
             <Paragraph type="secondary" style={{ marginTop: 0 }}>删除工作区会永久清除全部成员、项目、任务、对话、附件、交付物与审计记录。</Paragraph>
-            <Button danger onClick={deleteWorkspace}>删除此工作区</Button>
+            <Button danger onClick={deleteWorkspace}>{t('settings.btn.delete')}</Button>
           </Card>
         </>
       )}

@@ -27,6 +27,7 @@ import Welcome from '@ant-design/x/es/welcome'
 import XProvider from '@ant-design/x/es/x-provider'
 import zhCN from 'antd/es/locale/zh_CN'
 import { apiFetch } from '../api.js'
+import { t } from '../i18n.js'
 
 const { Title, Text, Paragraph } = Typography
 
@@ -437,8 +438,8 @@ function BusinessAssistantContent({ workspaceRole, members = [], currentUserId =
 
   return <div className="page-shell business-page">
     <Flex justify="space-between" align="flex-start" wrap="wrap" gap={16} className="page-heading business-heading">
-      <div><Title level={2}>经营助手</Title><Text type="secondary">将已授权的业务数据汇总为预警、生产日报与可追溯任务；不会绕过系统授权采集个人聊天记录。</Text></div>
-      <Space wrap><Tag color="blue">工作区隔离</Tag><Button onClick={() => loadBusiness({ quiet: true })} loading={refreshing}>刷新数据</Button></Space>
+      <div><Title level={2}>{t('business.title')}</Title><Text type="secondary">{t('business.subtitle')}</Text></div>
+      <Space wrap><Tag color="blue">{t('business.isolation')}</Tag><Button onClick={() => loadBusiness({ quiet: true })} loading={refreshing}>{t('business.btn.refresh')}</Button></Space>
     </Flex>
 
     {loadError && <Alert className="business-load-alert" type={apiUnavailable ? 'info' : 'warning'} showIcon message={apiUnavailable ? '经营助手暂不可用' : '经营数据加载异常'} description={loadError} action={<Button size="small" onClick={() => loadBusiness()}>重新加载</Button>} />}
@@ -456,7 +457,7 @@ function BusinessAssistantContent({ workspaceRole, members = [], currentUserId =
       </div>
 
       <div className="business-workspace-grid">
-        <Card className="business-role-card" title="选择业务助手" extra={<Text type="secondary">{isOwner ? '老板权限' : '公司成员权限'}</Text>}>
+        <Card className="business-role-card" title={t('business.card.select')} extra={<Text type="secondary">{isOwner ? '老板权限' : '公司成员权限'}</Text>}>
           {roleCards}
           <Alert className="business-role-hint" type="info" showIcon message={selectedCatalog.isolation} />
         </Card>
