@@ -135,6 +135,7 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
   const [ingestCredential, setIngestCredential] = useState(null)
   const [automationJobs, setAutomationJobs] = useState([])
   const [automationOpen, setAutomationOpen] = useState(false)
+  const [reportDetail, setReportDetail] = useState(null)
   const [sourceForm] = Form.useForm()
   const [kbForm] = Form.useForm()
   const [automationForm] = Form.useForm()
@@ -428,12 +429,14 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
       label: compactText(report.title, '月报'),
       description: `月报 · ${report.period_year}-${String(report.period_month).padStart(2, '0')}`,
       icon: <Avatar size="small" icon={<FileTextOutlined />} />,
+      report: { kind: '月报', date: `${report.period_year}-${String(report.period_month).padStart(2, '0')}`, summary: report.summary },
     })),
     ...reports.slice(0, 4).map((report) => ({
       key: report.id,
       label: compactText(report.title, '生产日报'),
       description: formatDate(report.report_date || report.created_at),
       icon: <Avatar size="small" icon={<ProjectOutlined />} />,
+      report: { kind: '日报', date: formatDate(report.report_date || report.created_at), summary: report.summary },
     })),
   ]
 
@@ -586,7 +589,14 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
                 {canManage && <Space><Button size="small" onClick={generateReport}>日报</Button><Button size="small" onClick={generateWeeklyReport}>周报</Button><Button size="small" onClick={generateMonthlyReport}>月报</Button></Space>}
               </div>
               {apiUnavailable ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="服务未部署" /> : reportItems.length ? (
-                <Conversations items={reportItems} />
+                <Conversations
+                  items={reportItems}
+                  activeKey={reportDetail?.key}
+                  onActiveChange={(key) => {
+                    const entry = reportItems.find((entry) => entry.key === key)
+                    if (entry?.report) setReportDetail({ ...entry.report, key })
+                  }}
+                />
               ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未生成生产日报" />}
             </div>
 
@@ -635,6 +645,20 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
           </div>
         </div>
       </Spin>
+
+      <Modal
+        title={reportDetail ? `${reportDetail.kind}详情 · ${reportDetail.date}` : '报告详情'}
+        open={Boolean(reportDetail)}
+        onCancel={() => setReportDetail(null)}
+        footer={<Button type="primary" onClick={() => setReportDetail(null)}>关闭</Button>}
+        width={640}
+      >
+        {reportDetail && (
+          <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.85, maxHeight: '55vh', overflowY: 'auto' }}>
+            {compactText(reportDetail.summary, '该报告暂无正文内容。')}
+          </div>
+        )}
+      </Modal>
 
       <Modal title="创建自动化任务" open={automationOpen} onCancel={() => setAutomationOpen(false)} onOk={() => automationForm.submit()} okText="创建" cancelText="取消" destroyOnHidden>
         <Form form={automationForm} layout="vertical" onFinish={createAutomationJob} initialValues={{ job_type: 'report_daily', cron: '0 18 * * *' }}>
