@@ -874,6 +874,11 @@ async def health() -> dict[str, Any]:
         "environment": settings.environment,
         "authentication": "jwt",
         "version": "0.2.0",
+        "knowledge_retrieval": {
+            "vector_enabled": settings.embedding_provider not in {"", "off"},
+            "provider": settings.embedding_provider or "off",
+            "model": settings.embedding_model or None,
+        },
     }
 
 

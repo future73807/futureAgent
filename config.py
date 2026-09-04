@@ -106,6 +106,9 @@ class Settings(BaseSettings):
     # 先 `ollama pull qwen3-embedding`）；openai 走 OPENAI_BASE_URL/embeddings。
     embedding_provider: str = "off"
     embedding_model: str = "qwen3-embedding"
+    # 向量维度：决定 pgvector 列的 typmod 与 HNSW 索引；更换模型后需同步修改
+    # 并对知识库重建索引（更新任一知识库文档即可触发重切块）。
+    embedding_dim: int = 1024
     environment: str = "development"
 
     @computed_field

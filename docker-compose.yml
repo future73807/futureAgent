@@ -18,6 +18,12 @@ services:
       # Docker 容器内的 localhost 指向 API 容器自身。默认通过 Docker
       # 提供的宿主机别名连接本机 Ollama，同时允许 .env 显式覆盖。
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      # 知识库向量召回：off=关键词召回；ollama=本地模型（先在宿主机
+      # `ollama pull qwen3-embedding`）。EMBEDDING_DIM 需与模型输出维度一致，
+      # 它决定 pgvector 列维度与 HNSW 索引；更换模型后需同步调整。
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-off}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-qwen3-embedding}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
       # The bundled MCP server verifies a signed workspace claim and roots
       # every file operation in that tenant's private directory.  This safe
       # Compose path can therefore expose its five file tools by default.
