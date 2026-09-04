@@ -18,7 +18,7 @@ from config import settings
 from db.database import BUSINESS_AGENT_TABLES, _matches_schema
 
 # 迁移链的当前 head；新增迁移时只需更新这一处。
-CURRENT_HEAD = "20260902_14"
+CURRENT_HEAD = "20260902_16"
 
 
 class _Inspector:

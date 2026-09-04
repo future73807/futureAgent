@@ -70,6 +70,7 @@ NEWEST_FEATURE_TABLES = {
     "task_comments",
     "report_monthly_reports",
     "knowledge_chunks",
+    "agent_run_batches",
 }
 
 # Revision 20260725_03 adds both business tables and audit visibility columns.
@@ -102,6 +103,7 @@ PRE_BATCH_MISSING_COLUMNS = {"agent_runs": {"batch_id"}}
 # 增量特性表 → 引入它的迁移版本（从新到旧）。无 alembic_version 的库按
 # "已拥有的最高阶梯表" 判定其实际版本，避免误判到过旧的基线重建全库。
 ADDITIVE_STEPS = [
+    ("20260902_15", {"agent_run_batches"}),
     ("20260902_14", {"knowledge_chunks"}),
     ("20260902_12", {"report_monthly_reports"}),
     ("20260902_10", {"task_comments"}),

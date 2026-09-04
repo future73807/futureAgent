@@ -192,6 +192,64 @@ class ParallelExecutionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["cancelled"], 0)
 
+    def test_batch_history_persisted_after_execution(self):
+        from types import SimpleNamespace
+
+        task_id, _ = self._approved_plan_with_steps(["历史步骤甲", "历史步骤乙"])
+
+        class FakeSkillManager:
+            @staticmethod
+            def get_skill(name):
+                return object() if name == "default" else None
+
+        class FakeMcpManager:
+            servers = {"web_tools": "http://tools.invalid/mcp"}
+
+        class FakeEngine:
+            skill_manager = FakeSkillManager()
+            mcp_manager = FakeMcpManager()
+
+            @staticmethod
+            def validate_permissions(*_args, **_kwargs):
+                return None
+
+            async def run(self, **kwargs):
+                yield "历史输出"
+
+        with (
+            patch("api.routes.get_agent_engine", return_value=FakeEngine()),
+            patch("api.routes._ensure_model_ready"),
+            # 测试环境无 Postgres：checkpointer 直接降级为 None
+            patch("core.checkpointer.settings", SimpleNamespace(checkpoint_conn_str="sqlite:///memory")),
+        ):
+            response = self.client.post(
+                f"/api/v1/tasks/{task_id}/execute-parallel",
+                json={"model_id": "gpt-4o-mini", "skill_name": "default"},
+                headers=self.headers(),
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        batches = self.client.get(
+            f"/api/v1/tasks/{task_id}/batches",
+            headers=self.headers(),
+        )
+        self.assertEqual(batches.status_code, 200, batches.text)
+        payload = batches.json()["batches"]
+        self.assertEqual(len(payload), 1)
+        batch = payload[0]
+        self.assertEqual(batch["status"], "succeeded")
+        self.assertEqual(batch["total_steps"], 2)
+        self.assertEqual(batch["succeeded_count"], 2)
+        self.assertIsNotNone(batch["finished_at"])
+
+        detail = self.client.get(
+            f"/api/v1/tasks/{task_id}/batches/{batch['id']}",
+            headers=self.headers(),
+        )
+        self.assertEqual(detail.status_code, 200, detail.text)
+        self.assertEqual(len(detail.json()["runs"]), 2)
+        self.assertTrue(all(run["status"] == "succeeded" for run in detail.json()["runs"]))
+
 
 if __name__ == "__main__":
     unittest.main()

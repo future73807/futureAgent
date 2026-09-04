@@ -1,0 +1,16 @@
+feat(work/rag): 批次执行历史持久化 + pgvector 原生向量列
+
+批次历史：
+- 新表 agent_run_batches（迁移 20260902_15）：批次终态（succeeded/partial/
+  failed/cancelled）与成功/失败/取消计数、模型与创建人
+- 编排 worker 单步终态回写计数；全部结束后写 finished_at 与批次状态，
+  并推送完成通知（含计数摘要）
+- GET /v1/tasks/{id}/batches 与 /batches/{batch_id}（含批次内全部 run）
+- 工作模式 AI 执行卡片新增"批次历史"折叠列表
+
+pgvector：
+- 迁移 20260902_16（仅 Postgres）：启用 vector 扩展、knowledge_chunks 加
+  embedding_vec 原生列并从 JSON 回填；SQLite 环境跳过，保持 JSON 降级路径
+- 检索：Postgres 下推 pgvector 距离运算（含过期块过滤），异常自动退回
+  进程内余弦；SQLite 行为不变
+- 写入：Postgres 下新块回填 embedding_vec 原生列

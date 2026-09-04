@@ -2,6 +2,7 @@ import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useStat
 import Alert from 'antd/es/alert'
 import AntApp from 'antd/es/app'
 import AutoComplete from 'antd/es/auto-complete'
+import Collapse from 'antd/es/collapse'
 import Avatar from 'antd/es/avatar'
 import Badge from 'antd/es/badge'
 import Button from 'antd/es/button'
@@ -620,6 +621,16 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
   const [batchOutput, setBatchOutput] = useState([])
   const [batchRunning, setBatchRunning] = useState(false)
   const [activeBatchId, setActiveBatchId] = useState('')
+  const [batchHistory, setBatchHistory] = useState([])
+  const loadBatchHistory = useCallback(async (requestedTaskId = taskId) => {
+    if (!requestedTaskId) { setBatchHistory([]); return }
+    try {
+      const data = await apiFetch(`/api/v1/tasks/${requestedTaskId}/batches`)
+      setBatchHistory(data.batches || [])
+    } catch { setBatchHistory([]) }
+  }, [taskId])
+  useEffect(() => { loadBatchHistory() }, [loadBatchHistory])
+  useEffect(() => { if (!batchRunning) loadBatchHistory() }, [batchRunning, loadBatchHistory])
   const executionAbortRef = useRef(null)
   const cancellationRequestedRef = useRef(false)
   const runsRequestIdRef = useRef(0)
@@ -797,7 +808,11 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
       <Card key={item.stepId} size="small" className={`batch-step-card batch-step-${item.status}`} title={<Space size={6}>{item.title}<Tag color={item.status === 'succeeded' ? 'success' : item.status === 'failed' ? 'error' : item.status === 'cancelled' ? 'default' : 'processing'}>{item.status === 'running' ? '执行中' : item.status === 'succeeded' ? '已完成' : item.status === 'failed' ? '失败' : '已取消'}</Tag></Space>} extra={item.error ? <Text type="danger">{item.error}</Text> : undefined}>
         {item.text ? <pre className="attachment-preview">{item.text}</pre> : <Text type="secondary">等待模型输出…</Text>}
       </Card>
-    ))}</div>}<Flex gap={8} wrap="wrap" className="execution-controls"><Select value={stepId || undefined} onChange={setStepId} placeholder="选择计划步骤" options={(plan?.steps || []).filter((step) => step.status !== 'done').map((step) => ({ value: step.id, label: `${stepStatusLabels[step.status] || step.status} · ${step.title}` }))} /><Select value={modelId || undefined} onChange={setModelId} placeholder="选择模型" options={models.map((item) => ({ value: item.id, label: `${item.id}${item.ready ? '' : '（未就绪）'}`, disabled: !item.ready }))} /><Select value={skillName || undefined} onChange={setSkillName} placeholder="选择技能" options={skills.map((item) => ({ value: item.name, label: skillDisplayName(item.name) }))} /><Select mode="multiple" value={selectedMcpServers} onChange={setSelectedMcpServers} maxTagCount="responsive" placeholder={mcpServers.length ? '按需启用 MCP 工具' : '暂无 MCP 工具'} disabled={!mcpServers.length} options={mcpServers.map((item) => ({ value: item.name || item, label: mcpOptionLabel(item), title: mcpOptionLabel(item), tools: Array.isArray(item.tools) ? item.tools : [], disabled: mcpServerUnavailable(item) }))} optionRender={(option) => <div className="mcp-option"><span>{option.label}</span><small>{option.data?.tools?.length ? option.data.tools.join(' · ') : option.data?.disabled ? '连接不可用' : '工具清单将在连接后显示'}</small></div>} /></Flex>{liveOutput && <pre className="attachment-preview">{liveOutput}</pre>}{runItems.length ? <Tabs size="small" items={runItems} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="此任务尚无 AI 执行记录" />}</Space>
+    ))}</div>}<Flex gap={8} wrap="wrap" className="execution-controls"><Select value={stepId || undefined} onChange={setStepId} placeholder="选择计划步骤" options={(plan?.steps || []).filter((step) => step.status !== 'done').map((step) => ({ value: step.id, label: `${stepStatusLabels[step.status] || step.status} · ${step.title}` }))} /><Select value={modelId || undefined} onChange={setModelId} placeholder="选择模型" options={models.map((item) => ({ value: item.id, label: `${item.id}${item.ready ? '' : '（未就绪）'}`, disabled: !item.ready }))} /><Select value={skillName || undefined} onChange={setSkillName} placeholder="选择技能" options={skills.map((item) => ({ value: item.name, label: skillDisplayName(item.name) }))} /><Select mode="multiple" value={selectedMcpServers} onChange={setSelectedMcpServers} maxTagCount="responsive" placeholder={mcpServers.length ? '按需启用 MCP 工具' : '暂无 MCP 工具'} disabled={!mcpServers.length} options={mcpServers.map((item) => ({ value: item.name || item, label: mcpOptionLabel(item), title: mcpOptionLabel(item), tools: Array.isArray(item.tools) ? item.tools : [], disabled: mcpServerUnavailable(item) }))} optionRender={(option) => <div className="mcp-option"><span>{option.label}</span><small>{option.data?.tools?.length ? option.data.tools.join(' · ') : option.data?.disabled ? '连接不可用' : '工具清单将在连接后显示'}</small></div>} /></Flex>{liveOutput && <pre className="attachment-preview">{liveOutput}</pre>}{batchHistory.length > 0 && <Collapse size="small" className="batch-history" items={batchHistory.map((batch) => ({
+  key: batch.id,
+  label: <Space size={6}><Tag color={batch.status === 'succeeded' ? 'success' : batch.status === 'failed' ? 'error' : batch.status === 'cancelled' ? 'default' : 'processing'}>{batch.status === 'running' ? '执行中' : batch.status === 'succeeded' ? '全部成功' : batch.status === 'partial' ? '部分失败' : batch.status === 'failed' ? '全部失败' : '已取消'}</Tag>批次 · {formatDateTime(batch.created_at)}</Space>,
+  children: <Text type="secondary">{batch.total_steps} 个步骤：成功 {batch.succeeded_count}、失败 {batch.failed_count}、取消 {batch.cancelled_count} · 模型 {batch.model_id}</Text>,
+}))} />}{runItems.length ? <Tabs size="small" items={runItems} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="此任务尚无 AI 执行记录" />}</Space>
   </Card>
 }
 

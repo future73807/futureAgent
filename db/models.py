@@ -152,6 +152,32 @@ class ChatMessage(SQLModel, table=True):
     created_at: datetime = Field(default_factory=now_utc)
 
 
+class AgentRunBatch(SQLModel, table=True):
+    """一次并行编排的批次记录：终态与各结果计数，供历史查看。
+
+    ``id`` 即 agent_runs.batch_id，两表通过该键关联。
+    status: running / succeeded（全部成功）/ partial（部分失败）/ failed
+    （全部失败）/ cancelled（被人工取消）。
+    """
+
+    __tablename__ = "agent_run_batches"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    workspace_id: str = Field(foreign_key="workspaces.id", index=True)
+    task_id: str = Field(foreign_key="tasks.id", index=True)
+    plan_id: str | None = Field(default=None, foreign_key="work_plans.id", index=True)
+    total_steps: int = Field(default=0)
+    succeeded_count: int = Field(default=0)
+    failed_count: int = Field(default=0)
+    cancelled_count: int = Field(default=0)
+    status: str = Field(default="running", max_length=16)
+    model_id: str = Field(max_length=120)
+    skill_name: str = Field(max_length=120)
+    created_by: str = Field(foreign_key="users.id", index=True)
+    created_at: datetime = Field(default_factory=now_utc)
+    finished_at: datetime | None = Field(default=None)
+
+
 class AgentRun(SQLModel, table=True):
     """A durable, task-scoped AI execution attempt.
 

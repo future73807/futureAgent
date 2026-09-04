@@ -80,6 +80,7 @@ from db.models import (
     Project,
     RefreshSession,
     ScheduledJob,
+    AgentRunBatch,
     Task,
     TaskComment,
     User,
@@ -2412,6 +2413,59 @@ def list_task_runs(
     return {"runs": [_agent_run_data(run) for run in runs]}
 
 
+def _agent_run_batch_data(batch: AgentRunBatch) -> dict[str, Any]:
+    return {
+        "id": batch.id,
+        "task_id": batch.task_id,
+        "plan_id": batch.plan_id,
+        "total_steps": batch.total_steps,
+        "succeeded_count": batch.succeeded_count,
+        "failed_count": batch.failed_count,
+        "cancelled_count": batch.cancelled_count,
+        "status": batch.status,
+        "model_id": batch.model_id,
+        "skill_name": batch.skill_name,
+        "created_at": batch.created_at,
+        "finished_at": batch.finished_at,
+    }
+
+
+@router.get("/v1/tasks/{task_id}/batches")
+def list_task_run_batches(
+    task_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    context: WorkspaceContext = Depends(get_workspace_context),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    _task_or_404(session, context.workspace.id, task_id)
+    batches = session.exec(
+        select(AgentRunBatch)
+        .where(AgentRunBatch.workspace_id == context.workspace.id, AgentRunBatch.task_id == task_id)
+        .order_by(AgentRunBatch.created_at.desc())
+        .limit(limit)
+    ).all()
+    return {"batches": [_agent_run_batch_data(batch) for batch in batches]}
+
+
+@router.get("/v1/tasks/{task_id}/batches/{batch_id}")
+def get_task_run_batch(
+    task_id: str,
+    batch_id: str,
+    context: WorkspaceContext = Depends(get_workspace_context),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    _task_or_404(session, context.workspace.id, task_id)
+    batch = session.get(AgentRunBatch, batch_id)
+    if not batch or batch.workspace_id != context.workspace.id or batch.task_id != task_id:
+        raise HTTPException(status_code=404, detail="并行批次不存在")
+    runs = session.exec(
+        select(AgentRun)
+        .where(AgentRun.workspace_id == context.workspace.id, AgentRun.batch_id == batch_id)
+        .order_by(AgentRun.started_at)
+    ).all()
+    return {"batch": _agent_run_batch_data(batch), "runs": [_agent_run_data(run) for run in runs]}
+
+
 @router.post("/v1/tasks/{task_id}/runs/{run_id}/cancel")
 def cancel_task_run(
     task_id: str,
@@ -2759,6 +2813,18 @@ async def execute_task_steps_in_parallel(
     plan.status = "in_progress"
     plan.updated_at = now_utc()
     session.add(plan)
+    batch = AgentRunBatch(
+        id=batch_id,
+        workspace_id=context.workspace.id,
+        task_id=task.id,
+        plan_id=plan.id,
+        total_steps=len(runs),
+        status="running",
+        model_id=model_id,
+        skill_name=request.skill_name,
+        created_by=context.user.id,
+    )
+    session.add(batch)
     session.flush()
     for run, _step, _prompt in runs:
         write_audit(
@@ -2773,6 +2839,16 @@ async def execute_task_steps_in_parallel(
     session.commit()
 
     checkpointer = await get_checkpointer()
+
+    async def _record_batch_outcome(outcome: str) -> None:
+        """单步终态回写批次计数；批次行由编排端点创建。"""
+        if outcome == "succeeded":
+            batch.succeeded_count += 1
+        elif outcome == "failed":
+            batch.failed_count += 1
+        else:
+            batch.cancelled_count += 1
+        session.add(batch)
 
     async def _worker(run: AgentRun, step: WorkPlanStep, prompt: str, queue: asyncio.Queue) -> None:
         collected: list[str] = []
@@ -2797,6 +2873,8 @@ async def execute_task_steps_in_parallel(
             if _run_cancelled(session, run):
                 _save_agent_run_progress(session, run, collected, config["tool_trace"])
                 session.commit()
+                await _record_batch_outcome("cancelled")
+                session.commit()
                 await queue.put(("step-cancelled", json.dumps({"run_id": run.id, "step_id": step.id}, default=str)))
                 return
             run.status = "succeeded"
@@ -2813,10 +2891,14 @@ async def execute_task_steps_in_parallel(
             )
             session.commit()
             record_agent_run("succeeded")
+            await _record_batch_outcome("succeeded")
+            session.commit()
             await queue.put(("step-done", json.dumps({"run_id": run.id, "step_id": step.id}, default=str)))
         except Exception as exc:  # noqa: BLE001 - 单步失败不影响其它并行步骤
             if _run_cancelled(session, run):
                 _save_agent_run_progress(session, run, collected, config["tool_trace"])
+                session.commit()
+                await _record_batch_outcome("cancelled")
                 session.commit()
                 await queue.put(("step-cancelled", json.dumps({"run_id": run.id, "step_id": step.id}, default=str)))
                 return
@@ -2849,6 +2931,8 @@ async def execute_task_steps_in_parallel(
             )
             session.commit()
             record_agent_run("failed")
+            await _record_batch_outcome("failed")
+            session.commit()
             detail = json.dumps({"run_id": run.id, "step_id": step.id, "message": run.error_message}, default=str)
             await queue.put(("step-error", detail))
 
@@ -2875,6 +2959,28 @@ async def execute_task_steps_in_parallel(
                     yield {"event": "step-error", "data": data}
                 else:
                     yield {"event": event, "data": data}
+            if batch.failed_count == len(workers):
+                batch.status = "failed"
+            elif batch.cancelled_count == len(workers):
+                batch.status = "cancelled"
+            elif batch.failed_count or batch.cancelled_count:
+                batch.status = "partial"
+            else:
+                batch.status = "succeeded"
+            batch.finished_at = now_utc()
+            session.add(batch)
+            session.commit()
+            push_notification(
+                session,
+                context.workspace.id,
+                context.user.id,
+                "run",
+                f"并行批次完成：{task.title}",
+                body=f"共 {len(workers)} 步：成功 {batch.succeeded_count}、失败 {batch.failed_count}、取消 {batch.cancelled_count}",
+                link="work",
+                ref_id=task.id,
+            )
+            session.commit()
             yield {
                 "event": "done",
                 "data": json.dumps({"batch_id": batch_id, "total": len(workers)}, default=str),

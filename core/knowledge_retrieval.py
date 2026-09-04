@@ -191,6 +191,48 @@ def _chunk_scores(session: Session, workspace_id: str, query_vector: list[float]
     ]
 
 
+_PG_VECTOR_HITS_SQL = """
+SELECT c.kb_id AS kb_id,
+       c.content AS content,
+       1 - (c.embedding_vec <=> CAST(:query_vector AS vector)) AS score
+FROM knowledge_chunks c
+JOIN knowledge_bases kb ON kb.id = c.kb_id
+WHERE c.workspace_id = :workspace_id
+  AND c.embedding_vec IS NOT NULL
+  AND (c.kb_updated_at IS NULL OR kb.updated_at IS NULL OR c.kb_updated_at >= kb.updated_at)
+ORDER BY score DESC
+LIMIT :limit
+"""
+
+
+def _is_postgres(session: Session) -> bool:
+    return session.get_bind().dialect.name == "postgresql"
+
+
+def _pg_vector_hits(session: Session, workspace_id: str, query_vector: list[float], limit: int) -> list[dict[str, Any]]:
+    """Postgres：用 pgvector 的 `<=>` 距离在库内完成余弦打分（精确检索）。"""
+    from sqlalchemy import text
+
+    rows = session.execute(
+        text(_PG_VECTOR_HITS_SQL),
+        {
+            "query_vector": "[" + ",".join(f"{value:.6f}" for value in query_vector) + "]",
+            "workspace_id": workspace_id,
+            "limit": limit,
+        },
+    ).mappings().all()
+    return [
+        {
+            "source": "knowledge_base",
+            "id": row["kb_id"],
+            "title": "知识库",
+            "snippet": row["content"][:_SNIPPET_WINDOW],
+            "score": float(row["score"]) * _VECTOR_WEIGHT,
+        }
+        for row in rows
+    ]
+
+
 async def retrieve_knowledge_smart(
     session: Session,
     workspace_id: str,
@@ -207,7 +249,15 @@ async def retrieve_knowledge_smart(
         vectors = None
     if not vectors:
         return keyword_hits
-    vector_hits = _chunk_scores(session, workspace_id, vectors[0], limit=limit)
+    query_vector = vectors[0]
+    if _is_postgres(session):
+        try:
+            vector_hits = _pg_vector_hits(session, workspace_id, query_vector, limit=limit)
+        except Exception:  # noqa: BLE001 - pgvector 异常退回进程内计算
+            logger.warning("knowledge retrieval: pgvector 检索失败，退回进程内余弦", exc_info=True)
+            vector_hits = _chunk_scores(session, workspace_id, query_vector, limit=limit)
+    else:
+        vector_hits = _chunk_scores(session, workspace_id, query_vector, limit=limit)
     merged: dict[tuple[str, str], dict[str, Any]] = {}
     for item in keyword_hits + vector_hits:
         key = (item["source"], item["id"])
@@ -247,17 +297,29 @@ async def reindex_knowledge_base(session: Session, workspace_id: str, kb: Knowle
         select(KnowledgeChunk).where(KnowledgeChunk.kb_id == kb.id)
     ).all():
         session.delete(old)
+    is_pg = _is_postgres(session)
+    chunk_ids: list[tuple[str, list[float]]] = []
     for index, (content, vector) in enumerate(zip(chunks, vectors)):
-        session.add(
-            KnowledgeChunk(
-                workspace_id=workspace_id,
-                kb_id=kb.id,
-                chunk_index=index,
-                content=content[:4000],
-                embedding_json=json.dumps(vector),
-                model_name=settings.embedding_model,
-                kb_updated_at=kb.updated_at,
-            )
+        chunk = KnowledgeChunk(
+            workspace_id=workspace_id,
+            kb_id=kb.id,
+            chunk_index=index,
+            content=content[:4000],
+            embedding_json=json.dumps(vector),
+            model_name=settings.embedding_model,
+            kb_updated_at=kb.updated_at,
         )
+        session.add(chunk)
+        chunk_ids.append((chunk.id, vector))
     session.commit()
+    if is_pg:
+        # pgvector 原生列回填（列由迁移 20260902_16 在 Postgres 下创建）
+        from sqlalchemy import text
+
+        for chunk_id, vector in chunk_ids:
+            session.execute(
+                text("UPDATE knowledge_chunks SET embedding_vec = CAST(:vec AS vector) WHERE id = :cid"),
+                {"vec": "[" + ",".join(f"{value:.6f}" for value in vector) + "]", "cid": chunk_id},
+            )
+        session.commit()
     return True
