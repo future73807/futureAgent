@@ -972,6 +972,164 @@ def submit_authenticated_report_record_batch(
     }
 
 
+def _extract_im_message(payload: Any) -> tuple[str, str, str] | None:
+    """从容错解析企业微信/飞书/钉钉机器人转发的文本消息。
+
+    返回 ``(text, msg_id, sender)``；无法识别结构时返回 None。支持的形态
+    （含常见嵌套变体）：
+
+    - 企业微信/钉钉：``{"msgtype":"text","text":{"content":"..."}}``
+    - 飞书消息体：``{"msg_type":"text","content":{"text":"..."}}``、
+      事件订阅 ``{"event":{"message":{"message_id":..,"content":"{\\"text\\":..}"}}}``
+    - 通用兜底：``{"text":"..."}`` 或 ``{"content":"..."}`
+    """
+    if not isinstance(payload, dict):
+        return None
+
+    def _read(node: Any, depth: int = 0) -> str:
+        if depth > 3:
+            return ""
+        if isinstance(node, str):
+            return node
+        if isinstance(node, dict):
+            for key in ("content", "text"):
+                value = node.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
+                if isinstance(value, dict):
+                    inner = _read(value, depth + 1)
+                    if inner:
+                        return inner
+        return ""
+
+    event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+    message = event.get("message") if isinstance(event.get("message"), dict) else {}
+    msg_id = str(payload.get("msg_id") or payload.get("message_id") or message.get("message_id") or "")
+    sender = str(
+        payload.get("sender")
+        or payload.get("from")
+        or (event.get("sender") or {}).get("sender_id", "")
+        or ""
+    )
+    text = ""
+    if isinstance(payload.get("text"), dict):
+        text = str(payload["text"].get("content") or "")
+    elif isinstance(payload.get("content"), dict):
+        text = str(payload["content"].get("text") or "")
+    elif isinstance(payload.get("content"), str):
+        text = payload["content"]
+    else:
+        # 飞书事件订阅：message.content 是 JSON 字符串 {"text": "..."}
+        raw_message_content = message.get("content")
+        if isinstance(raw_message_content, str) and raw_message_content.lstrip().startswith("{"):
+            try:
+                inner = json.loads(raw_message_content)
+                if isinstance(inner, dict):
+                    text = str(inner.get("text") or "")
+            except ValueError:
+                text = raw_message_content
+        if not text:
+            text = _read(message) or _read(event) or _read(payload)
+    text = text.strip()
+    if not text:
+        return None
+    return text, msg_id, sender
+
+
+def _validate_ingest_token_ok(source: ReportDataSource, supplied: str | None) -> bool:
+    if not supplied or not source.ingest_token_hash:
+        return False
+    return secrets.compare_digest(source.ingest_token_hash, _token_hash(supplied))
+
+
+@router.post("/im-ingest/{source_id}", name="report_im_ingest")
+async def im_webhook_ingest(
+    source_id: str,
+    request: Request,
+    token: str | None = Query(default=None),
+    header_token: str | None = Header(default=None, alias="X-Report-Ingest-Token"),
+    notify: bool = Query(default=False),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """IM 入站指令最小闭环：接收企业微信/飞书/钉钉机器人转发的文本消息。
+
+    - 鉴权：数据源 ingest token（``?token=`` 或 ``X-Report-Ingest-Token``）
+    - 文本消息落为 ``im_message`` 类型汇报记录（按 msg_id/内容幂等），
+      命中预警规则自动生成预警
+    - ``?notify=true`` 时同步推送站内通知给工作区所有者
+    - 支持飞书事件订阅 ``url_verification`` 握手回显
+    """
+    source = session.get(ReportDataSource, source_id)
+    if not source:
+        raise HTTPException(status_code=401, detail="业务数据接入凭据无效")
+    if source.connection_mode not in {"api", "webhook"}:
+        raise HTTPException(status_code=409, detail="该数据源不接受 IM 推送")
+    if not _validate_ingest_token_ok(source, token or header_token):
+        raise HTTPException(status_code=401, detail="业务数据接入凭据无效")
+
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        payload = None
+
+    # 飞书事件订阅握手：原样回显 challenge
+    if isinstance(payload, dict) and payload.get("type") == "url_verification":
+        return {"challenge": payload.get("challenge", "")}
+
+    extracted = _extract_im_message(payload)
+    if not extracted:
+        raise HTTPException(status_code=422, detail="无法从请求中解析出文本消息")
+    text, msg_id, sender = extracted
+
+    batch_id = f"im-{new_id()}"
+    external_id = msg_id or hashlib.sha256(f"{source.id}:{text}".encode("utf-8")).hexdigest()[:32]
+    entry = ReportRecordInput(
+        external_id=external_id,
+        record_type="im_message",
+        title=text.splitlines()[0][:80] or text[:80],
+        content=text[:8000],
+        payload={"sender": sender, "channel": "im_webhook"} if sender else {"channel": "im_webhook"},
+    )
+    record, created, alerts = _ingest_record(
+        session,
+        source=source,
+        entry=entry,
+        batch_id=batch_id,
+        actor_id=None,
+        channel="im_webhook",
+    )
+    session.commit()
+    if notify and created:
+        from api.notifications import dispatch_to_targets, push_notification
+        from db.models import Workspace
+
+        workspace = session.get(Workspace, source.workspace_id)
+        if workspace:
+            push_notification(
+                session,
+                source.workspace_id,
+                workspace.owner_id,
+                "alert" if alerts else "task",
+                f"IM 消息：{entry.title}" if alerts else f"IM 消息已归档：{entry.title}",
+                body=("；".join(alert.title for alert in alerts[:3]) if alerts else text[:120]),
+                link="report",
+                ref_id=record.id,
+            )
+            session.commit()
+            dispatch_to_targets(
+                session,
+                source.workspace_id,
+                f"IM 消息：{entry.title}",
+                ("；".join(alert.title for alert in alerts[:3]) if alerts else text[:120]),
+            )
+    return {
+        "ok": True,
+        "created": created,
+        "record_id": record.id,
+        "alert_count": len(alerts),
+    }
+
+
 @router.post("/ingest/{source_id}", status_code=status.HTTP_201_CREATED, name="report_ingest_record")
 def ingest_authorised_report_record(
     source_id: str,
