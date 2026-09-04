@@ -1224,6 +1224,13 @@ def delete_knowledge_base(
 ) -> None:
     kb = _knowledge_base_or_404(session, context.workspace.id, kb_id)
     _require_workspace_manager(context)
+    # 级联删除向量切块，避免残留块继续被检索召回
+    from db.report_models import KnowledgeChunk
+
+    for chunk in session.exec(
+        select(KnowledgeChunk).where(KnowledgeChunk.kb_id == kb.id)
+    ).all():
+        session.delete(chunk)
     session.delete(kb)
     _write_report_audit(
         session,

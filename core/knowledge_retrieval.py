@@ -155,16 +155,26 @@ def retrieve_knowledge(
 
 
 def _chunk_scores(session: Session, workspace_id: str, query_vector: list[float], limit: int) -> list[dict[str, Any]]:
-    """对当前工作区的知识块做余弦打分，返回按分数降序的 KB 命中。"""
+    """对当前工作区的知识块做余弦打分，返回按分数降序的 KB 命中。
+
+    文档更新时间晚于切块生成时间的过期块会被跳过（等待重新索引），
+    避免召回已过时的内容。
+    """
     chunks = session.exec(
         select(KnowledgeChunk).where(KnowledgeChunk.workspace_id == workspace_id)
     ).all()
     kb_rows = session.exec(
         select(KnowledgeBase).where(KnowledgeBase.workspace_id == workspace_id)
     ).all()
-    titles = {kb.id: kb.title for kb in kb_rows}
+    meta = {kb.id: (kb.title, kb.updated_at) for kb in kb_rows}
     scored: list[tuple[float, str, str, str]] = []
     for chunk in chunks:
+        meta_entry = meta.get(chunk.kb_id)
+        if meta_entry is None:
+            continue  # 知识库已删除的孤儿块
+        title, kb_updated_at = meta_entry
+        if chunk.kb_updated_at and kb_updated_at and chunk.kb_updated_at < kb_updated_at:
+            continue  # 文档已更新但尚未完成重新索引
         try:
             vector = json.loads(chunk.embedding_json or "[]")
         except ValueError:
@@ -172,7 +182,6 @@ def _chunk_scores(session: Session, workspace_id: str, query_vector: list[float]
         score = cosine_similarity(query_vector, vector)
         if score <= 0.05:
             continue
-        title = titles.get(chunk.kb_id, "知识库")
         snippet = chunk.content[:_SNIPPET_WINDOW]
         scored.append((score, chunk.kb_id, title, snippet))
     scored.sort(key=lambda item: item[0], reverse=True)
