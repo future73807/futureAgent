@@ -43,3 +43,6 @@ uploads/*
 # 系统
 .DS_Store
 Thumbs.db
+
+# 本地插件运行时目录
+.video_agent/
