@@ -95,6 +95,9 @@ PRE_AGENT_RUN_MCP_MISSING_COLUMNS = {
 # 滚动摘要是 conversations 的最新增量列；旧库识别时统一忽略。
 PRE_SUMMARY_MISSING_COLUMNS = {"conversations": {"summary"}}
 
+# 批次标识是 agent_runs 的最新增量列；旧库识别时统一忽略。
+PRE_BATCH_MISSING_COLUMNS = {"agent_runs": {"batch_id"}}
+
 # 增量特性表 → 引入它的迁移版本（从新到旧）。无 alembic_version 的库按
 # "已拥有的最高阶梯表" 判定其实际版本，避免误判到过旧的基线重建全库。
 ADDITIVE_STEPS = [
@@ -163,7 +166,11 @@ def _upgrade_schema() -> None:
             command.stamp(alembic_config, "head")
             return
         # 无版本表的近期安装：按已拥有的最高增量表判定版本（新→旧）。
-        legacy_ignored = _ignored_columns(PRE_AGENT_RUN_TRACE_MISSING_COLUMNS, PRE_SUMMARY_MISSING_COLUMNS)
+        legacy_ignored = _ignored_columns(
+            PRE_AGENT_RUN_TRACE_MISSING_COLUMNS,
+            PRE_SUMMARY_MISSING_COLUMNS,
+            PRE_BATCH_MISSING_COLUMNS,
+        )
         for revision, marker_tables in ADDITIVE_STEPS:
             if _matches_schema(inspector, set(marker_tables), ignored_columns=legacy_ignored):
                 command.stamp(alembic_config, revision)
@@ -178,19 +185,19 @@ def _upgrade_schema() -> None:
             elif _matches_schema(
                 inspector,
                 core_current,
-                ignored_columns=_ignored_columns(PRE_AGENT_RUN_MCP_MISSING_COLUMNS, PRE_SUMMARY_MISSING_COLUMNS),
+                ignored_columns=_ignored_columns(PRE_AGENT_RUN_MCP_MISSING_COLUMNS, PRE_SUMMARY_MISSING_COLUMNS, PRE_BATCH_MISSING_COLUMNS),
             ):
                 command.stamp(alembic_config, "20260726_04")
             elif not (existing_tables & REPORT_AGENT_TABLES) and _matches_schema(
                 inspector,
                 pre_report_tables,
-                ignored_columns=_ignored_columns(PRE_AGENT_RUN_MCP_MISSING_COLUMNS, PRE_SUMMARY_MISSING_COLUMNS),
+                ignored_columns=_ignored_columns(PRE_AGENT_RUN_MCP_MISSING_COLUMNS, PRE_SUMMARY_MISSING_COLUMNS, PRE_BATCH_MISSING_COLUMNS),
             ):
                 command.stamp(alembic_config, "20260725_03")
             elif _matches_schema(
                 inspector,
                 non_agent_tables,
-                ignored_columns=_ignored_columns(PRE_BUSINESS_MISSING_COLUMNS, PRE_SUMMARY_MISSING_COLUMNS),
+                ignored_columns=_ignored_columns(PRE_BUSINESS_MISSING_COLUMNS, PRE_SUMMARY_MISSING_COLUMNS, PRE_BATCH_MISSING_COLUMNS),
             ):
                 # The immediately preceding commercial schema has all governed
                 # AgentRun columns but not the operating-agent tables.
@@ -200,7 +207,7 @@ def _upgrade_schema() -> None:
                 if _matches_schema(
                     inspector,
                     legacy_tables,
-                    ignored_columns=_ignored_columns(PRE_BUSINESS_MISSING_COLUMNS, PRE_SUMMARY_MISSING_COLUMNS),
+                    ignored_columns=_ignored_columns(PRE_BUSINESS_MISSING_COLUMNS, PRE_SUMMARY_MISSING_COLUMNS, PRE_BATCH_MISSING_COLUMNS),
                 ):
                     # The pre-Alembic product schema is known and complete. Stamp
                     # that immutable baseline, then apply additive revisions.

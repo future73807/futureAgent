@@ -180,6 +180,8 @@ class AgentRun(SQLModel, table=True):
     # NULL marks executions created before MCP selection was persisted.  New
     # runs always write a JSON list, including an explicit empty list.
     mcp_servers_json: str | None = Field(default=None, max_length=4000)
+    # 同一批并行编排执行的批次标识；单独执行的 run 为空。用于整批跟踪与批量取消。
+    batch_id: str | None = Field(default=None, max_length=64, index=True)
     # As with MCP selection, NULL distinguishes historical runs from a new run
     # that completed without calling a tool (stored as an explicit ``[]``).
     # Each trace entry is bounded before persistence so provider/tool output

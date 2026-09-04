@@ -426,6 +426,7 @@ def _agent_run_data(run: AgentRun) -> dict[str, Any]:
         "task_id": run.task_id,
         "plan_id": run.plan_id,
         "step_id": run.step_id,
+        "batch_id": run.batch_id,
         "requested_by": run.requested_by,
         "model_id": run.model_id,
         "skill_name": run.skill_name,
@@ -2636,6 +2637,269 @@ async def execute_task_with_agent(
             yield _sse_error(exc)
 
     return EventSourceResponse(stream(), ping=15, headers={"X-Accel-Buffering": "no"})
+
+
+class BatchExecuteRequest(RequestModel):
+    model_id: str | None = Field(default=None, max_length=120)
+    skill_name: str = Field(default="chatbot", max_length=120)
+    mcp_servers: list[str] = Field(default_factory=list, max_length=10)
+    step_ids: list[str] | None = Field(default=None, max_length=20, description="缺省时并行执行计划中全部待执行步骤")
+
+
+class BatchCancelRequest(RequestModel):
+    batch_id: str = Field(min_length=1, max_length=64)
+
+
+@router.post("/v1/tasks/{task_id}/execute-parallel")
+async def execute_task_steps_in_parallel(
+    task_id: str,
+    request: BatchExecuteRequest,
+    context: WorkspaceContext = Depends(get_workspace_context),
+    session: Session = Depends(get_session),
+):
+    """并行编排：一次执行计划中的多个步骤，每个步骤一个独立 agent run。
+
+    - 整个批次占用一个工作区并发槽（批次运行期间单步执行会 429，直至批次结束）。
+    - 每个步骤使用独立的 LangGraph 线程，避免并行写同一会话记忆。
+    - SSE 事件：meta（批次与 run 清单）→ step-token（逐步骤 token）→
+      step-done / step-error（单步终态）→ done（全部结束）。
+    """
+    task = _task_or_404(session, context.workspace.id, task_id)
+    plan = session.exec(select(WorkPlan).where(WorkPlan.task_id == task.id)).first()
+    if not plan or plan.status not in {"approved", "in_progress"}:
+        raise HTTPException(status_code=409, detail="请先批准工作计划，再启动并行执行")
+
+    steps = session.exec(
+        select(WorkPlanStep)
+        .where(WorkPlanStep.plan_id == plan.id)
+        .order_by(WorkPlanStep.position)
+    ).all()
+    if request.step_ids:
+        wanted = set(request.step_ids)
+        steps = [step for step in steps if step.id in wanted]
+        missing = wanted - {step.id for step in steps}
+        if missing:
+            raise HTTPException(status_code=404, detail="部分工作计划步骤不存在")
+    executable = [step for step in steps if step.status in {"pending", "running"}]
+    if not executable:
+        raise HTTPException(status_code=422, detail="没有可并行执行的计划步骤（步骤需为待执行或执行中）")
+    if not _can_manage_task_execution(context, task, None):
+        raise HTTPException(status_code=403, detail="没有执行该任务步骤的权限")
+
+    model_id = request.model_id or settings.default_model
+    engine = get_agent_engine()
+    if not engine.skill_manager.get_skill(request.skill_name):
+        raise HTTPException(status_code=404, detail=f"技能“{request.skill_name}”不存在")
+    _validate_mcp_server_selection(engine, request.mcp_servers)
+    effective_role = _authorize_agent_config(context, model_id, request.skill_name, request.mcp_servers)
+    _ensure_model_ready(model_id)
+
+    _expire_stale_agent_runs(session, context.workspace.id)
+    max_concurrent = max(1, settings.max_concurrent_agent_runs_per_workspace)
+    active_runs = session.exec(
+        select(AgentRun).where(
+            AgentRun.workspace_id == context.workspace.id,
+            AgentRun.status == "running",
+        )
+    ).all()
+    if len(active_runs) >= max_concurrent:
+        raise HTTPException(
+            status_code=429,
+            detail=f"当前工作区已达到 {max_concurrent} 个 AI 执行的并发上限，请等待运行结束或取消正在运行的执行。",
+        )
+
+    batch_id = new_id()
+    runs: list[tuple[AgentRun, WorkPlanStep, str]] = []
+    for step in executable:
+        run = AgentRun(
+            workspace_id=context.workspace.id,
+            task_id=task.id,
+            plan_id=plan.id,
+            step_id=step.id,
+            requested_by=context.user.id,
+            model_id=model_id,
+            skill_name=request.skill_name,
+            mcp_servers_json=json.dumps(request.mcp_servers, ensure_ascii=False),
+            tool_trace_json="[]",
+            batch_id=batch_id,
+        )
+        if step.status == "pending":
+            step.status = "running"
+            step.updated_at = now_utc()
+            session.add(step)
+        session.add(run)
+        runs.append((run, step, _task_execution_prompt(session, context.workspace.id, task, plan, step)))
+    plan.status = "in_progress"
+    plan.updated_at = now_utc()
+    session.add(plan)
+    session.flush()
+    for run, _step, _prompt in runs:
+        write_audit(
+            session,
+            actor_id=context.user.id,
+            workspace_id=context.workspace.id,
+            action="agent_run.started",
+            target_type="agent_run",
+            target_id=run.id,
+            metadata={"task_id": task.id, "step_id": run.step_id, "model_id": model_id, "batch_id": batch_id, "parallel": True},
+        )
+    session.commit()
+
+    checkpointer = await get_checkpointer()
+
+    async def _worker(run: AgentRun, step: WorkPlanStep, prompt: str, queue: asyncio.Queue) -> None:
+        collected: list[str] = []
+        config = {
+            "model_id": model_id,
+            "skill_name": request.skill_name,
+            "mcp_servers": request.mcp_servers,
+            "workspace_id": context.workspace.id,
+            # 并行步骤各自独立线程：并发写同一线程会破坏 LangGraph 状态。
+            "thread_id": f"governed-task-{task.id}-step-{step.id}",
+            "tool_trace": [],
+        }
+        try:
+            async with asyncio.timeout(max(1, settings.agent_run_timeout_seconds)):
+                async for chunk in engine.run(
+                    user_role=effective_role, query=prompt, config=config, checkpointer=checkpointer
+                ):
+                    if _run_cancelled(session, run):
+                        break
+                    collected.append(chunk)
+                    await queue.put(("step-token", json.dumps({"run_id": run.id, "step_id": step.id, "chunk": chunk}, default=str)))
+            if _run_cancelled(session, run):
+                _save_agent_run_progress(session, run, collected, config["tool_trace"])
+                session.commit()
+                await queue.put(("step-cancelled", json.dumps({"run_id": run.id, "step_id": step.id}, default=str)))
+                return
+            run.status = "succeeded"
+            _save_agent_run_progress(session, run, collected, config["tool_trace"])
+            run.completed_at = now_utc()
+            write_audit(
+                session,
+                actor_id=context.user.id,
+                workspace_id=context.workspace.id,
+                action="agent_run.completed",
+                target_type="agent_run",
+                target_id=run.id,
+                metadata={"status": "succeeded", "step_id": step.id, "batch_id": batch_id},
+            )
+            session.commit()
+            record_agent_run("succeeded")
+            await queue.put(("step-done", json.dumps({"run_id": run.id, "step_id": step.id}, default=str)))
+        except Exception as exc:  # noqa: BLE001 - 单步失败不影响其它并行步骤
+            if _run_cancelled(session, run):
+                _save_agent_run_progress(session, run, collected, config["tool_trace"])
+                session.commit()
+                await queue.put(("step-cancelled", json.dumps({"run_id": run.id, "step_id": step.id}, default=str)))
+                return
+            run.status = "failed"
+            _save_agent_run_progress(session, run, collected, config["tool_trace"])
+            run.error_message = (
+                f"AI 执行超过 {max(1, settings.agent_run_timeout_seconds)} 秒限制，请检查模型路由后重试。"
+                if isinstance(exc, TimeoutError)
+                else "AI 执行未完成，请检查模型路由后重试。"
+            )
+            run.completed_at = now_utc()
+            push_notification(
+                session,
+                context.workspace.id,
+                run.requested_by,
+                "run",
+                f"并行执行需要处理：{task.title}",
+                body=run.error_message,
+                link="work",
+                ref_id=run.id,
+            )
+            write_audit(
+                session,
+                actor_id=context.user.id,
+                workspace_id=context.workspace.id,
+                action="agent_run.failed",
+                target_type="agent_run",
+                target_id=run.id,
+                metadata={"step_id": step.id, "batch_id": batch_id},
+            )
+            session.commit()
+            record_agent_run("failed")
+            detail = json.dumps({"run_id": run.id, "step_id": step.id, "message": run.error_message}, default=str)
+            await queue.put(("step-error", detail))
+
+    async def stream() -> AsyncGenerator[dict[str, str], None]:
+        queue: asyncio.Queue = asyncio.Queue()
+        yield {
+            "event": "meta",
+            "data": json.dumps(
+                {
+                    "batch_id": batch_id,
+                    "runs": [_agent_run_data(run) for run, _step, _prompt in runs],
+                },
+                default=str,
+            ),
+        }
+        workers = [asyncio.create_task(_worker(run, step, prompt, queue)) for run, step, prompt in runs]
+        finished = 0
+        try:
+            while finished < len(workers):
+                event, data = await queue.get()
+                if event in {"step-done", "step-cancelled", "step-error"}:
+                    finished += 1
+                if event == "step-error":
+                    yield {"event": "step-error", "data": data}
+                else:
+                    yield {"event": event, "data": data}
+            yield {
+                "event": "done",
+                "data": json.dumps({"batch_id": batch_id, "total": len(workers)}, default=str),
+            }
+        finally:
+            for worker in workers:
+                if not worker.done():
+                    worker.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+
+    return EventSourceResponse(stream(), ping=15, headers={"X-Accel-Buffering": "no"})
+
+
+@router.post("/v1/tasks/{task_id}/runs/cancel-batch")
+def cancel_task_run_batch(
+    task_id: str,
+    request: BatchCancelRequest,
+    context: WorkspaceContext = Depends(get_workspace_context),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """取消一个并行批次中全部仍在运行的 run（逐个走既有的持久化取消路径）。"""
+    task = _task_or_404(session, context.workspace.id, task_id)
+    if not _can_manage_task_execution(context, task, None):
+        raise HTTPException(status_code=403, detail="没有取消该任务 AI 执行的权限")
+    running = session.exec(
+        select(AgentRun).where(
+            AgentRun.workspace_id == context.workspace.id,
+            AgentRun.task_id == task.id,
+            AgentRun.batch_id == request.batch_id,
+            AgentRun.status == "running",
+        )
+    ).all()
+    cancelled = 0
+    for run in running:
+        run.status = "cancelled"
+        run.completed_at = now_utc()
+        run.error_message = "并行批次已被取消。"
+        session.add(run)
+        write_audit(
+            session,
+            actor_id=context.user.id,
+            workspace_id=context.workspace.id,
+            action="agent_run.cancelled",
+            target_type="agent_run",
+            target_id=run.id,
+            metadata={"task_id": task.id, "step_id": run.step_id, "batch_id": request.batch_id},
+        )
+        cancelled += 1
+    if cancelled:
+        session.commit()
+        record_agent_run("cancelled")
+    return {"cancelled": cancelled}
 
 
 @router.post("/v1/attachments", status_code=status.HTTP_201_CREATED)

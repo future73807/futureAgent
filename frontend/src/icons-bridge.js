@@ -34,6 +34,7 @@ export { default as SendOutlined } from '@ant-design/icons/es/icons/SendOutlined
 export { default as SettingOutlined } from '@ant-design/icons/es/icons/SettingOutlined'
 export { default as StopOutlined } from '@ant-design/icons/es/icons/StopOutlined'
 export { default as TeamOutlined } from '@ant-design/icons/es/icons/TeamOutlined'
+export { default as ThunderboltOutlined } from '@ant-design/icons/es/icons/ThunderboltOutlined'
 export { default as ToolOutlined } from '@ant-design/icons/es/icons/ToolOutlined'
 export { default as BookOutlined } from '@ant-design/icons/es/icons/BookOutlined'
 export { default as FileTextOutlined } from '@ant-design/icons/es/icons/FileTextOutlined'

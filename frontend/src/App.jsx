@@ -59,6 +59,7 @@ import {
   SendOutlined,
   SettingOutlined,
   TeamOutlined,
+  ThunderboltOutlined,
   UserOutlined,
 } from '@ant-design/icons'
 import zhCN from 'antd/es/locale/zh_CN'
@@ -608,6 +609,9 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
   const [running, setRunning] = useState(false)
   const [liveOutput, setLiveOutput] = useState('')
   const [activeRunId, setActiveRunId] = useState('')
+  const [batchOutput, setBatchOutput] = useState([])
+  const [batchRunning, setBatchRunning] = useState(false)
+  const [activeBatchId, setActiveBatchId] = useState('')
   const executionAbortRef = useRef(null)
   const cancellationRequestedRef = useRef(false)
   const runsRequestIdRef = useRef(0)
@@ -643,7 +647,7 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
   useEffect(() => () => onRunningChange?.(false), [onRunningChange])
   useEffect(() => () => executionAbortRef.current?.abort(), [])
   const execute = async (retryRun = null) => {
-    if (!plan || running || (!retryRun && (!modelId || !skillName))) return
+    if (!plan || running || batchRunning || (!retryRun && (!modelId || !skillName))) return
     const executionTaskId = taskId
     const retryMcpServers = retryRun ? recordedRunMcpServers(retryRun) : null
     const execution = retryRun ? {
@@ -714,8 +718,78 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
     return { key: run.id, label: `${readableStatus(run.status)} · ${formatDateTime(run.started_at)}`, children: <Space direction="vertical" size="small" style={{ width: '100%' }}><Text type="secondary">{run.model_id} · {skillDisplayName(run.skill_name)} · 第 {run.attempt || 1} 次尝试</Text>{run.output ? <pre className="attachment-preview">{run.output}</pre> : <Text type="secondary">{readableRunError(run.error_message)}</Text>}<Space>{['failed', 'cancelled'].includes(run.status) && canWrite && (hasRecordedMcpConfig ? retryButton : <Tooltip title="历史记录未包含 MCP 配置，重试时会使用当前工具选择。">{retryButton}</Tooltip>)}{run.status === 'running' && canWrite && <Button size="small" danger onClick={() => cancelRun(run.id)} disabled={running && activeRunId && activeRunId !== run.id}>取消执行</Button>}</Space></Space> }
   })
   const executable = Boolean(plan && ['approved', 'in_progress'].includes(plan.status) && canWrite && models.some((item) => item.id === modelId && item.ready) && skillName && stepId)
-  return <Card className="work-results" title="AI 执行" extra={<Space><Button type="primary" icon={<RobotOutlined />} loading={running} disabled={!executable} onClick={() => execute()}>执行选中步骤</Button>{running && activeRunId && <Button danger icon={<StopOutlined />} onClick={() => cancelRun(activeRunId)}>取消</Button>}</Space>}>
-    <Space direction="vertical" size="small" style={{ width: '100%' }}><Text type="secondary">AI 只会接收已批准任务、选中计划步骤和附件中的有限文本上下文；结果保存后必须由人工审核，不会自动通过步骤。</Text><Flex gap={8} wrap="wrap" className="execution-controls"><Select value={stepId || undefined} onChange={setStepId} placeholder="选择计划步骤" options={(plan?.steps || []).filter((step) => step.status !== 'done').map((step) => ({ value: step.id, label: `${stepStatusLabels[step.status] || step.status} · ${step.title}` }))} /><Select value={modelId || undefined} onChange={setModelId} placeholder="选择模型" options={models.map((item) => ({ value: item.id, label: `${item.id}${item.ready ? '' : '（未就绪）'}`, disabled: !item.ready }))} /><Select value={skillName || undefined} onChange={setSkillName} placeholder="选择技能" options={skills.map((item) => ({ value: item.name, label: skillDisplayName(item.name) }))} /><Select mode="multiple" value={selectedMcpServers} onChange={setSelectedMcpServers} maxTagCount="responsive" placeholder={mcpServers.length ? '按需启用 MCP 工具' : '暂无 MCP 工具'} disabled={!mcpServers.length} options={mcpServers.map((item) => ({ value: item.name || item, label: mcpOptionLabel(item), title: mcpOptionLabel(item), tools: Array.isArray(item.tools) ? item.tools : [], disabled: mcpServerUnavailable(item) }))} optionRender={(option) => <div className="mcp-option"><span>{option.label}</span><small>{option.data?.tools?.length ? option.data.tools.join(' · ') : option.data?.disabled ? '连接不可用' : '工具清单将在连接后显示'}</small></div>} /></Flex>{liveOutput && <pre className="attachment-preview">{liveOutput}</pre>}{runItems.length ? <Tabs size="small" items={runItems} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="此任务尚无 AI 执行记录" />}</Space>
+  const pendingSteps = (plan?.steps || []).filter((step) => step.status === 'pending')
+  const batchExecutable = Boolean(plan && ['approved', 'in_progress'].includes(plan.status) && canWrite && pendingSteps.length >= 2 && models.some((item) => item.id === modelId && item.ready) && skillName)
+  const executeParallel = async () => {
+    if (!batchExecutable || batchRunning) return
+    const executionTaskId = taskId
+    const controller = new AbortController()
+    executionAbortRef.current = controller
+    const stepName = (stepId) => plan.steps.find((step) => step.id === stepId)?.title || stepId
+    setBatchOutput(pendingSteps.map((step) => ({ stepId: step.id, title: step.title, status: 'running', text: '' })))
+    setBatchRunning(true)
+    setActiveBatchId('')
+    try {
+      await streamSSE(
+        `/api/v1/tasks/${executionTaskId}/execute-parallel`,
+        { model_id: modelId, skill_name: skillName, mcp_servers: selectedMcpServers },
+        {
+          signal: controller.signal,
+          onEvent: (event, data) => {
+            if (event === 'error') {
+              let detail = data
+              try { detail = JSON.parse(data).detail || data } catch { /* plain SSE error */ }
+              throw new Error(detail)
+            }
+            let parsed = null
+            try { parsed = JSON.parse(data) } catch { return }
+            if (event === 'meta') {
+              setActiveBatchId(parsed.batch_id || '')
+              setBatchOutput((previous) => previous.map((item) => ({
+                ...item,
+                runId: (parsed.runs || []).find((run) => run.step_id === item.stepId)?.id || '',
+              })))
+              return
+            }
+            const stepId = parsed.step_id
+            setBatchOutput((previous) => previous.map((item) => {
+              if (item.stepId !== stepId) return item
+              if (event === 'step-token') return { ...item, text: item.text + (parsed.chunk || '') }
+              if (event === 'step-done') return { ...item, status: 'succeeded' }
+              if (event === 'step-cancelled') return { ...item, status: 'cancelled' }
+              if (event === 'step-error') return { ...item, status: 'failed', error: parsed.message }
+              return item
+            }))
+          },
+        },
+      )
+      message.success('并行批次执行完成，请逐条审核结果')
+      await Promise.all([loadRuns(executionTaskId), onPlanRefresh?.(executionTaskId)])
+      setBatchOutput([])
+    } catch (error) {
+      message.error(readableError(error))
+      await loadRuns(executionTaskId)
+      await onPlanRefresh?.(executionTaskId)
+    } finally {
+      if (executionAbortRef.current === controller) executionAbortRef.current = null
+      setBatchRunning(false)
+    }
+  }
+  const cancelBatch = async () => {
+    if (!activeBatchId || !batchRunning) return
+    try {
+      const result = await apiFetch(`/api/v1/tasks/${taskId}/runs/cancel-batch`, { method: 'POST', body: JSON.stringify({ batch_id: activeBatchId }) })
+      message.info(`已请求取消 ${result.cancelled} 个并行执行`)
+      executionAbortRef.current?.abort()
+      await loadRuns(taskId)
+    } catch (error) { message.error(readableError(error)) }
+  }
+  return <Card className="work-results" title="AI 执行" extra={<Space><Button type="primary" icon={<RobotOutlined />} loading={running} disabled={!executable} onClick={() => execute()}>执行选中步骤</Button>{pendingSteps.length >= 2 && <Tooltip title={`并行执行 ${pendingSteps.length} 个待执行步骤，整批占用一个并发槽`}><Button icon={<ThunderboltOutlined />} loading={batchRunning} disabled={!batchExecutable || running} onClick={executeParallel}>并行执行（{pendingSteps.length} 步）</Button></Tooltip>}{batchRunning && activeBatchId && <Button danger onClick={cancelBatch}>取消整批</Button>}{running && activeRunId && <Button danger icon={<StopOutlined />} onClick={() => cancelRun(activeRunId)}>取消</Button>}</Space>}>
+    <Space direction="vertical" size="small" style={{ width: '100%' }}><Text type="secondary">AI 只会接收已批准任务、选中计划步骤和附件中的有限文本上下文；结果保存后必须由人工审核，不会自动通过步骤。</Text>{batchRunning && <Alert type="info" showIcon message={`并行批次执行中：${batchOutput.filter((item) => item.status !== 'running').length}/${batchOutput.length} 个步骤已完成`} />}{batchOutput.length > 0 && <div className="batch-output">{batchOutput.map((item) => (
+      <Card key={item.stepId} size="small" className={`batch-step-card batch-step-${item.status}`} title={<Space size={6}>{item.title}<Tag color={item.status === 'succeeded' ? 'success' : item.status === 'failed' ? 'error' : item.status === 'cancelled' ? 'default' : 'processing'}>{item.status === 'running' ? '执行中' : item.status === 'succeeded' ? '已完成' : item.status === 'failed' ? '失败' : '已取消'}</Tag></Space>} extra={item.error ? <Text type="danger">{item.error}</Text> : undefined}>
+        {item.text ? <pre className="attachment-preview">{item.text}</pre> : <Text type="secondary">等待模型输出…</Text>}
+      </Card>
+    ))}</div>}<Flex gap={8} wrap="wrap" className="execution-controls"><Select value={stepId || undefined} onChange={setStepId} placeholder="选择计划步骤" options={(plan?.steps || []).filter((step) => step.status !== 'done').map((step) => ({ value: step.id, label: `${stepStatusLabels[step.status] || step.status} · ${step.title}` }))} /><Select value={modelId || undefined} onChange={setModelId} placeholder="选择模型" options={models.map((item) => ({ value: item.id, label: `${item.id}${item.ready ? '' : '（未就绪）'}`, disabled: !item.ready }))} /><Select value={skillName || undefined} onChange={setSkillName} placeholder="选择技能" options={skills.map((item) => ({ value: item.name, label: skillDisplayName(item.name) }))} /><Select mode="multiple" value={selectedMcpServers} onChange={setSelectedMcpServers} maxTagCount="responsive" placeholder={mcpServers.length ? '按需启用 MCP 工具' : '暂无 MCP 工具'} disabled={!mcpServers.length} options={mcpServers.map((item) => ({ value: item.name || item, label: mcpOptionLabel(item), title: mcpOptionLabel(item), tools: Array.isArray(item.tools) ? item.tools : [], disabled: mcpServerUnavailable(item) }))} optionRender={(option) => <div className="mcp-option"><span>{option.label}</span><small>{option.data?.tools?.length ? option.data.tools.join(' · ') : option.data?.disabled ? '连接不可用' : '工具清单将在连接后显示'}</small></div>} /></Flex>{liveOutput && <pre className="attachment-preview">{liveOutput}</pre>}{runItems.length ? <Tabs size="small" items={runItems} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="此任务尚无 AI 执行记录" />}</Space>
   </Card>
 }
 

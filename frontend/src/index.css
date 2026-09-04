@@ -693,6 +693,13 @@ html[data-theme='dark'] .markdown-body code { background: rgba(134, 148, 214, .1
 html[data-theme='dark'] .markdown-body pre { background: #0d1322; }
 html[data-theme='dark'] .markdown-body a { color: #9daaff; }
 
+/* Parallel batch execution */
+.batch-output { display: grid; gap: 10px; }
+.batch-step-card { border-radius: 10px !important; }
+.batch-step-card .ant-card-head { min-height: auto; }
+.batch-step-failed { border-color: #edb9b9 !important; }
+html[data-theme='dark'] .batch-step-failed { border-color: #6b3540 !important; }
+
 @media (max-width: 1180px) {
   .kanban-grid { grid-template-columns: repeat(5, 225px); }
   .business-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
