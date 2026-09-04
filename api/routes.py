@@ -375,8 +375,8 @@ def _project_data(project: Project) -> dict[str, Any]:
     }
 
 
-def _task_data(task: Task) -> dict[str, Any]:
-    return {
+def _task_data(task: Task, *, comment_count: int | None = None) -> dict[str, Any]:
+    data = {
         "id": task.id,
         "workspace_id": task.workspace_id,
         "project_id": task.project_id,
@@ -392,6 +392,9 @@ def _task_data(task: Task) -> dict[str, Any]:
         "created_at": task.created_at,
         "updated_at": task.updated_at,
     }
+    if comment_count is not None:
+        data["comment_count"] = comment_count
+    return data
 
 
 def _conversation_data(conversation: Conversation) -> dict[str, Any]:
@@ -1435,7 +1438,18 @@ def list_tasks(
     if assignee_id:
         statement = statement.where(Task.assignee_id == assignee_id)
     tasks = session.exec(statement.order_by(Task.sort_order, Task.updated_at.desc())).all()
-    return {"tasks": [_task_data(task) for task in tasks]}
+    task_ids = [task.id for task in tasks]
+    comment_counts: dict[str, int] = {}
+    if task_ids:
+        from sqlalchemy import func
+
+        counts = session.exec(
+            select(TaskComment.task_id, func.count(TaskComment.id))
+            .where(TaskComment.task_id.in_(task_ids))
+            .group_by(TaskComment.task_id)
+        ).all()
+        comment_counts = dict(counts)
+    return {"tasks": [_task_data(task, comment_count=comment_counts.get(task.id, 0)) for task in tasks]}
 
 
 @router.post("/v1/tasks", status_code=status.HTTP_201_CREATED)
@@ -2022,6 +2036,19 @@ def workspace_search(
     for attachment in attachments:
         results.append(
             {"type": "attachment", "id": attachment.id, "title": attachment.original_name, "snippet": f"{max(1, attachment.size_bytes // 1024)} KB", "updated_at": attachment.created_at, "task_id": attachment.task_id, "conversation_id": attachment.conversation_id}
+        )
+    # 知识库文档（标题与正文）
+    from db.report_models import KnowledgeBase
+
+    for kb in session.exec(
+        select(KnowledgeBase)
+        .where(KnowledgeBase.workspace_id == context.workspace.id)
+        .where(KnowledgeBase.title.ilike(pattern) | KnowledgeBase.content.ilike(pattern))
+        .order_by(KnowledgeBase.updated_at.desc())
+        .limit(limit)
+    ).all():
+        results.append(
+            {"type": "knowledge_base", "id": kb.id, "title": kb.title, "snippet": kb.description or kb.content[:120], "updated_at": kb.updated_at}
         )
 
     results.sort(key=lambda item: item["updated_at"], reverse=True)
@@ -3535,6 +3562,9 @@ def admin_overview(
             "tasks": len(session.exec(select(Task.id)).all()),
             "conversations": len(session.exec(select(Conversation.id)).all()),
             "attachments": len(session.exec(select(Attachment.id)).all()),
+            "deliverables": len(session.exec(select(Deliverable.id)).all()),
+            "notifications": len(session.exec(select(Notification.id)).all()),
+            "automation_jobs": len(session.exec(select(ScheduledJob.id)).all()),
             "models": len(ModelHub.list_supported_models()),
             "skills": len(SkillManager().list_skills()),
             "roles": len(AuthManager().get_roles()),

@@ -80,6 +80,7 @@ import {
 import { mcpOptionLabel, mcpServerUnavailable, skillDisplayName } from './ui-labels.js'
 import { applyThemeMode, getThemeMode, toggleThemeMode } from './theme.js'
 import { validateUpload } from './upload-guard.js'
+import ErrorBoundary from './ErrorBoundary.jsx'
 
 const { Header, Sider, Content } = Layout
 const { Title, Text, Paragraph } = Typography
@@ -253,7 +254,14 @@ function TaskCard({ task, members, onSelect, onMove }) {
       </Flex>
       {task.description && <Paragraph ellipsis={{ rows: 2 }} type="secondary" className="task-description">{task.description}</Paragraph>}
       <Flex justify="space-between" align="center" className="task-meta">
-        <Space size={4}>{(task.labels || []).slice(0, 2).map((label) => <Tag key={label} color="blue">{label}</Tag>)}</Space>
+        <Space size={4}>
+          {(task.labels || []).slice(0, 2).map((label) => <Tag key={label} color="blue">{label}</Tag>)}
+          {task.comment_count > 0 && (
+            <Tooltip title={`${task.comment_count} 条评论`}>
+              <Tag icon={<MessageOutlined />} color="default">{task.comment_count}</Tag>
+            </Tooltip>
+          )}
+        </Space>
         <Space size={4}>
           {task.due_date && <Tag icon={<ClockCircleOutlined />} color="default">{String(task.due_date).slice(5)}</Tag>}
           <Tag color={task.priority === 'urgent' ? 'red' : task.priority === 'high' ? 'orange' : 'default'}>{priorityLabels[task.priority] || task.priority}</Tag>
@@ -714,8 +722,8 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
   }
   const runItems = runs.map((run) => {
     const hasRecordedMcpConfig = recordedRunMcpServers(run) !== null
-    const retryButton = <Button size="small" onClick={() => execute(run)} disabled={running}>{hasRecordedMcpConfig ? '使用原配置重试' : '复用原模型与技能重试'}</Button>
-    return { key: run.id, label: `${readableStatus(run.status)} · ${formatDateTime(run.started_at)}`, children: <Space direction="vertical" size="small" style={{ width: '100%' }}><Text type="secondary">{run.model_id} · {skillDisplayName(run.skill_name)} · 第 {run.attempt || 1} 次尝试</Text>{run.output ? <pre className="attachment-preview">{run.output}</pre> : <Text type="secondary">{readableRunError(run.error_message)}</Text>}<Space>{['failed', 'cancelled'].includes(run.status) && canWrite && (hasRecordedMcpConfig ? retryButton : <Tooltip title="历史记录未包含 MCP 配置，重试时会使用当前工具选择。">{retryButton}</Tooltip>)}{run.status === 'running' && canWrite && <Button size="small" danger onClick={() => cancelRun(run.id)} disabled={running && activeRunId && activeRunId !== run.id}>取消执行</Button>}</Space></Space> }
+    const retryButton = <Button size="small" onClick={() => execute(run)} disabled={running || batchRunning}>{hasRecordedMcpConfig ? '使用原配置重试' : '复用原模型与技能重试'}</Button>
+    return { key: run.id, label: <Space size={6}>{run.batch_id && <Tag color="geekblue">并行批次</Tag>}{readableStatus(run.status)} · {formatDateTime(run.started_at)}</Space>, children: <Space direction="vertical" size="small" style={{ width: '100%' }}><Text type="secondary">{run.model_id} · {skillDisplayName(run.skill_name)} · 第 {run.attempt || 1} 次尝试</Text>{run.output ? <pre className="attachment-preview">{run.output}</pre> : <Text type="secondary">{readableRunError(run.error_message)}</Text>}<Space>{['failed', 'cancelled'].includes(run.status) && canWrite && (hasRecordedMcpConfig ? retryButton : <Tooltip title="历史记录未包含 MCP 配置，重试时会使用当前工具选择。">{retryButton}</Tooltip>)}{run.status === 'running' && canWrite && <Button size="small" danger onClick={() => cancelRun(run.id)} disabled={running && activeRunId && activeRunId !== run.id}>取消执行</Button>}</Space></Space> }
   })
   const executable = Boolean(plan && ['approved', 'in_progress'].includes(plan.status) && canWrite && models.some((item) => item.id === modelId && item.ready) && skillName && stepId)
   const pendingSteps = (plan?.steps || []).filter((step) => step.status === 'pending')
@@ -1287,10 +1295,12 @@ function WorkspaceApp({ session, onLogout }) {
   useEffect(() => { loadNotifications(); const timer = setInterval(loadNotifications, 60_000); return () => clearInterval(timer) }, [loadNotifications])
   const markNotificationRead = async (notification) => {
     if (notification.read) return
+    setNotifications((previous) => previous.map((item) => item.id === notification.id ? { ...item, read: true } : item))
+    setUnreadCount((count) => Math.max(0, count - 1))
     try {
       await apiFetch(`/api/v1/notifications/${notification.id}/read`, { method: 'POST', workspaceId })
       loadNotifications()
-    } catch { /* 保持未读状态即可 */ }
+    } catch { loadNotifications() }
   }
   const markAllNotificationsRead = async () => {
     try { await apiFetch('/api/v1/notifications/read-all', { method: 'POST', workspaceId }); loadNotifications() } catch { /* 忽略 */ }
@@ -1319,7 +1329,7 @@ function WorkspaceApp({ session, onLogout }) {
     setActiveWorkspaceId(nextWorkspaceId)
   }
   const refreshWorkspace = () => loadWorkspace({ quiet: true })
-  const searchTypeLabels = { task: '任务', project: '项目', conversation: '对话', message: '消息', attachment: '附件' }
+  const searchTypeLabels = { task: '任务', project: '项目', conversation: '对话', message: '消息', attachment: '附件', knowledge_base: '知识库' }
   const searchOptions = useMemo(() => searchResults.map((item) => ({
     value: `${item.type}:${item.id}`,
     label: (
@@ -1339,6 +1349,7 @@ function WorkspaceApp({ session, onLogout }) {
     else if (type === 'conversation') { selectConversation(id); setNav('chat') }
     else if (type === 'message') { if (item.conversation_id) selectConversation(item.conversation_id); setNav('chat') }
     else if (type === 'project') setNav('board')
+    else if (type === 'knowledge_base') setNav('report')
     else if (type === 'attachment') {
       if (item.task_id) { setNav('board'); setTaskDrawer(tasks.find((task) => task.id === item.task_id) || null) }
       else if (item.conversation_id) { selectConversation(item.conversation_id); setNav('chat') }
@@ -1371,7 +1382,9 @@ function WorkspaceApp({ session, onLogout }) {
   ) : (
     <>
       {workspaceError && <Alert className="workspace-error-strip" banner type="warning" showIcon message="刷新未完成，当前显示上次成功加载的数据。" action={<Button size="small" onClick={refreshWorkspace}>重试</Button>} />}
-      <Suspense fallback={<div className="workspace-loading"><Spin size="large" /></div>}>{content}</Suspense>
+      <ErrorBoundary resetToken={nav}>
+        <Suspense fallback={<div className="workspace-loading"><Spin size="large" /></div>}>{content}</Suspense>
+      </ErrorBoundary>
     </>
   )
 
