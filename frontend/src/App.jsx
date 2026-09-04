@@ -63,7 +63,7 @@ import {
   ThunderboltOutlined,
   UserOutlined,
 } from '@ant-design/icons'
-import zhCN from 'antd/es/locale/zh_CN'
+import ErrorBoundary from './ErrorBoundary.jsx'
 import {
   apiFetch,
   applyAuthSession,
@@ -80,8 +80,8 @@ import {
 } from './api.js'
 import { mcpOptionLabel, mcpServerUnavailable, skillDisplayName } from './ui-labels.js'
 import { applyThemeMode, getThemeMode, toggleThemeMode } from './theme.js'
+import { applyLocale, getLocale, t, toggleLocale, antdLocaleOf } from './i18n.js'
 import { validateUpload } from './upload-guard.js'
-import ErrorBoundary from './ErrorBoundary.jsx'
 
 const { Header, Sider, Content } = Layout
 const { Title, Text, Paragraph } = Typography
@@ -108,17 +108,25 @@ const historicRunErrorLabels = {
   'The AI execution was cancelled by an authorised workspace member.': 'AI 执行已被有权限的工作区成员取消。',
 }
 
-const navigationItems = [
-  { key: 'chat', icon: <MessageOutlined />, label: 'AI 对话' },
-  { key: 'business', icon: <BarChartOutlined />, label: '经营助手' },
-  { key: 'report', icon: <FileTextOutlined />, label: '汇报智能体' },
-  { key: 'board', icon: <ProjectOutlined />, label: '项目看板' },
-  { key: 'work', icon: <AppstoreOutlined />, label: '工作模式' },
-  { key: 'team', icon: <TeamOutlined />, label: '团队成员' },
-  { key: 'settings', icon: <SettingOutlined />, label: '工作区设置' },
-]
+const navigationKeys = ['chat', 'business', 'report', 'board', 'work', 'team', 'settings']
+const navigationIcons = {
+  chat: <MessageOutlined />,
+  business: <BarChartOutlined />,
+  report: <FileTextOutlined />,
+  board: <ProjectOutlined />,
+  work: <AppstoreOutlined />,
+  team: <TeamOutlined />,
+  settings: <SettingOutlined />,
+}
+const buildNavigationItems = () => navigationKeys.map((key) => ({
+  key,
+  icon: navigationIcons[key],
+  label: t(`nav.${key}`),
+}))
 
-const navigationLabels = Object.fromEntries(navigationItems.map((item) => [item.key, item.label]))
+const navigationLabels = (locale) => Object.fromEntries(
+  navigationKeys.map((key) => [key, t(`nav.${key}`)]),
+)
 
 const emptyTask = { title: '', description: '', priority: 'medium', status: 'todo', labels: [] }
 
@@ -188,42 +196,42 @@ function AuthScreen({ onAuthenticated }) {
           <Text><CheckCircleFilled /> 全程可审计的操作轨迹</Text>
         </Space>
       </section>
-      <Card className="auth-card" variant="borderless">
-        <Space direction="vertical" size={4} className="auth-heading">
-          <Title level={3} style={{ marginBottom: 2 }}>欢迎使用 futureAgent</Title>
-          <Text type="secondary">面向团队协作的 AI 工作空间</Text>
-        </Space>
-        <div className="auth-tabs">
-          <Button type={mode === 'login' ? 'primary' : 'text'} onClick={() => { setMode('login'); form.resetFields() }}>登录</Button>
-          <Button type={mode === 'register' ? 'primary' : 'text'} onClick={() => { setMode('register'); form.resetFields() }}>创建工作区</Button>
-        </div>
-        <Form form={form} layout="vertical" onFinish={submit} requiredMark={false}>
-          {mode === 'register' && (
-            <>
-              <Form.Item name="display_name" label="你的姓名" rules={[{ required: true, min: 2 }]}>
-                <Input autoComplete="name" placeholder="团队成员如何称呼你？" />
+          <Card className="auth-card" variant="borderless">
+            <Space direction="vertical" size={4} className="auth-heading">
+              <Title level={3} style={{ marginBottom: 2 }}>{t('auth.title')}</Title>
+              <Text type="secondary">{t('auth.subtitle')}</Text>
+            </Space>
+            <div className="auth-tabs">
+              <Button type={mode === 'login' ? 'primary' : 'text'} onClick={() => { setMode('login'); form.resetFields() }}>{t('auth.tab.login')}</Button>
+              <Button type={mode === 'register' ? 'primary' : 'text'} onClick={() => { setMode('register'); form.resetFields() }}>{t('auth.tab.register')}</Button>
+            </div>
+            <Form form={form} layout="vertical" onFinish={submit} requiredMark={false}>
+              {mode === 'register' && (
+                <>
+                  <Form.Item name="display_name" label="你的姓名" rules={[{ required: true, min: 2 }]}>
+                    <Input autoComplete="name" placeholder="团队成员如何称呼你？" />
+                  </Form.Item>
+                  <Form.Item name="workspace_name" label="工作区名称" rules={[{ required: true, min: 2 }]}>
+                    <Input placeholder="例如：产品研发中心" />
+                  </Form.Item>
+                </>
+              )}
+              <Form.Item name="email" label={t('auth.email')} rules={[{ required: true, type: 'email' }]}>
+                <Input autoComplete="email" placeholder="name@company.com" />
               </Form.Item>
-              <Form.Item name="workspace_name" label="工作区名称" rules={[{ required: true, min: 2 }]}>
-                <Input placeholder="例如：产品研发中心" />
-              </Form.Item>
-            </>
-          )}
-          <Form.Item name="email" label="工作邮箱" rules={[{ required: true, type: 'email' }]}>
-            <Input autoComplete="email" placeholder="name@company.com" />
-          </Form.Item>
-          {mode === 'login' ? (
-            <Form.Item name="password" label="密码" rules={[{ required: true, min: 10, message: '密码至少需要 10 个字符' }]}>
-              <Input.Password autoComplete="current-password" placeholder="至少 10 个字符" />
-            </Form.Item>
-          ) : (
-            <Form.Item name="password" label="密码" rules={[{ required: true, min: 10, message: '密码至少需要 10 个字符' }]}>
-              <Input.Password autoComplete="new-password" placeholder="至少 10 个字符" />
-            </Form.Item>
-          )}
-          <Button type="primary" htmlType="submit" block size="large" loading={loading}>
-            {mode === 'login' ? '登录工作区' : '创建安全工作区'}
-          </Button>
-        </Form>
+              {mode === 'login' ? (
+                <Form.Item name="password" label={t('auth.password')} rules={[{ required: true, min: 10, message: '密码至少需要 10 个字符' }]}>
+                  <Input.Password autoComplete="current-password" placeholder="至少 10 个字符" />
+                </Form.Item>
+              ) : (
+                <Form.Item name="password" label={t('auth.password')} rules={[{ required: true, min: 10, message: '密码至少需要 10 个字符' }]}>
+                  <Input.Password autoComplete="new-password" placeholder="至少 10 个字符" />
+                </Form.Item>
+              )}
+              <Button type="primary" htmlType="submit" block size="large" loading={loading}>
+                {mode === 'login' ? t('auth.submit.login') : t('auth.submit.register')}
+              </Button>
+            </Form>
         <Paragraph type="secondary" className="auth-footnote">
           浏览器仅保存短期访问令牌；续期会话由服务端通过仅服务器可访问的安全会话标记管理。
         </Paragraph>
@@ -1322,7 +1330,7 @@ function WorkspaceApp({ session, onLogout }) {
   }
   const openNotification = (notification) => {
     markNotificationRead(notification)
-    if (notification.link && navigationLabels[notification.link]) {
+    if (notification.link && navigationLabels()[notification.link]) {
       setNav(notification.link)
       setNotificationOpen(false)
     }
@@ -1372,7 +1380,7 @@ function WorkspaceApp({ session, onLogout }) {
     setGlobalQuery('')
     setSearchResults([])
   }
-  const sideMenu = <Menu theme="dark" mode="inline" selectedKeys={[nav]} onClick={({ key }) => { setNav(key); setMobileNav(false) }} items={navigationItems} />
+  const sideMenu = <Menu theme="dark" mode="inline" selectedKeys={[nav]} onClick={({ key }) => { setNav(key); setMobileNav(false) }} items={buildNavigationItems()} />
   const layoutSider = <>
     <div className="workspace-brand"><Avatar icon={<RobotOutlined />} className="brand-avatar" /><div><strong>futureAgent</strong><span>团队 AI 工作空间</span></div></div>
     <Text className="workspace-switcher-label">当前工作区</Text>
@@ -1427,7 +1435,7 @@ function WorkspaceApp({ session, onLogout }) {
         <Header className="workspace-header">
           <Flex align="center" gap={10} style={{ minWidth: 0 }}>
             {!screens.lg && <Button type="text" icon={<MenuOutlined />} onClick={() => setMobileNav(true)} aria-label="打开主导航" />}
-            <div className="header-context"><Text strong>{navigationLabels[nav]}</Text><Text type="secondary">{workspace?.name || '团队工作区'}</Text></div>
+            <div className="header-context"><Text strong>{navigationLabels()[nav] || navigationLabels().chat}</Text><Text type="secondary">{workspace?.name || '团队工作区'}</Text></div>
           </Flex>
           <Space size={6}>
             <Tooltip title="通知中心">
@@ -1446,7 +1454,15 @@ function WorkspaceApp({ session, onLogout }) {
             >
               <Input allowClear prefix={<SearchOutlined />} placeholder="搜索任务、对话、消息或文件" />
             </AutoComplete>
-            <Badge className="workspace-health" status={refreshing ? 'processing' : 'success'} text={refreshing ? '正在同步' : '已安全连接'} />
+            <Badge className="workspace-health" status={refreshing ? 'processing' : 'success'} text={refreshing ? t('common.syncing') : t('common.connected')} />
+            <Tooltip title={getLocale() === 'en' ? '切换到中文' : 'Switch to English'}>
+              <Button
+                type="text"
+                icon={<GlobalOutlined />}
+                onClick={() => { toggleLocale(); setThemeTick((tick) => tick + 1) }}
+                aria-label="切换语言 / Switch language"
+              />
+            </Tooltip>
             <Tooltip title={getThemeMode() === 'dark' ? '切换到浅色' : '切换到深色'}>
               <Button
                 type="text"
@@ -1518,14 +1534,21 @@ export default function App() {
 
 export function Root() {
   const [themeMode, setThemeMode] = useState(getThemeMode)
+  const [locale, setLocale] = useState(getLocale)
   useEffect(() => {
     applyThemeMode(getThemeMode())
-    const listener = (event) => setThemeMode(event.detail || getThemeMode())
-    window.addEventListener('futureagent-theme', listener)
-    return () => window.removeEventListener('futureagent-theme', listener)
+    const themeListener = (event) => setThemeMode(event.detail || getThemeMode())
+    window.addEventListener('futureagent-theme', themeListener)
+    const localeListener = (event) => setLocale(event.detail || getLocale())
+    window.addEventListener('futureagent-locale', localeListener)
+    return () => {
+      window.removeEventListener('futureagent-theme', themeListener)
+      window.removeEventListener('futureagent-locale', localeListener)
+    }
   }, [])
   const isDark = themeMode === 'dark'
-  return <ConfigProvider locale={zhCN} theme={{
+  const isEn = locale === 'en'
+  return <ConfigProvider locale={antdLocaleOf(locale)} theme={{
     algorithm: isDark ? theme.darkAlgorithm : theme.defaultAlgorithm,
     token: {
       colorPrimary: '#4f5fd5',

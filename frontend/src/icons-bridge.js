@@ -20,6 +20,7 @@ export { default as FileAddOutlined } from '@ant-design/icons/es/icons/FileAddOu
 export { default as FilePdfOutlined } from '@ant-design/icons/es/icons/FilePdfOutlined'
 export { default as FileWordOutlined } from '@ant-design/icons/es/icons/FileWordOutlined'
 export { default as FolderOutlined } from '@ant-design/icons/es/icons/FolderOutlined'
+export { default as GlobalOutlined } from '@ant-design/icons/es/icons/GlobalOutlined'
 export { default as FolderOpenOutlined } from '@ant-design/icons/es/icons/FolderOpenOutlined'
 export { default as LogoutOutlined } from '@ant-design/icons/es/icons/LogoutOutlined'
 export { default as MenuOutlined } from '@ant-design/icons/es/icons/MenuOutlined'
