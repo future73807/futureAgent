@@ -1061,19 +1061,20 @@ async def im_webhook_ingest(
     source = session.get(ReportDataSource, source_id)
     if not source:
         raise HTTPException(status_code=401, detail="业务数据接入凭据无效")
-    if source.connection_mode not in {"api", "webhook"}:
-        raise HTTPException(status_code=409, detail="该数据源不接受 IM 推送")
-    if not _validate_ingest_token_ok(source, token or header_token):
-        raise HTTPException(status_code=401, detail="业务数据接入凭据无效")
 
     try:
         payload = await request.json()
     except Exception:  # noqa: BLE001
         payload = None
 
-    # 飞书事件订阅握手：原样回显 challenge
+    # 飞书事件订阅握手：原样回显 challenge（无需数据源处于 webhook 模式）
     if isinstance(payload, dict) and payload.get("type") == "url_verification":
         return {"challenge": payload.get("challenge", "")}
+
+    if source.connection_mode not in {"api", "webhook"}:
+        raise HTTPException(status_code=409, detail="该数据源不接受 IM 推送")
+    if not _validate_ingest_token_ok(source, token or header_token):
+        raise HTTPException(status_code=401, detail="业务数据接入凭据无效")
 
     extracted = _extract_im_message(payload)
     if not extracted:

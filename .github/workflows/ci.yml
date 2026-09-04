@@ -14,7 +14,9 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements.txt pyflakes
+      - name: 静态检查（pyflakes 零告警）
+        run: python -m pyflakes api core db auth config main.py
       - name: 后端测试
         env:
           AUTH_RATE_LIMIT_PER_MINUTE: "0"

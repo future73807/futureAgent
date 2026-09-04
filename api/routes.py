@@ -873,6 +873,7 @@ async def health() -> dict[str, Any]:
         "service": "futureAgent",
         "environment": settings.environment,
         "authentication": "jwt",
+        "version": "0.2.0",
     }
 
 
@@ -1464,6 +1465,17 @@ def create_task(
         raise HTTPException(status_code=422, detail="任务状态或优先级无效")
     _project_or_404(session, context.workspace.id, request.project_id)
     _member_or_422(session, context.workspace.id, request.assignee_id)
+    # 新任务自动排到所在列尾部，避免与既有任务共享 sort_order 导致顺序不稳定
+    from sqlalchemy import func
+
+    column_max = session.exec(
+        select(func.max(Task.sort_order)).where(
+            Task.workspace_id == context.workspace.id,
+            Task.project_id == request.project_id,
+            Task.status == request.status,
+        )
+    ).one()
+    next_sort_order = (column_max[0] if column_max and column_max[0] is not None else 0) + 10
     task = Task(
         workspace_id=context.workspace.id,
         project_id=request.project_id,
@@ -1474,6 +1486,7 @@ def create_task(
         assignee_id=request.assignee_id,
         reporter_id=context.user.id,
         due_date=request.due_date,
+        sort_order=next_sort_order,
         labels_json=json.dumps(request.labels, ensure_ascii=False),
     )
     session.add(task)
@@ -2003,6 +2016,7 @@ def workspace_search(
         .where(
             Conversation.workspace_id == context.workspace.id,
             Conversation.owner_id == context.user.id,
+            Conversation.archived.is_(False),
             Conversation.title.ilike(pattern),
         )
         .order_by(Conversation.updated_at.desc())

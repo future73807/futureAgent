@@ -1,22 +1,21 @@
 """数据库连接、会话和开发环境引导数据。"""
 from collections.abc import Generator
-from datetime import timedelta
 
 from sqlmodel import Session, SQLModel, create_engine, select
 from sqlalchemy import inspect
 
 from config import settings
 from db.models import Membership, User, Workspace, now_utc
-from db.report_models import (  # 汇报智能体模型
+from db.report_models import (  # 汇报智能体模型（导入同时完成 metadata 注册）
+    KnowledgeBase,
+    ReportAlert,
+    ReportAlertRule,
     ReportAssistant,
+    ReportAssistantMessage,
+    ReportDailyReport,
     ReportDataSource,
     ReportRecord,
-    KnowledgeBase,
-    ReportAlertRule,
-    ReportAlert,
-    ReportDailyReport,
     ReportWeeklyReport,
-    ReportAssistantMessage,
 )
 
 LEGACY_BOOTSTRAP_ADMIN_EMAIL = "admin@futureagent.local"
@@ -45,18 +44,17 @@ BUSINESS_AGENT_TABLES = {
     "business_assistant_messages",
 }
 
-# 汇报智能体表
+# 汇报智能体表（由模型派生，避免表名漂移）
 REPORT_AGENT_TABLES = {
-    "report_assistants",
-    "report_data_sources",
-    "report_records",
-    "knowledge_bases",
-    "report_alert_rules",
-    "report_alerts",
-    "report_daily_reports",
-    "report_weekly_reports",
-    "report_monthly_reports",
-    "report_assistant_messages",
+    KnowledgeBase.__tablename__,
+    ReportRecord.__tablename__,
+    ReportDataSource.__tablename__,
+    ReportAlert.__tablename__,
+    ReportAlertRule.__tablename__,
+    ReportAssistant.__tablename__,
+    ReportAssistantMessage.__tablename__,
+    ReportDailyReport.__tablename__,
+    ReportWeeklyReport.__tablename__,
 }
 
 # 通知中心、自动化调度、交付物与月报是最新加入的特性表。旧库识别时忽略

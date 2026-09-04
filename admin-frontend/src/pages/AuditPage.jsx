@@ -105,6 +105,23 @@ const metadataLabels = {
   attempt: '执行次数',
   retry_of_id: '重试来源执行 ID',
   idempotency_key: '请求幂等标识',
+  batch_id: '并行批次 ID',
+  parallel: '是否并行执行',
+  enabled: '是否启用',
+  kind: '出口类型',
+  source_path: '工作区来源路径',
+  email: '邮箱',
+  owner_id: '所有者账号 ID',
+  revoked_count: '吊销会话数',
+  refresh_sessions_revoked: '已撤销登录会话',
+  comment_id: '评论 ID',
+  triggered_alert_count: '触发预警数',
+  ingest_batch_id: '接入批次 ID',
+  period_year: '年份',
+  period_month: '月份',
+  week_start_date: '周起始日',
+  week_end_date: '周结束日',
+  reason: '原因',
 }
 
 const roleLabels = { owner: '所有者', admin: '管理员', member: '成员', viewer: '只读成员', readonly: '只读成员' }

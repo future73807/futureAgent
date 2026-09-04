@@ -234,7 +234,3 @@ def _job_data(job: ScheduledJob) -> dict[str, Any]:
         "created_at": job.created_at,
     }
 
-
-# 供路由模块复用的轻量导出
-def new_job_id() -> str:
-    return new_id()

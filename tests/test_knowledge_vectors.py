@@ -14,6 +14,7 @@ from core.embedding import chunk_text, cosine_similarity
 from core.knowledge_retrieval import reindex_knowledge_base, retrieve_knowledge_smart_sync
 from db.models import User, Workspace
 from db.report_models import KnowledgeBase, KnowledgeChunk
+from main import app
 
 
 def _vector_for(keyword: str, dim: int = 8) -> list[float]:
@@ -102,6 +103,36 @@ class KnowledgeVectorTests(unittest.TestCase):
         self.assertEqual(results[0]["id"], "kb2")
         # 未启用 embedding 时不会产生任何切块
         self.assertEqual(self.session.exec(select(KnowledgeChunk)).all(), [])
+
+    def test_kb_delete_with_endpoint_style_cascade(self):
+        """模拟删除端点的行为：先清向量块再删文档，两表均无残留。"""
+        kb = KnowledgeBase(
+            id="kb3",
+            workspace_id="w1",
+            title="将删除的手册",
+            content="传送带润滑说明。",
+            created_by="u1",
+        )
+        self.session.add(kb)
+        self.session.commit()
+
+        def fake_embed(texts):
+            return [_vector_for("传送带润滑") for _ in texts]
+
+        with patch("core.knowledge_retrieval.embedding_enabled", return_value=True), \
+                patch("core.knowledge_retrieval.embed_texts", side_effect=fake_embed):
+            import asyncio
+
+            self.assertTrue(asyncio.run(reindex_knowledge_base(self.session, "w1", kb)))
+        self.assertEqual(len(self.session.exec(select(KnowledgeChunk)).all()), 1)
+
+        # 端点级联路径：先删向量块，再删知识库文档
+        for chunk in self.session.exec(select(KnowledgeChunk).where(KnowledgeChunk.kb_id == "kb3")).all():
+            self.session.delete(chunk)
+        self.session.delete(kb)
+        self.session.commit()
+        self.assertEqual(self.session.exec(select(KnowledgeChunk)).all(), [])
+        self.assertIsNone(self.session.get(KnowledgeBase, "kb3"))
 
 
 if __name__ == "__main__":
