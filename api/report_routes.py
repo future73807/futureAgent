@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import json
+import logging
 import secrets
 from collections import Counter
 from datetime import date, datetime, time, timezone
@@ -25,7 +27,11 @@ from sqlmodel import Session, select
 from api.dependencies import WorkspaceContext, get_workspace_context, write_audit
 from config import settings
 from core.assistant_ai import generate_answer_sync, render_user_prompt
-from core.knowledge_retrieval import retrieve_knowledge
+from core.knowledge_retrieval import (
+    reindex_knowledge_base,
+    retrieve_knowledge,
+    retrieve_knowledge_smart_sync,
+)
 from db.database import get_session
 from db.report_models import (
     KnowledgeBase,
@@ -1091,6 +1097,12 @@ def create_knowledge_base(
         target_id=kb.id,
     )
     session.commit()
+    try:
+        from core.knowledge_retrieval import reindex_knowledge_base
+
+        asyncio.run(reindex_knowledge_base(session, context.workspace.id, kb))
+    except Exception:  # noqa: BLE001 - 向量索引失败不阻塞知识库创建
+        logging.getLogger(__name__).debug("knowledge index failed", exc_info=True)
     return {"knowledge_base": _knowledge_base_data(kb)}
 
 
@@ -1160,6 +1172,12 @@ async def upload_knowledge_base_file(
         metadata={"file_name": file_name, "file_type": content_type or "text/plain", "file_size": len(content)},
     )
     session.commit()
+    try:
+        from core.knowledge_retrieval import reindex_knowledge_base
+
+        await reindex_knowledge_base(session, context.workspace.id, kb)
+    except Exception:  # noqa: BLE001 - 向量索引失败不阻塞知识库上传
+        logging.getLogger(__name__).debug("knowledge index failed", exc_info=True)
     return {"knowledge_base": _knowledge_base_data(kb)}
 
 
@@ -1189,6 +1207,12 @@ def update_knowledge_base(
         target_id=kb.id,
     )
     session.commit()
+    try:
+        from core.knowledge_retrieval import reindex_knowledge_base
+
+        asyncio.run(reindex_knowledge_base(session, context.workspace.id, kb))
+    except Exception:  # noqa: BLE001 - 向量索引失败不阻塞知识库更新
+        logging.getLogger(__name__).debug("knowledge index failed", exc_info=True)
     return {"knowledge_base": _knowledge_base_data(kb)}
 
 
@@ -1881,7 +1905,7 @@ def chat_with_report_assistant(
     if not question:
         raise HTTPException(status_code=422, detail="请输入要查询的内容")
     summary, citations = _deterministic_reply(session, context, question)
-    retrieved = retrieve_knowledge(session, context.workspace.id, question, limit=5)
+    retrieved = retrieve_knowledge_smart_sync(session, context.workspace.id, question, limit=5)
     reply, engine, external_called = _compose_reply(question, summary, citations, retrieved)
     user_message = ReportAssistantMessage(
         workspace_id=context.workspace.id,

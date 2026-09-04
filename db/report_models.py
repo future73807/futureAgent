@@ -230,6 +230,29 @@ class ReportMonthlyReport(SQLModel, table=True):
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
 
+class KnowledgeChunk(SQLModel, table=True):
+    """知识库文档的向量切块。
+
+    向量以 JSON 数组持久化（不依赖 pgvector），检索时在进程内做余弦
+    计算；``kb_updated_at`` 用于丢弃过期切块。
+    """
+
+    __tablename__ = "knowledge_chunks"
+    __table_args__ = (
+        UniqueConstraint("kb_id", "chunk_index", name="uq_knowledge_chunks_kb_index"),
+    )
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    workspace_id: str = Field(foreign_key="workspaces.id", index=True)
+    kb_id: str = Field(foreign_key="knowledge_bases.id", index=True)
+    chunk_index: int = Field(default=0)
+    content: str = Field(default="", max_length=4000)
+    embedding_json: str = Field(default="[]", max_length=40000)
+    model_name: str = Field(default="", max_length=120)
+    kb_updated_at: datetime | None = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=now_utc)
+
+
 
 class ReportAssistantMessage(SQLModel, table=True):
     """汇报智能体对话消息。"""

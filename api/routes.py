@@ -3692,6 +3692,7 @@ def admin_delete_workspace(
 ) -> dict[str, Any]:
     from db.report_models import (
         KnowledgeBase,
+        KnowledgeChunk,
         ReportAlert,
         ReportAlertRule,
         ReportAssistant,
@@ -3706,7 +3707,11 @@ def admin_delete_workspace(
     if not workspace:
         raise HTTPException(status_code=404, detail="工作区不存在")
 
-    purge_workspace_data(session, workspace_id, extra_models=(KnowledgeBase, ReportAlert, ReportAlertRule, ReportAssistant, ReportAssistantMessage, ReportDailyReport, ReportDataSource, ReportRecord, ReportWeeklyReport))
+    purge_workspace_data(
+        session,
+        workspace_id,
+        extra_models=(KnowledgeBase, KnowledgeChunk, ReportAlert, ReportAlertRule, ReportAssistant, ReportAssistantMessage, ReportDailyReport, ReportDataSource, ReportRecord, ReportWeeklyReport),
+    )
 
     write_audit(
         session,
@@ -3731,6 +3736,7 @@ def delete_own_workspace(
     """所有者自删工作区：与管理员删除共用同一条级联清理路径。"""
     from db.report_models import (
         KnowledgeBase,
+        KnowledgeChunk,
         ReportAlert,
         ReportAlertRule,
         ReportAssistant,
@@ -3746,7 +3752,11 @@ def delete_own_workspace(
     if membership.role != "owner":
         raise HTTPException(status_code=403, detail="只有工作区所有者可以删除工作区")
 
-    purge_workspace_data(session, workspace_id, extra_models=(KnowledgeBase, ReportAlert, ReportAlertRule, ReportAssistant, ReportAssistantMessage, ReportDailyReport, ReportDataSource, ReportRecord, ReportWeeklyReport))
+    purge_workspace_data(
+        session,
+        workspace_id,
+        extra_models=(KnowledgeBase, KnowledgeChunk, ReportAlert, ReportAlertRule, ReportAssistant, ReportAssistantMessage, ReportDailyReport, ReportDataSource, ReportRecord, ReportWeeklyReport),
+    )
 
     write_audit(
         session,

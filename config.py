@@ -101,6 +101,11 @@ class Settings(BaseSettings):
     # ===== Skill 配置 =====
     skills_dir: str = str(BASE_DIR / "skills")
 
+    # ===== 知识库向量召回 =====
+    # off 关闭（纯关键词召回）；ollama 用本地模型（推荐 qwen3-embedding，
+    # 先 `ollama pull qwen3-embedding`）；openai 走 OPENAI_BASE_URL/embeddings。
+    embedding_provider: str = "off"
+    embedding_model: str = "qwen3-embedding"
     environment: str = "development"
 
     @computed_field

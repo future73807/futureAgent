@@ -1,26 +1,32 @@
-"""工作区内轻量知识检索（RAG 的召回层）。
+"""工作区内知识检索（RAG 召回层）：关键词 + 可选向量融合。
 
-当前实现是与数据库无关的关键词召回：对查询提取 ASCII 词与中文单字/二元
-组合，在知识库文档、业务/汇报记录与附件提取文本里按命中打分排序。它不依
-赖任何外部服务，可在 SQLite 与 PostgreSQL 上运行。
-
-升级路径：compose 环境已内置 pgvector 镜像；接入 embedding 供应商后，可
-以在本模块内替换为向量召回（分块入库 + 余弦检索），返回结构保持不变，上
-层 prompt 组装无需改动。
+- 关键词召回：对查询提取 ASCII 词与中文单字/二元组合，在知识库文档、
+  业务/汇报记录与附件提取文本里按命中打分排序，任何数据库可用。
+- 向量召回（可选）：``EMBEDDING_PROVIDER`` 启用后，知识库文档切块向量化
+  （本地 Ollama 的 qwen3-embedding 即可），查询向量做余弦融合加权；
+  embedding 不可用时自动退回纯关键词，行为与历史版本一致。
 """
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
 import re
 from typing import Any
 
 from sqlmodel import Session, select
 
+from core.embedding import chunk_text, cosine_similarity, embed_texts, embedding_enabled
+from config import settings
 from db.models import Attachment, BusinessRecord
-from db.report_models import KnowledgeBase, ReportRecord
+from db.report_models import KnowledgeBase, KnowledgeChunk, ReportRecord
+
+logger = logging.getLogger(__name__)
 
 _TOKEN_LIMIT = 24
 _SCAN_LIMIT = 200
 _SNIPPET_WINDOW = 90
+_VECTOR_WEIGHT = 6.0
 
 
 def keyword_tokens(query: str) -> list[str]:
@@ -146,3 +152,103 @@ def retrieve_knowledge(
         }
         for score, source_type, identifier, title, snippet in scored[:limit]
     ]
+
+
+def _chunk_scores(session: Session, workspace_id: str, query_vector: list[float], limit: int) -> list[dict[str, Any]]:
+    """对当前工作区的知识块做余弦打分，返回按分数降序的 KB 命中。"""
+    chunks = session.exec(
+        select(KnowledgeChunk).where(KnowledgeChunk.workspace_id == workspace_id)
+    ).all()
+    kb_rows = session.exec(
+        select(KnowledgeBase).where(KnowledgeBase.workspace_id == workspace_id)
+    ).all()
+    titles = {kb.id: kb.title for kb in kb_rows}
+    scored: list[tuple[float, str, str, str]] = []
+    for chunk in chunks:
+        try:
+            vector = json.loads(chunk.embedding_json or "[]")
+        except ValueError:
+            continue
+        score = cosine_similarity(query_vector, vector)
+        if score <= 0.05:
+            continue
+        title = titles.get(chunk.kb_id, "知识库")
+        snippet = chunk.content[:_SNIPPET_WINDOW]
+        scored.append((score, chunk.kb_id, title, snippet))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [
+        {"source": "knowledge_base", "id": kb_id, "title": title, "snippet": snippet, "score": score * _VECTOR_WEIGHT}
+        for score, kb_id, title, snippet in scored[:limit]
+    ]
+
+
+async def retrieve_knowledge_smart(
+    session: Session,
+    workspace_id: str,
+    query: str,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    """关键词召回 + 可选向量融合：embedding 不可用时行为与纯关键词一致。"""
+    keyword_hits = retrieve_knowledge(session, workspace_id, query, limit=limit)
+    if not embedding_enabled():
+        return keyword_hits
+    try:
+        vectors = await embed_texts([query])
+    except Exception:  # noqa: BLE001 - 检索是同步路径的安全网
+        vectors = None
+    if not vectors:
+        return keyword_hits
+    vector_hits = _chunk_scores(session, workspace_id, vectors[0], limit=limit)
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in keyword_hits + vector_hits:
+        key = (item["source"], item["id"])
+        if key in merged:
+            merged[key]["score"] = max(merged[key]["score"], item["score"])
+        else:
+            merged[key] = item
+    results = sorted(merged.values(), key=lambda item: item["score"], reverse=True)
+    return results[:limit]
+
+
+def retrieve_knowledge_smart_sync(
+    session: Session,
+    workspace_id: str,
+    query: str,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    """同步路由使用的包装：线程池中执行，无运行中的事件循环。"""
+    try:
+        return asyncio.run(retrieve_knowledge_smart(session, workspace_id, query, limit))
+    except Exception:  # noqa: BLE001
+        logger.warning("knowledge retrieval: 向量融合失败，退回关键词召回", exc_info=True)
+        return retrieve_knowledge(session, workspace_id, query, limit)
+
+
+async def reindex_knowledge_base(session: Session, workspace_id: str, kb: KnowledgeBase) -> bool:
+    """对单个知识库文档重新切块向量化；embedding 不可用返回 False。"""
+    if not embedding_enabled():
+        return False
+    chunks = chunk_text(kb.content or kb.title)
+    if not chunks:
+        return False
+    vectors = await embed_texts(chunks)
+    if not vectors:
+        return False
+    for old in session.exec(
+        select(KnowledgeChunk).where(KnowledgeChunk.kb_id == kb.id)
+    ).all():
+        session.delete(old)
+    for index, (content, vector) in enumerate(zip(chunks, vectors)):
+        session.add(
+            KnowledgeChunk(
+                workspace_id=workspace_id,
+                kb_id=kb.id,
+                chunk_index=index,
+                content=content[:4000],
+                embedding_json=json.dumps(vector),
+                model_name=settings.embedding_model,
+                kb_updated_at=kb.updated_at,
+            )
+        )
+    session.commit()
+    return True

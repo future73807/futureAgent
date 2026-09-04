@@ -61,7 +61,7 @@ REPORT_AGENT_TABLES = {
 
 # 通知中心、自动化调度、交付物与月报是最新加入的特性表。旧库识别时忽略
 # 它们：缺少这些表只说明版本停在迁移链早期，升级链会以增量表把它们补齐。
-# 近期版本（06-12）由 ADDITIVE_STEPS 阶梯精确判定；更旧的库走 legacy 分支。
+# 近期版本（06-14）由 ADDITIVE_STEPS 阶梯精确判定；更旧的库走 legacy 分支。
 NEWEST_FEATURE_TABLES = {
     "notifications",
     "notification_targets",
@@ -69,6 +69,7 @@ NEWEST_FEATURE_TABLES = {
     "deliverables",
     "task_comments",
     "report_monthly_reports",
+    "knowledge_chunks",
 }
 
 # Revision 20260725_03 adds both business tables and audit visibility columns.
@@ -101,6 +102,7 @@ PRE_BATCH_MISSING_COLUMNS = {"agent_runs": {"batch_id"}}
 # 增量特性表 → 引入它的迁移版本（从新到旧）。无 alembic_version 的库按
 # "已拥有的最高阶梯表" 判定其实际版本，避免误判到过旧的基线重建全库。
 ADDITIVE_STEPS = [
+    ("20260902_14", {"knowledge_chunks"}),
     ("20260902_12", {"report_monthly_reports"}),
     ("20260902_10", {"task_comments"}),
     ("20260902_09", {"deliverables"}),

@@ -24,7 +24,7 @@ from sqlmodel import Session, select
 from api.dependencies import WorkspaceContext, get_workspace_context, write_audit
 from config import settings
 from core.assistant_ai import generate_answer_sync, render_user_prompt
-from core.knowledge_retrieval import retrieve_knowledge
+from core.knowledge_retrieval import retrieve_knowledge_smart_sync
 from db.database import get_session
 from db.models import (
     BusinessAlert,
@@ -1125,7 +1125,7 @@ def _retrieve_scoped_context(
 ) -> list[dict[str, Any]]:
     """按助手隔离语义过滤检索结果：知识库/附件/汇报记录属工作区共享，
     业务记录必须落在该助手的可见范围内；私事助手不引用任何共享来源。"""
-    retrieved = retrieve_knowledge(session, context.workspace.id, question, limit=5)
+    retrieved = retrieve_knowledge_smart_sync(session, context.workspace.id, question, limit=5)
     allowed_ids = {record.id for record in _assistant_scope_records(session, context, assistant)}
     if assistant.agent_type == "personal_private":
         return [
