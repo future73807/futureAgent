@@ -1,8 +1,8 @@
 import React, { lazy, Suspense, useEffect, useMemo, useState } from 'react'
-import zhCN from 'antd/es/locale/zh_CN'
 import { App as AntApp, Avatar, Badge, Button, Card, ConfigProvider, Drawer, Dropdown, Form, Grid, Input, Layout, Menu, Select, Space, Spin, Tooltip, Typography, theme } from 'antd'
-import { ApiOutlined, AppstoreOutlined, AuditOutlined, BulbOutlined, CheckCircleFilled, DashboardOutlined, ExportOutlined, LogoutOutlined, MenuOutlined, RobotOutlined, SafetyOutlined, SettingOutlined, TeamOutlined, ToolOutlined, UserOutlined } from '@ant-design/icons'
+import { ApiOutlined, AppstoreOutlined, AuditOutlined, BulbOutlined, CheckCircleFilled, DashboardOutlined, ExportOutlined, GlobalOutlined, LogoutOutlined, MenuOutlined, RobotOutlined, SafetyOutlined, SettingOutlined, TeamOutlined, ToolOutlined, UserOutlined } from '@ant-design/icons'
 import { apiFetch, applyAuthSession, clearAuthSession, getAccessToken, getWorkspaceId, refreshAccessToken, setWorkspaceId, toUserErrorMessage, userFrontendUrl } from './api.js'
+import { applyLocale, getLocale, t, toggleLocale, antdLocaleOf } from './i18n.js'
 import { applyThemeMode, getThemeMode, toggleThemeMode } from './theme.js'
 
 const DashboardPage = lazy(() => import('./pages/DashboardPage.jsx'))
@@ -17,27 +17,27 @@ const AuditPage = lazy(() => import('./pages/AuditPage.jsx'))
 
 const { Header, Sider, Content } = Layout
 const { Text, Title } = Typography
-const navItems = [
+const buildNavItems = () => [
   {
-    type: 'group', label: '运营管理', children: [
-      { key: 'dashboard', icon: <DashboardOutlined />, label: '平台概览' },
-      { key: 'users', icon: <UserOutlined />, label: '用户管理' },
-      { key: 'workspaces', icon: <TeamOutlined />, label: '工作区' },
-      { key: 'audit', icon: <AuditOutlined />, label: '审计轨迹' },
+    type: 'group', label: t('admin.nav.group.ops'), children: [
+      { key: 'dashboard', icon: <DashboardOutlined />, label: t('admin.nav.dashboard') },
+      { key: 'users', icon: <UserOutlined />, label: t('admin.nav.users') },
+      { key: 'workspaces', icon: <TeamOutlined />, label: t('admin.nav.workspaces') },
+      { key: 'audit', icon: <AuditOutlined />, label: t('admin.nav.audit') },
     ],
   },
   {
-    type: 'group', label: '能力与治理', children: [
-      { key: 'models', icon: <RobotOutlined />, label: '模型中心' },
-      { key: 'skills', icon: <ToolOutlined />, label: '技能管理' },
-      { key: 'mcp', icon: <ApiOutlined />, label: 'MCP 服务' },
-      { key: 'policies', icon: <SafetyOutlined />, label: '权限策略' },
-      { key: 'settings', icon: <SettingOutlined />, label: '运行设置' },
+    type: 'group', label: t('admin.nav.group.capability'), children: [
+      { key: 'models', icon: <RobotOutlined />, label: t('admin.nav.models') },
+      { key: 'skills', icon: <ToolOutlined />, label: t('admin.nav.skills') },
+      { key: 'mcp', icon: <ApiOutlined />, label: t('admin.nav.mcp') },
+      { key: 'policies', icon: <SafetyOutlined />, label: t('admin.nav.policies') },
+      { key: 'settings', icon: <SettingOutlined />, label: t('admin.nav.settings') },
     ],
   },
 ]
 
-const pageLabels = Object.fromEntries(navItems.flatMap((group) => group.children || []).map((item) => [item.key, item.label]))
+const buildPageLabels = () => Object.fromEntries(buildNavItems().flatMap((group) => group.children || []).map((item) => [item.key, item.label]))
 
 function Login({ onLogin }) {
   const { message } = AntApp.useApp(); const [loading, setLoading] = useState(false)
@@ -60,7 +60,7 @@ function Login({ onLogin }) {
       <Card className="admin-auth-card" variant="borderless">
         <Space direction="vertical" className="admin-auth-heading">
           <Avatar size={48} icon={<SafetyOutlined />} />
-          <div><Title level={2}>欢迎回来</Title><Text type="secondary">登录平台运营中心</Text></div>
+          <div><Title level={2}>欢迎回来</Title><Text type="secondary">{t('admin.auth.subtitle')}</Text></div>
         </Space>
         <Form layout="vertical" onFinish={submit} requiredMark={false} size="large" validateMessages={{ required: '${label}不能为空', types: { email: '${label}格式不正确' } }}>
           <Form.Item name="email" label="管理员邮箱" rules={[{ required: true, type: 'email' }]}><Input autoComplete="email" autoFocus placeholder="name@company.com" /></Form.Item>
@@ -76,18 +76,18 @@ function Login({ onLogin }) {
 function AdminShell({ profile, workspaces, onLogout }) {
   const initialPage = window.location.hash.replace(/^#\/?/, '')
   const screens = Grid.useBreakpoint()
-  const [selectedKey, setSelectedKey] = useState(pageLabels[initialPage] ? initialPage : 'dashboard'); const [collapsed, setCollapsed] = useState(false); const [mobileNav, setMobileNav] = useState(false); const [online, setOnline] = useState(false); const [workspaceId, setCurrentWorkspace] = useState(getWorkspaceId() || workspaces[0]?.id || '')
+  const initialPageLabels = buildPageLabels(); const [selectedKey, setSelectedKey] = useState(initialPageLabels[initialPage] ? initialPage : 'dashboard'); const [collapsed, setCollapsed] = useState(false); const [mobileNav, setMobileNav] = useState(false); const [online, setOnline] = useState(false); const [workspaceId, setCurrentWorkspace] = useState(getWorkspaceId() || workspaces[0]?.id || '')
   const userAppUrl = userFrontendUrl()
   useEffect(() => { setWorkspaceId(workspaceId) }, [workspaceId])
   useEffect(() => { window.scrollTo(0, 0) }, [selectedKey])
   useEffect(() => { const check = () => apiFetch('/api/v1/health', { workspaceId: '' }).then(() => setOnline(true)).catch(() => setOnline(false)); check(); const timer = setInterval(check, 30_000); return () => clearInterval(timer) }, [])
-  const navigate = (key) => { if (!pageLabels[key]) return; setSelectedKey(key); setMobileNav(false); window.history.replaceState(null, '', `#/${key}`) }
+  const navigate = (key) => { if (!buildPageLabels()[key]) return; setSelectedKey(key); setMobileNav(false); window.history.replaceState(null, '', `#/${key}`) }
   const pages = useMemo(() => ({ dashboard: <DashboardPage onNavigate={navigate} />, users: <UsersPage />, workspaces: <WorkspacesPage />, audit: <AuditPage />, models: <ModelsPage />, skills: <SkillsPage />, mcp: <McpPage />, policies: <PoliciesPage />, settings: <SettingsPage /> }), [])
-  const accountMenu = { items: [{ key: 'account', disabled: true, label: <div className="admin-account-summary"><strong>{profile.display_name}</strong><span>{profile.email}</span></div> }, { type: 'divider' }, { key: 'logout', icon: <LogoutOutlined />, label: '退出登录', danger: true }], onClick: ({ key }) => key === 'logout' && onLogout() }
+  const accountMenu = { items: [{ key: 'account', disabled: true, label: <div className="admin-account-summary"><strong>{profile.display_name}</strong><span>{profile.email}</span></div> }, { type: 'divider' }, { key: 'logout', icon: <LogoutOutlined />, label: t('admin.common.logout'), danger: true }], onClick: ({ key }) => key === 'logout' && onLogout() }
   const navigation = (isCollapsed = false) => <div className="admin-navigation">
-    <div className="admin-brand"><AppstoreOutlined />{!isCollapsed && <div><strong>futureAgent</strong><span>平台运营中心</span></div>}</div>
-    <Menu theme="dark" mode="inline" selectedKeys={[selectedKey]} items={navItems} onClick={({ key }) => navigate(key)} />
-    {!isCollapsed && <div className="admin-sider-status"><span className={online ? 'is-online' : ''} />{online ? '服务运行正常' : '服务连接异常'}</div>}
+    <div className="admin-brand"><AppstoreOutlined />{!isCollapsed && <div><strong>futureAgent</strong><span>{t('admin.tagline')}</span></div>}</div>
+    <Menu theme="dark" mode="inline" selectedKeys={[selectedKey]} items={buildNavItems()} onClick={({ key }) => navigate(key)} />
+    {!isCollapsed && <div className="admin-sider-status"><span className={online ? 'is-online' : ''} />{online ? t('admin.status.online') : t('admin.status.offline')}</div>}
   </div>
   return <Layout className="admin-layout">
     {screens.lg ? <Sider collapsible collapsed={collapsed} collapsedWidth={72} onCollapse={setCollapsed} width={248} theme="dark">{navigation(collapsed)}</Sider> : <Drawer placement="left" width="min(86vw, 288px)" open={mobileNav} onClose={() => setMobileNav(false)} closable={false} rootClassName="admin-mobile-drawer" styles={{ body: { padding: 0 } }}>{navigation(false)}</Drawer>}
@@ -119,14 +119,20 @@ function AdminApp() {
 
 export default function App() {
   const [themeMode, setThemeMode] = useState(getThemeMode)
+  const [locale, setLocale] = useState(getLocale)
   useEffect(() => {
     applyThemeMode(getThemeMode())
-    const listener = (event) => setThemeMode(event.detail || getThemeMode())
-    window.addEventListener('futureagent-admin-theme', listener)
-    return () => window.removeEventListener('futureagent-admin-theme', listener)
+    const themeListener = (event) => setThemeMode(event.detail || getThemeMode())
+    window.addEventListener('futureagent-admin-theme', themeListener)
+    const localeListener = (event) => setLocale(event.detail || getLocale())
+    window.addEventListener('futureagent-admin-locale', localeListener)
+    return () => {
+      window.removeEventListener('futureagent-admin-theme', themeListener)
+      window.removeEventListener('futureagent-admin-locale', localeListener)
+    }
   }, [])
   const isDark = themeMode === 'dark'
-  return <ConfigProvider locale={zhCN} theme={{
+  return <ConfigProvider locale={antdLocaleOf(locale)} theme={{
     algorithm: isDark ? theme.darkAlgorithm : theme.defaultAlgorithm,
     token: {
       colorPrimary: '#4f5fd5',

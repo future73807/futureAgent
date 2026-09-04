@@ -9,6 +9,7 @@ export { default as DeleteOutlined } from '@ant-design/icons/es/icons/DeleteOutl
 export { default as DownloadOutlined } from '@ant-design/icons/es/icons/DownloadOutlined'
 export { default as EditOutlined } from '@ant-design/icons/es/icons/EditOutlined'
 export { default as ExportOutlined } from '@ant-design/icons/es/icons/ExportOutlined'
+export { default as GlobalOutlined } from '@ant-design/icons/es/icons/GlobalOutlined'
 export { default as LogoutOutlined } from '@ant-design/icons/es/icons/LogoutOutlined'
 export { default as MenuOutlined } from '@ant-design/icons/es/icons/MenuOutlined'
 export { default as PlusOutlined } from '@ant-design/icons/es/icons/PlusOutlined'
