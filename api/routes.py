@@ -3252,7 +3252,6 @@ def _extract_pdf_text(source: Path | Any) -> str:
     """pypdf 提取文本型 PDF；扫描件（无文本层）返回空串并保持可存储。"""
     try:
         from pypdf import PdfReader
-        from pypdf.errors import PdfReadError
 
         if hasattr(source, "seek"):
             source.seek(0)
@@ -3826,28 +3825,11 @@ def admin_delete_workspace(
     admin: User = Depends(require_platform_admin),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    from db.report_models import (
-        KnowledgeBase,
-        KnowledgeChunk,
-        ReportAlert,
-        ReportAlertRule,
-        ReportAssistant,
-        ReportAssistantMessage,
-        ReportDailyReport,
-        ReportDataSource,
-        ReportRecord,
-        ReportWeeklyReport,
-    )
-
     workspace = session.get(Workspace, workspace_id)
     if not workspace:
         raise HTTPException(status_code=404, detail="工作区不存在")
 
-    purge_workspace_data(
-        session,
-        workspace_id,
-        extra_models=(KnowledgeBase, KnowledgeChunk, ReportAlert, ReportAlertRule, ReportAssistant, ReportAssistantMessage, ReportDailyReport, ReportDataSource, ReportRecord, ReportWeeklyReport),
-    )
+    purge_workspace_data(session, workspace_id)
 
     write_audit(
         session,
@@ -3870,29 +3852,12 @@ def delete_own_workspace(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     """所有者自删工作区：与管理员删除共用同一条级联清理路径。"""
-    from db.report_models import (
-        KnowledgeBase,
-        KnowledgeChunk,
-        ReportAlert,
-        ReportAlertRule,
-        ReportAssistant,
-        ReportAssistantMessage,
-        ReportDailyReport,
-        ReportDataSource,
-        ReportRecord,
-        ReportWeeklyReport,
-    )
-
     workspace = _workspace_or_404(session, workspace_id)
     membership = _membership_for_workspace(session, user, workspace_id)
     if membership.role != "owner":
         raise HTTPException(status_code=403, detail="只有工作区所有者可以删除工作区")
 
-    purge_workspace_data(
-        session,
-        workspace_id,
-        extra_models=(KnowledgeBase, KnowledgeChunk, ReportAlert, ReportAlertRule, ReportAssistant, ReportAssistantMessage, ReportDailyReport, ReportDataSource, ReportRecord, ReportWeeklyReport),
-    )
+    purge_workspace_data(session, workspace_id)
 
     write_audit(
         session,
@@ -3908,20 +3873,23 @@ def delete_own_workspace(
     return {"deleted": workspace_id}
 
 
-def purge_workspace_data(session: Session, workspace_id: str, *, extra_models: tuple = ()) -> None:
+def purge_workspace_data(session: Session, workspace_id: str) -> None:
     """按 workspace_id 逐表清理工作区数据（全部走参数化查询）。
 
-    ``extra_models`` 是位于 db.report_models 等模块、避免在模块顶层
-    引入循环导入的表；调用方按需传入。
+    删除顺序即依赖顺序：被引用的行（父）必须在引用它们的行（子）之后
+    删除，否则 Postgres 的外键约束会拒绝删除（SQLite 默认不强制，
+    但顺序同样保持正确）。
     """
     from db.report_models import (
         KnowledgeBase,
+        KnowledgeChunk,
         ReportAlert,
         ReportAlertRule,
         ReportAssistant,
         ReportAssistantMessage,
         ReportDailyReport,
         ReportDataSource,
+        ReportMonthlyReport,
         ReportRecord,
         ReportWeeklyReport,
     )
@@ -3943,29 +3911,39 @@ def purge_workspace_data(session: Session, workspace_id: str, *, extra_models: t
         ).all():
             session.delete(message)
 
+    # 子表在前、父表在后；KnowledgeChunk 必须先于 KnowledgeBase 删除
     for model in (
-        Membership,
-        TaskComment,
-        Deliverable,
-        Project,
+        TaskComment,           # → tasks
+        Deliverable,           # → tasks / conversations / agent_runs / work_plans
+        AgentRun,              # → tasks / work_plans / work_plan_steps
         Task,
         WorkPlan,
         Conversation,
-        AgentRun,
+        Membership,
         Attachment,
         AuditEvent,
         Notification,
         NotificationTarget,
         ScheduledJob,
-        BusinessAssistant,
-        BusinessAssistantMessage,
-        BusinessDataSource,
-        BusinessRecord,
+        BusinessAssistantMessage,  # → business_assistants
+        BusinessRecord,            # → business_data_sources
+        BusinessAlert,             # → rules / sources / records
         BusinessAlertRule,
-        BusinessAlert,
         BusinessBossTask,
+        BusinessAssistant,
+        BusinessDataSource,
         BusinessDailyReport,
-        *extra_models,
+        ReportAssistantMessage,    # → report_assistants
+        ReportRecord,              # → report_data_sources
+        ReportAlert,               # → rules / sources
+        ReportAlertRule,
+        KnowledgeChunk,            # → knowledge_bases
+        KnowledgeBase,
+        ReportDataSource,
+        ReportWeeklyReport,
+        ReportMonthlyReport,
+        ReportDailyReport,
+        ReportAssistant,
     ):
         drop_rows(model)
 

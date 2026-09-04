@@ -29,7 +29,6 @@ from config import settings
 from core.assistant_ai import generate_answer_sync, render_user_prompt
 from core.knowledge_retrieval import (
     reindex_knowledge_base,
-    retrieve_knowledge,
     retrieve_knowledge_smart_sync,
 )
 from db.database import get_session
@@ -1256,8 +1255,6 @@ def create_knowledge_base(
     )
     session.commit()
     try:
-        from core.knowledge_retrieval import reindex_knowledge_base
-
         asyncio.run(reindex_knowledge_base(session, context.workspace.id, kb))
     except Exception:  # noqa: BLE001 - 向量索引失败不阻塞知识库创建
         logging.getLogger(__name__).debug("knowledge index failed", exc_info=True)
@@ -1331,8 +1328,6 @@ async def upload_knowledge_base_file(
     )
     session.commit()
     try:
-        from core.knowledge_retrieval import reindex_knowledge_base
-
         await reindex_knowledge_base(session, context.workspace.id, kb)
     except Exception:  # noqa: BLE001 - 向量索引失败不阻塞知识库上传
         logging.getLogger(__name__).debug("knowledge index failed", exc_info=True)
@@ -1366,8 +1361,6 @@ def update_knowledge_base(
     )
     session.commit()
     try:
-        from core.knowledge_retrieval import reindex_knowledge_base
-
         asyncio.run(reindex_knowledge_base(session, context.workspace.id, kb))
     except Exception:  # noqa: BLE001 - 向量索引失败不阻塞知识库更新
         logging.getLogger(__name__).debug("knowledge index failed", exc_info=True)

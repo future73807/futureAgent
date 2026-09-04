@@ -15,7 +15,7 @@ from sqlmodel import Session, select
 
 from api.dependencies import WorkspaceContext, get_workspace_context, require_workspace_role, write_audit
 from db.database import get_session
-from db.models import Notification, NotificationTarget, new_id, now_utc
+from db.models import Notification, NotificationTarget, now_utc
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
