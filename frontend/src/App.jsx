@@ -48,6 +48,7 @@ import {
   FileAddOutlined,
   FileTextOutlined,
   FolderOpenOutlined,
+  GlobalOutlined,
   LogoutOutlined,
   MenuOutlined,
   MessageOutlined,
