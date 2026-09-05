@@ -94,8 +94,10 @@ Copy-Item .env.example .env
 
 ```powershell
 python -m unittest discover -s tests -v
-cd frontend && npm run build
-cd ../admin-frontend && npm run build
+cd frontend && npm run build && npm test
+# E2E 冒烟（需先启动 API 与前端 preview）：
+#   cd frontend && npx vite preview --port 8899 &  node e2e/smoke.mjs
+cd ../admin-frontend && npm run build && npm test
 docker compose config --quiet
 ```
 
