@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
-import { DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
+import { CopyOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import { App, Button, Card, Input, Modal, Popconfirm, Space, Table, Tag, Typography } from 'antd'
-import { apiFetch, toUserErrorMessage } from '../api.js'
+import { apiFetch, getAccessToken, toUserErrorMessage } from '../api.js'
 
 const { Title, Text } = Typography
 const emptySkill = { name: '', description: '', system_prompt: '', allowed_tool_names: [] }
@@ -48,15 +48,41 @@ export default function SkillsPage() {
     catch (error) { message.error(toUserErrorMessage(error, '删除技能失败，请稍后重试。')) }
   }
 
+  const copySkill = async (name) => {
+    try {
+      const payload = await apiFetch(`/api/v1/skills/${name}/copy`, { method: 'POST' })
+      message.success(`已复制为「${payload.skill.name}」`)
+      load()
+    } catch (error) { message.error(toUserErrorMessage(error, '复制技能失败，请稍后重试。')) }
+  }
+
+  const exportSkill = async (name) => {
+    try {
+      const response = await fetch(`/api/v1/skills/${name}/export`, { headers: { Authorization: `Bearer ${getAccessToken()}` }, credentials: 'include' })
+      if (!response.ok) throw new Error(`导出失败（${response.status}）`)
+      const blob = await response.blob()
+      const link = document.createElement('a')
+      link.href = URL.createObjectURL(blob)
+      link.download = `${name}.yaml`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(link.href)
+      message.success('技能 YAML 已导出')
+    } catch (error) { message.error(toUserErrorMessage(error, '导出技能失败，请稍后重试。')) }
+  }
+
   const columns = [
     { title: '名称', dataIndex: 'name', render: (value) => <span className="code-text">{value}</span> },
     { title: '描述', dataIndex: 'description' },
     { title: '工具白名单', dataIndex: 'allowed_tool_names', render: (values) => <Space wrap>{values?.length ? values.map((value) => <Tag color="cyan" key={value}>{value}</Tag>) : <Tag>全部授权工具</Tag>}</Space> },
     {
-      title: '操作', width: 170,
+      title: '操作', width: 260,
       render: (_, skill) => skill.name === 'default' ? <Tag>内置</Tag> : (
         <Space>
           <Button type="link" icon={<EditOutlined />} onClick={() => showEditor(skill)}>编辑</Button>
+          <Button type="link" icon={<CopyOutlined />} onClick={() => copySkill(skill.name)}>复制</Button>
+          <Button type="link" icon={<DownloadOutlined />} onClick={() => exportSkill(skill.name)}>导出</Button>
           <Popconfirm title="删除这个技能？" onConfirm={() => remove(skill.name)} okText="确认" cancelText="取消"><Button danger type="link" icon={<DeleteOutlined />}>删除</Button></Popconfirm>
         </Space>
       ),

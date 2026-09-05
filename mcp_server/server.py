@@ -4,6 +4,8 @@
 ``/workspace``。Python 执行工具只应在隔离容器内显式启用。
 """
 import asyncio
+from collections import OrderedDict
+import time
 import csv
 import hashlib
 import hmac
@@ -752,6 +754,31 @@ def _search_result_url(value: str) -> str:
     return unquote(redirected[0]) if redirected else candidate
 
 
+_search_cache: "OrderedDict[tuple[str, int], tuple[float, dict]]" = OrderedDict()
+SEARCH_CACHE_TTL_SECONDS = 300.0
+SEARCH_CACHE_MAX_ENTRIES = 128
+
+
+def _search_cache_get(key: tuple[str, int]) -> dict | None:
+    """TTL 内命中则返回缓存副本（LRU 顺序刷新）；过期/未命中返回 None。"""
+    entry = _search_cache.get(key)
+    if entry is None:
+        return None
+    cached_at, response = entry
+    if time.monotonic() - cached_at > SEARCH_CACHE_TTL_SECONDS:
+        _search_cache.pop(key, None)
+        return None
+    _search_cache.move_to_end(key)
+    return {**response, "cached": True}
+
+
+def _search_cache_put(key: tuple[str, int], response: dict) -> None:
+    _search_cache[key] = (time.monotonic(), response)
+    _search_cache.move_to_end(key)
+    while len(_search_cache) > SEARCH_CACHE_MAX_ENTRIES:
+        _search_cache.popitem(last=False)
+
+
 @mcp.tool()
 async def web_search(query: str, limit: int = 5) -> dict:
     """通过无需密钥的 DuckDuckGo HTML 搜索公开网页，最多返回 10 条。"""
@@ -759,6 +786,10 @@ async def web_search(query: str, limit: int = 5) -> dict:
     if not query or len(query) > 500:
         raise ValueError("搜索词长度必须为 1 到 500 个字符")
     limit = max(1, min(limit, 10))
+    cache_key = (query, limit)
+    cached = _search_cache_get(cache_key)
+    if cached is not None:
+        return cached
     search_url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
     try:
         page = await _fetch_web_resource(search_url, preserve_html=True)
@@ -778,6 +809,8 @@ async def web_search(query: str, limit: int = 5) -> dict:
     }
     if not selected:
         response["warning"] = "搜索服务未返回可解析结果，可能是无结果、网络限制或上游页面变更"
+    else:
+        _search_cache_put(cache_key, response)
     return response
 
 

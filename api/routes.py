@@ -9,6 +9,7 @@ membership on the server.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import re
@@ -2989,6 +2990,12 @@ async def execute_task_steps_in_parallel(
             batch.finished_at = now_utc()
             session.add(batch)
             session.commit()
+            # 汇总失败步骤，供前端"重试失败步骤"一键拉起下一批
+            failed_step_ids = [
+                run.step_id
+                for run, _step, _prompt in runs
+                if run.status == "failed"
+            ]
             push_notification(
                 session,
                 context.workspace.id,
@@ -3002,7 +3009,14 @@ async def execute_task_steps_in_parallel(
             session.commit()
             yield {
                 "event": "done",
-                "data": json.dumps({"batch_id": batch_id, "total": len(workers)}, default=str),
+                "data": json.dumps(
+                    {
+                        "batch_id": batch_id,
+                        "total": len(workers),
+                        "failed_step_ids": failed_step_ids,
+                    },
+                    default=str,
+                ),
             }
         finally:
             for worker in workers:
@@ -3515,6 +3529,59 @@ def update_skill(
     write_audit(session, actor_id=user.id, action="skill.updated", target_type="skill", target_id=saved.name)
     session.commit()
     return {"skill": saved.model_dump()}
+
+
+@router.post("/v1/skills/{skill_name}/copy", status_code=status.HTTP_201_CREATED)
+def copy_skill(
+    skill_name: str,
+    context: WorkspaceContext = Depends(get_workspace_context),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """复制现有技能为副本（名称加 -copy 后缀，可改），方便沉淀团队模板。"""
+    user: User = require_platform_admin(session=session)
+    manager = SkillManager()
+    source = manager.get_skill(skill_name)
+    if not source:
+        raise HTTPException(status_code=404, detail=f"技能“{skill_name}”不存在")
+    base = f"{source.name}-copy"
+    new_name = base
+    suffix = 1
+    while manager.get_skill(new_name):
+        suffix += 1
+        new_name = f"{base}-{suffix}"
+    copied = source.model_copy(update={"name": new_name})
+    try:
+        saved = manager.save_skill(copied)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    write_audit(session, actor_id=user.id, action="skill.created", target_type="skill", target_id=saved.name, metadata={"copied_from": source.name})
+    session.commit()
+    return {"skill": saved.model_dump()}
+
+
+@router.get("/v1/skills/{skill_name}/export")
+def export_skill(
+    skill_name: str,
+    context: WorkspaceContext = Depends(get_workspace_context),
+) -> StreamingResponse:
+    """导出技能 YAML（团队模板沉淀/迁移）。"""
+    role = _effective_role(context)
+    if not AuthManager().is_allowed(role, f"skill:{skill_name}", "use"):
+        raise HTTPException(status_code=403, detail="没有导出该技能的权限")
+    skill = SkillManager().get_skill(skill_name)
+    if not skill:
+        raise HTTPException(status_code=404, detail=f"技能“{skill_name}”不存在")
+    import yaml as pyyaml
+
+    content = pyyaml.safe_dump(skill.model_dump(), allow_unicode=True, sort_keys=False, width=100)
+    from urllib.parse import quote as urlquote
+
+    safe_name = re.sub(r'[^ -~]', "_", skill.name) or "skill"
+    return StreamingResponse(
+        io.BytesIO(content.encode("utf-8")),
+        media_type="application/x-yaml; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename=\"{safe_name}.yaml\"; filename*=UTF-8''{urlquote(skill.name)}.yaml"},
+    )
 
 
 @router.delete("/v1/skills/{skill_name}", status_code=status.HTTP_204_NO_CONTENT)

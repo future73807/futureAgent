@@ -628,6 +628,7 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
   const [liveOutput, setLiveOutput] = useState('')
   const [activeRunId, setActiveRunId] = useState('')
   const [batchOutput, setBatchOutput] = useState([])
+  const [failedStepIds, setFailedStepIds] = useState([])
   const [batchRunning, setBatchRunning] = useState(false)
   const [activeBatchId, setActiveBatchId] = useState('')
   const [batchHistory, setBatchHistory] = useState([])
@@ -759,19 +760,23 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
   const executable = Boolean(plan && ['approved', 'in_progress'].includes(plan.status) && canWrite && models.some((item) => item.id === modelId && item.ready) && skillName && stepId)
   const pendingSteps = (plan?.steps || []).filter((step) => step.status === 'pending')
   const batchExecutable = Boolean(plan && ['approved', 'in_progress'].includes(plan.status) && canWrite && pendingSteps.length >= 2 && models.some((item) => item.id === modelId && item.ready) && skillName)
-  const executeParallel = async () => {
-    if (!batchExecutable || batchRunning) return
+  const executeParallel = async (retryStepIds = null) => {
+    const targets = retryStepIds
+      ? (plan?.steps || []).filter((step) => retryStepIds.includes(step.id))
+      : pendingSteps
+    if (!plan || batchRunning || !targets.length) return
+    if (!retryStepIds && targets.length < 2) return
     const executionTaskId = taskId
     const controller = new AbortController()
     executionAbortRef.current = controller
-    const stepName = (stepId) => plan.steps.find((step) => step.id === stepId)?.title || stepId
-    setBatchOutput(pendingSteps.map((step) => ({ stepId: step.id, title: step.title, status: 'running', text: '' })))
+    setBatchOutput(targets.map((step) => ({ stepId: step.id, title: step.title, status: 'running', text: '' })))
     setBatchRunning(true)
     setActiveBatchId('')
+    setFailedStepIds([])
     try {
       await streamSSE(
         `/api/v1/tasks/${executionTaskId}/execute-parallel`,
-        { model_id: modelId, skill_name: skillName, mcp_servers: selectedMcpServers },
+        { model_id: modelId, skill_name: skillName, mcp_servers: selectedMcpServers, step_ids: retryStepIds || undefined },
         {
           signal: controller.signal,
           onEvent: (event, data) => {
@@ -784,10 +789,15 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
             try { parsed = JSON.parse(data) } catch { return }
             if (event === 'meta') {
               setActiveBatchId(parsed.batch_id || '')
+              setFailedStepIds([])
               setBatchOutput((previous) => previous.map((item) => ({
                 ...item,
                 runId: (parsed.runs || []).find((run) => run.step_id === item.stepId)?.id || '',
               })))
+              return
+            }
+            if (event === 'done') {
+              setFailedStepIds(parsed.failed_step_ids || [])
               return
             }
             const stepId = parsed.step_id
@@ -799,7 +809,7 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
               if (event === 'step-error') return { ...item, status: 'failed', error: parsed.message }
               return item
             }))
-          },
+          }
         },
       )
       message.success('并行批次执行完成，请逐条审核结果')
@@ -823,7 +833,7 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
       await loadRuns(taskId)
     } catch (error) { message.error(readableError(error)) }
   }
-  return <Card className="work-results" title={t('work.card.ai')} extra={<Space><Button type="primary" icon={<RobotOutlined />} loading={running} disabled={!executable} onClick={() => execute()}>{t('work.btn.executeStep')}</Button>{pendingSteps.length >= 2 && <Tooltip title={`并行执行 ${pendingSteps.length} 个待执行步骤，整批占用一个并发槽`}><Button icon={<ThunderboltOutlined />} loading={batchRunning} disabled={!batchExecutable || running} onClick={executeParallel}>{t('work.btn.executeParallel')}（{pendingSteps.length}）</Button></Tooltip>}{batchRunning && activeBatchId && <Button danger onClick={cancelBatch}>取消整批</Button>}{running && activeRunId && <Button danger icon={<StopOutlined />} onClick={() => cancelRun(activeRunId)}>取消</Button>}</Space>}>
+  return <Card className="work-results" title={t('work.card.ai')} extra={<Space><Button type="primary" icon={<RobotOutlined />} loading={running} disabled={!executable} onClick={() => execute()}>{t('work.btn.executeStep')}</Button>{pendingSteps.length >= 2 && <Tooltip title={`并行执行 ${pendingSteps.length} 个待执行步骤，整批占用一个并发槽`}><Button icon={<ThunderboltOutlined />} loading={batchRunning} disabled={!batchExecutable || running} onClick={executeParallel}>{t('work.btn.executeParallel')}（{pendingSteps.length}）</Button></Tooltip>}{batchRunning && activeBatchId && <Button danger onClick={cancelBatch}>取消整批</Button>}{!batchRunning && failedStepIds.length > 0 && <Button type="primary" danger icon={<ThunderboltOutlined />} onClick={() => executeParallel(failedStepIds)}>重试失败步骤（{failedStepIds.length}）</Button>}{running && activeRunId && <Button danger icon={<StopOutlined />} onClick={() => cancelRun(activeRunId)}>取消</Button>}</Space>}>
     <Space direction="vertical" size="small" style={{ width: '100%' }}><Text type="secondary">AI 只会接收已批准任务、选中计划步骤和附件中的有限文本上下文；结果保存后必须由人工审核，不会自动通过步骤。</Text>{batchRunning && <Alert type="info" showIcon message={`并行批次执行中：${batchOutput.filter((item) => item.status !== 'running').length}/${batchOutput.length} 个步骤已完成`} />}{batchOutput.length > 0 && <div className="batch-output">{batchOutput.map((item) => (
       <Card key={item.stepId} size="small" className={`batch-step-card batch-step-${item.status}`} title={<Space size={6}>{item.title}<Tag color={item.status === 'succeeded' ? 'success' : item.status === 'failed' ? 'error' : item.status === 'cancelled' ? 'default' : 'processing'}>{item.status === 'running' ? '执行中' : item.status === 'succeeded' ? '已完成' : item.status === 'failed' ? '失败' : '已取消'}</Tag></Space>} extra={item.error ? <Text type="danger">{item.error}</Text> : undefined}>
         {item.text ? <pre className="attachment-preview">{item.text}</pre> : <Text type="secondary">等待模型输出…</Text>}

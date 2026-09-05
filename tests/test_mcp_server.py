@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import hashlib
 import hmac
@@ -7,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from datetime import timedelta
 from pathlib import Path
@@ -342,6 +344,40 @@ class BundledSkillMappingTests(unittest.TestCase):
 
         coder = manager.get_skill("coder")
         self.assertTrue({"list_files", "edit_file"}.issubset(coder.allowed_tool_names))
+
+    def test_web_search_cache_hit_avoids_second_fetch(self):
+        from unittest.mock import patch
+
+        server._search_cache.clear()
+        calls = []
+
+        async def fake_fetch(url, **kwargs):
+            calls.append(url)
+            return {"text": """
+                <a class="result__a" href="https://example.com/a">结果A</a>
+                <a class="result__snippet">片段A</a>
+                """}
+
+        with (
+            patch.object(server, "_fetch_web_resource", side_effect=fake_fetch),
+            patch.object(server, "SEARCH_CACHE_TTL_SECONDS", 300.0),
+        ):
+            first = asyncio.run(server.web_search("缓存测试", limit=3))
+            second = asyncio.run(server.web_search("缓存测试", limit=3))
+
+        self.assertEqual(len(calls), 1, "第二次相同查询不应重新抓取")
+        self.assertEqual(first["result_count"], second["result_count"])
+        self.assertTrue(second.get("cached"))
+
+    def test_web_search_cache_expiry(self):
+        server._search_cache.clear()
+        key = ("过期查询", 5)
+        server._search_cache[key] = (
+            time.monotonic() - server.SEARCH_CACHE_TTL_SECONDS - 1,
+            {"query": "过期查询", "results": [], "result_count": 0},
+        )
+        self.assertIsNone(server._search_cache_get(key))
+        server._search_cache.clear()
 
 
 if __name__ == "__main__":

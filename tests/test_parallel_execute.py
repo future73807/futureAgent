@@ -9,7 +9,7 @@ from uuid import uuid4
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
-from sqlmodel import SQLModel, Session, create_engine, select
+from sqlmodel import SQLModel, Session, create_engine
 
 import db.database as database
 from config import settings
@@ -249,6 +249,43 @@ class ParallelExecutionTests(unittest.TestCase):
         self.assertEqual(detail.status_code, 200, detail.text)
         self.assertEqual(len(detail.json()["runs"]), 2)
         self.assertTrue(all(run["status"] == "succeeded" for run in detail.json()["runs"]))
+
+    def test_parallel_execution_with_step_ids_subset_and_done_payload(self):
+        task_id, step_ids = self._approved_plan_with_steps(["子集一", "子集二"])
+
+        class FakeSkillManager:
+            @staticmethod
+            def get_skill(name):
+                return object() if name == "default" else None
+
+        class FakeMcpManager:
+            servers = {"web_tools": "http://tools.invalid/mcp"}
+
+        class FakeEngine:
+            skill_manager = FakeSkillManager()
+            mcp_manager = FakeMcpManager()
+
+            @staticmethod
+            def validate_permissions(*_args, **_kwargs):
+                return None
+
+            async def run(self, **kwargs):
+                yield "subset output"
+
+        with patch("api.routes.get_agent_engine", return_value=FakeEngine()),                 patch("api.routes._ensure_model_ready"):
+            response = self.client.post(
+                f"/api/v1/tasks/{task_id}/execute-parallel",
+                json={"model_id": "gpt-4o-mini", "skill_name": "default", "step_ids": step_ids[:1]},
+                headers=self.headers(),
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn('failed_step_ids', response.text)
+        runs = self.client.get(f"/api/v1/tasks/{task_id}/runs", headers=self.headers()).json()["runs"]
+        self.assertEqual(len(runs), 1)
+        # 未选中的步骤保持 pending，可后续单独执行
+        plan = self.client.get(f"/api/v1/tasks/{task_id}/plan", headers=self.headers()).json()["plan"]
+        untouched = next(step for step in plan["steps"] if step["id"] == step_ids[1])
+        self.assertEqual(untouched["status"], "pending")
 
 
 if __name__ == "__main__":
