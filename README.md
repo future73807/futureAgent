@@ -58,6 +58,27 @@ cd frontend && npm install && npm run dev
 cd ../admin-frontend && npm install && npm run dev
 ```
 
+## 6. 本地开发启用 MCP（联网搜索 / 文件工具 / 交付物生成）
+
+本地不开 Docker 也能用 MCP 工具链，三个终端即可：
+
+```powershell
+# 终端 1：启动 MCP 工具服务（默认监听 8050，签名密钥默认与 API 一致）
+py mcp_server/server.py
+
+# 终端 2：以启用工作区工具的方式启动 API
+#   （.env 写入 ENABLE_LOCAL_MCP_TOOLS=true 亦可）
+ENABLE_LOCAL_MCP_TOOLS=true python -m uvicorn main:app --port 8000
+
+# 终端 3：前端
+cd frontend && npm run dev
+```
+
+无需 `.env`：`MCP_SERVERS_JSON` 缺省即指向 `http://localhost:8050/mcp`，
+MCP 服务的签名密钥默认与 API 一致。启动后在对话页“按需启用工具”选择
+`工作区与联网工具`，即可让 AI 联网搜索、读写工作区文件、生成 xlsx/docx/
+图表并登记为交付物。联网搜索无需任何 API 密钥（DuckDuckGo HTML）。
+
 ## 6. 模型与 API 配置
 
 先从示例生成只在本机使用的配置文件；`.env` 已被 Git 忽略，不要把真实密钥提交到仓库：

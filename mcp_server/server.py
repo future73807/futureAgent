@@ -33,7 +33,13 @@ MAX_WEB_BYTES = max(10_000, min(int(os.getenv("MCP_WEB_MAX_BYTES", "500000")), 2
 WEB_TIMEOUT_SECONDS = max(2.0, min(float(os.getenv("MCP_WEB_TIMEOUT_SECONDS", "15")), 60.0))
 ENABLE_PYTHON_TOOL = os.getenv("MCP_ENABLE_PYTHON_TOOL", "false").lower() in {"1", "true", "yes", "on"}
 ALLOW_DNS_FAKE_IPS = os.getenv("MCP_WEB_ALLOW_DNS_FAKE_IPS", "false").lower() in {"1", "true", "yes", "on"}
-WORKSPACE_SIGNING_KEY = os.getenv("MCP_WORKSPACE_SIGNING_KEY", "")
+WORKSPACE_SIGNING_KEY = os.getenv(
+    "MCP_WORKSPACE_SIGNING_KEY",
+    # 与 API config.py 的默认开发密钥一致：本地直跑 mcp_server/server.py
+    # 时无需额外配置即可与 API 完成工作区签名握手。compose/生产必须显式
+    # 覆盖为真实密钥；置空则拒绝所有文件操作。
+    "change-this-development-mcp-secret-before-production",
+)
 DNS_FAKE_IP_NETWORK = ipaddress.ip_network("198.18.0.0/15")
 ALLOWED_HOSTS = [
     value.strip()
