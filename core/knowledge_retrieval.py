@@ -210,9 +210,15 @@ def _is_postgres(session: Session) -> bool:
 
 
 def _pg_vector_hits(session: Session, workspace_id: str, query_vector: list[float], limit: int) -> list[dict[str, Any]]:
-    """Postgres：用 pgvector 的 `<=>` 距离在库内完成余弦打分（精确检索）。"""
+    """Postgres：用 pgvector 的 `<=>` 距离在库内完成余弦打分（HNSW 近似检索）。
+
+    ``SET LOCAL hnsw.ef_search`` 只影响当前事务：越大召回越高、越慢，
+    取值来自 ``HNSW_EF_SEARCH`` 配置。
+    """
     from sqlalchemy import text
 
+    ef_search = max(1, int(settings.hnsw_ef_search))
+    session.execute(text("SET LOCAL hnsw.ef_search = :ef"), {"ef": ef_search})
     rows = session.execute(
         text(_PG_VECTOR_HITS_SQL),
         {

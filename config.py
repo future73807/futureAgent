@@ -109,6 +109,15 @@ class Settings(BaseSettings):
     # 向量维度：决定 pgvector 列的 typmod 与 HNSW 索引；更换模型后需同步修改
     # 并对知识库重建索引（更新任一知识库文档即可触发重切块）。
     embedding_dim: int = 1024
+    # HNSW 调参（仅 Postgres 生效）：
+    #   m                 每节点最大连接数，越大召回越高、索引越大构建越慢
+    #   ef_construction   构建时搜索宽度，越大索引质量越高、构建越慢
+    #   ef_search         查询时搜索宽度，越大召回越高、查询越慢（可在线调）
+    # 经验：10k~100k 块规模 m=16/ef_c=64/ef_s=40 是召回/延迟的均衡点；
+    # 百万级建议 m=32/ef_c=128/ef_s=64。
+    hnsw_m: int = 16
+    hnsw_ef_construction: int = 64
+    hnsw_ef_search: int = 40
     environment: str = "development"
 
     @computed_field

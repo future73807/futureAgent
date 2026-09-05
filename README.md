@@ -143,7 +143,19 @@ docker compose config --quiet
 
 对标分析见 `docs/workbuddy-gap-analysis.md`。已完成的 P0/P1 能力：智能体 LLM 化与知识检索、定时自动化、交付物中心、通知中心、消息分页与全局搜索、PDF 解析、看板拖拽/日历/评论、暗色模式、PWA、管理端运营闭环、认证限流、多 Agent 并行编排、本地 Qwen 向量召回（混合检索）、对话归档/重命名/删除、Markdown 渲染、会话吊销、报告详情与 CSV 导出。
 
-后续候选：pgvector HNSW 索引（数据量触发，原生列已落地）、IM 入站闭环的双向指令（需企微/飞书应用凭据）、i18n。
+后续候选：IM 入站闭环的双向指令（需企微/飞书应用凭据）、前端 E2E 用例扩充、批次重试策略产品化。
+
+### pgvector HNSW 调参
+
+HNSW 索引参数由配置生成（迁移 20260902_17），查询宽度在线可调：
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `HNSW_M` | 16 | 每节点连接数；越大召回越高、索引越大构建越慢 |
+| `HNSW_EF_CONSTRUCTION` | 64 | 构建搜索宽度；越大索引质量越高 |
+| `HNSW_EF_SEARCH` | 40 | 查询搜索宽度；在线可调 |
+
+**20k 块 / 256 维 / 50 查询实测**（`scripts/benchmark_hnsw.py`）：精确扫描 recall 100% / p50 28.1ms；HNSW `ef_search=40` **recall 100% / p50 15.7ms**（约 2 倍提速）——默认值即均衡点。召回低于预期时加大 `HNSW_EF_SEARCH`；更换 embedding 模型后更新 `EMBEDDING_DIM` 并重跑迁移/重建索引。
 
 ## 许可证
 

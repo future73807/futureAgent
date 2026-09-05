@@ -24,6 +24,9 @@ services:
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-off}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-qwen3-embedding}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+      HNSW_M: ${HNSW_M:-16}
+      HNSW_EF_CONSTRUCTION: ${HNSW_EF_CONSTRUCTION:-64}
+      HNSW_EF_SEARCH: ${HNSW_EF_SEARCH:-40}
       # The bundled MCP server verifies a signed workspace claim and roots
       # every file operation in that tenant's private directory.  This safe
       # Compose path can therefore expose its five file tools by default.

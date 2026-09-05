@@ -30,12 +30,15 @@ def upgrade() -> None:
     from sqlalchemy import text
 
     dim = max(1, int(settings.embedding_dim))
+    m = max(2, int(settings.hnsw_m))
+    ef_construction = max(1, int(settings.hnsw_ef_construction))
     index_name = "ix_knowledge_chunks_embedding_vec_hnsw"
     bind.execute(text(f"ALTER TABLE knowledge_chunks ALTER COLUMN embedding_vec TYPE vector({dim})"))
     bind.execute(text(f"DROP INDEX IF EXISTS {index_name}"))
     bind.execute(text(
         f"CREATE INDEX IF NOT EXISTS {index_name} "
-        f"ON knowledge_chunks USING hnsw (embedding_vec vector_cosine_ops)"
+        f"ON knowledge_chunks USING hnsw (embedding_vec vector_cosine_ops) "
+        f"WITH (m = {m}, ef_construction = {ef_construction})"
     ))
 
 
