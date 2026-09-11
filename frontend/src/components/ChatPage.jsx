@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import AntApp from 'antd/es/app'
+import Alert from 'antd/es/alert'
 import Avatar from 'antd/es/avatar'
 import Button from 'antd/es/button'
 import Drawer from 'antd/es/drawer'
@@ -8,8 +9,10 @@ import Flex from 'antd/es/flex'
 import Form from 'antd/es/form'
 import Image from 'antd/es/image'
 import Input from 'antd/es/input'
+import InputNumber from 'antd/es/input-number'
 import List from 'antd/es/list'
 import Modal from 'antd/es/modal'
+import Segmented from 'antd/es/segmented'
 import Select from 'antd/es/select'
 import Spin from 'antd/es/spin'
 import Space from 'antd/es/space'
@@ -23,7 +26,7 @@ import Welcome from '@ant-design/x/es/welcome'
 import XProvider from '@ant-design/x/es/x-provider'
 import zhCN from 'antd/es/locale/zh_CN'
 import { apiFetch, downloadAttachment, getAttachmentBlob, streamSSE, uploadAttachment } from '../api.js'
-import { mcpOptionLabel, mcpServerUnavailable, skillDisplayName } from '../ui-labels.js'
+import { agentModeDisplayName, agentModeHint, agentModeRequirement, agentModes, iterationVerdictLabel, mcpOptionLabel, mcpServerUnavailable, skillDisplayName } from '../ui-labels.js'
 import { renderMarkdown } from '../markdown.js'
 import { validateUpload } from '../upload-guard.js'
 
@@ -45,6 +48,11 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
   const [model, setModel] = useState('')
   const [skill, setSkill] = useState('')
   const [selectedMcpServers, setSelectedMcpServers] = useState([])
+  const [mode, setMode] = useState('agent')
+  const [goal, setGoal] = useState('')
+  const [criteria, setCriteria] = useState('')
+  const [maxIterations, setMaxIterations] = useState(5)
+  const [iterations, setIterations] = useState([])
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [liveMessages, setLiveMessages] = useState([])
@@ -132,15 +140,22 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
   const send = async (value) => {
     const query = value.trim()
     if (!query || streaming || !activeConversation || !canWrite) return
+    const requirement = agentModeRequirement(mode)
+    if (requirement === 'goal' && !goal.trim()) { message.warning('目标模式需要先填写目标，否则无法判定是否达成'); return }
+    if (requirement === 'criteria' && !criteria.trim()) { message.warning('循环模式需要先填写停止条件，否则会一直迭代到轮次上限'); return }
     const conversationId = activeConversation.id
     const userMessage = { id: `local-user-${Date.now()}`, role: 'user', content: query }
     const assistantId = `local-assistant-${Date.now()}`
     setLiveMessages([userMessage, { id: assistantId, role: 'assistant', content: '', loading: true }])
-    setInput(''); setStreaming(true)
+    setInput(''); setStreaming(true); setIterations([])
     const controller = new AbortController(); abortRef.current = controller
     try {
-      await streamSSE('/api/v1/chat/agent', { query, model_id: model, skill_name: skill || 'default', conversation_id: conversationId, mcp_servers: selectedMcpServers }, { signal: controller.signal, onEvent: (event, data) => {
+      await streamSSE('/api/v1/chat/agent', { query, model_id: model, skill_name: skill || 'default', conversation_id: conversationId, mcp_servers: selectedMcpServers, mode, goal: goal.trim(), success_criteria: criteria.trim(), max_iterations: maxIterations }, { signal: controller.signal, onEvent: (event, data) => {
         if (event === 'error') { let detail = data; try { detail = JSON.parse(data).detail || data } catch { /* 普通 SSE 错误。 */ } throw new Error(detail) }
+        if (event === 'iteration') {
+          try { setIterations((previous) => [...previous, JSON.parse(data)]) } catch { /* 单条轮次事件解析失败不影响正文。 */ }
+          return
+        }
         if (event !== 'token') return
         setLiveMessages((previous) => previous.map((item) => item.id === assistantId ? { ...item, content: item.content + data, loading: false } : item))
       } })
@@ -303,6 +318,13 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
             </Flex>
           </div>
           <Space className="chat-selection-controls" wrap>
+            <Segmented
+              size="small"
+              value={mode}
+              onChange={setMode}
+              aria-label="选择运行模式"
+              options={agentModes.map((item) => ({ value: item, label: agentModeDisplayName(item), title: agentModeHint(item) }))}
+            />
             <Select
               aria-label="选择模型"
               size="small"
@@ -339,6 +361,27 @@ function ChatContent({ conversations, activeConversation, messages, models, skil
               notFoundContent="暂无可用工具服务"
             />
           </Space>
+          <Text className="chat-mode-hint" type="secondary">{agentModeHint(mode)}</Text>
+          {(mode === 'goal' || mode === 'loop') && (
+            <Flex className="chat-mode-fields" gap={8} wrap="wrap" align="center">
+              {mode === 'goal' && <Input size="small" style={{ width: 240, maxWidth: '100%' }} placeholder="目标（必填）" value={goal} onChange={(event) => setGoal(event.target.value)} aria-label="目标" />}
+              <Input size="small" style={{ width: 240, maxWidth: '100%' }} placeholder={mode === 'goal' ? '达成标准（必填）' : '停止条件（必填）'} value={criteria} onChange={(event) => setCriteria(event.target.value)} aria-label="达成标准或停止条件" />
+              <InputNumber size="small" min={1} max={20} value={maxIterations} onChange={(value) => setMaxIterations(value || 1)} aria-label="最大轮次" addonAfter="轮" />
+            </Flex>
+          )}
+          {iterations.length > 0 && (
+            <div className="chat-iterations">
+              {iterations.map((item, index) => (
+                <Alert
+                  key={index}
+                  type={item.verdict === 'met' ? 'success' : item.verdict === 'not_met' ? 'info' : 'warning'}
+                  showIcon
+                  message={`第 ${item.iteration} 轮 · ${iterationVerdictLabel(item.verdict)}`}
+                  description={item.reason}
+                />
+              ))}
+            </div>
+          )}
         </header>
         <div className="messages">
           {hasMoreMessages && bubbleItems.length ? (

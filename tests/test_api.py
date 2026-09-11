@@ -583,6 +583,481 @@ class ProductApiTests(unittest.TestCase):
         self.assertEqual(metrics.status_code, 200, metrics.text)
         self.assertIn(b"futureagent_http_requests_total", metrics.content)
 
+    def test_usage_summary_is_workspace_scoped_and_admin_protected(self):
+        from db.models import UsageRecord, User
+
+        member_workspace = self.client.get(
+            "/api/v1/workspaces", headers=self.auth_headers(self.member_token)
+        ).json()["workspaces"][0]["id"]
+        with Session(database.engine) as session:
+            session.add(
+                UsageRecord(
+                    workspace_id=self.owner_workspace,
+                    user_id=self.owner_id,
+                    model_id="usage-model-owner",
+                    skill_name="chatbot",
+                    source="chat",
+                    source_id="conv-owner",
+                    agent_mode="chat",
+                    input_tokens=100,
+                    output_tokens=40,
+                    total_tokens=140,
+                    llm_calls=1,
+                    tool_calls=2,
+                    duration_ms=1200,
+                )
+            )
+            session.add(
+                UsageRecord(
+                    workspace_id=member_workspace,
+                    user_id=self.member_id,
+                    model_id="usage-model-member",
+                    skill_name="chatbot",
+                    source="agent_run",
+                    source_id="run-member",
+                    agent_mode="agent",
+                    input_tokens=7,
+                    output_tokens=3,
+                    total_tokens=10,
+                    llm_calls=1,
+                )
+            )
+            session.commit()
+
+        owner = self.client.get(
+            "/api/v1/usage/summary?range=all&group_by=model",
+            headers=self.auth_headers(self.owner_token, self.owner_workspace),
+        )
+        self.assertEqual(owner.status_code, 200, owner.text)
+        payload = owner.json()
+        keys = {group["key"] for group in payload["groups"]}
+        self.assertIn("usage-model-owner", keys)
+        # 工作区隔离：别人的用量不得出现在本工作区汇总里。
+        self.assertNotIn("usage-model-member", keys)
+        owner_group = next(
+            group for group in payload["groups"] if group["key"] == "usage-model-owner"
+        )
+        self.assertEqual(owner_group["total_tokens"], 140)
+        self.assertEqual(owner_group["tool_calls"], 2)
+        # 未登记单价的模型不得编造成本。
+        self.assertIsNone(owner_group["cost"])
+        self.assertEqual(owner_group["priced_rows"], 0)
+        self.assertIsNone(payload["totals"]["cost"])
+
+        member = self.client.get(
+            "/api/v1/usage/summary?range=all",
+            headers=self.auth_headers(self.member_token, member_workspace),
+        )
+        member_keys = {group["key"] for group in member.json()["groups"]}
+        self.assertIn("usage-model-member", member_keys)
+        self.assertNotIn("usage-model-owner", member_keys)
+
+        # member 从未被提升为平台管理员，用它验证平台级接口的保护。
+        denied = self.client.get(
+            "/api/v1/admin/usage/summary",
+            headers=self.auth_headers(self.member_token, member_workspace),
+        )
+        self.assertEqual(denied.status_code, 403)
+
+        # 同类中较早的测试会把 owner 提升为平台管理员且不回滚；
+        # 这里先保存原值再恢复，避免本测试改变后续测试依赖的状态。
+        with Session(database.engine) as session:
+            original_admin = session.get(User, self.owner_id).is_platform_admin
+            account = session.get(User, self.owner_id)
+            account.is_platform_admin = True
+            session.add(account)
+            session.commit()
+        try:
+            platform = self.client.get(
+                "/api/v1/admin/usage/summary?range=all",
+                headers=self.auth_headers(self.owner_token, self.owner_workspace),
+            )
+            self.assertEqual(platform.status_code, 200, platform.text)
+            platform_keys = {group["key"] for group in platform.json()["groups"]}
+            self.assertTrue(
+                {"usage-model-owner", "usage-model-member"}.issubset(platform_keys)
+            )
+        finally:
+            with Session(database.engine) as session:
+                account = session.get(User, self.owner_id)
+                account.is_platform_admin = original_admin
+                session.add(account)
+                session.commit()
+
+    def test_permission_mode_is_owner_only_capped_and_validated(self):
+        owner_headers = self.auth_headers(self.owner_token, self.owner_workspace)
+        listing = self.client.get("/api/v1/workspaces", headers=owner_headers)
+        current = next(
+            item for item in listing.json()["workspaces"] if item["id"] == self.owner_workspace
+        )
+        # 存量工作区升级后必须落在最严格档位，不得静默放宽。
+        self.assertEqual(current["permission_mode"], "default")
+        self.assertEqual(current["max_permission_mode"], "full_access")
+
+        invalid = self.client.put(
+            f"/api/v1/workspaces/{self.owner_workspace}/permission-mode",
+            headers=owner_headers,
+            json={"permission_mode": "yolo"},
+        )
+        self.assertEqual(invalid.status_code, 422, invalid.text)
+
+        # 管理员（非所有者）无权调整档位。
+        delegated = self.client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": "perm-admin@example.com",
+                "password": TEST_PASSWORD,
+                "display_name": "Perm Admin",
+                "workspace_name": "Perm home",
+            },
+        )
+        self.assertEqual(delegated.status_code, 201, delegated.text)
+        invited = self.client.post(
+            f"/api/v1/workspaces/{self.owner_workspace}/members",
+            headers=owner_headers,
+            json={"email": "perm-admin@example.com", "role": "admin"},
+        )
+        self.assertEqual(invited.status_code, 201, invited.text)
+        admin_headers = self.auth_headers(
+            delegated.json()["access_token"], self.owner_workspace
+        )
+        forbidden = self.client.put(
+            f"/api/v1/workspaces/{self.owner_workspace}/permission-mode",
+            headers=admin_headers,
+            json={"permission_mode": "full_access"},
+        )
+        self.assertEqual(forbidden.status_code, 403, forbidden.text)
+
+        try:
+            updated = self.client.put(
+                f"/api/v1/workspaces/{self.owner_workspace}/permission-mode",
+                headers=owner_headers,
+                json={"permission_mode": "full_access"},
+            )
+            self.assertEqual(updated.status_code, 200, updated.text)
+            self.assertEqual(updated.json()["workspace"]["permission_mode"], "full_access")
+
+            # 部署上限为 default 时，显式配置更宽档位必须报错而非静默失效。
+            with patch.object(settings, "max_permission_mode", "default"):
+                capped = self.client.put(
+                    f"/api/v1/workspaces/{self.owner_workspace}/permission-mode",
+                    headers=owner_headers,
+                    json={"permission_mode": "auto_approve"},
+                )
+                self.assertEqual(capped.status_code, 422, capped.text)
+                # 读取时生效档位也被上限压回 default。
+                restrained = self.client.get("/api/v1/workspaces", headers=owner_headers)
+                effective = next(
+                    item for item in restrained.json()["workspaces"]
+                    if item["id"] == self.owner_workspace
+                )
+                self.assertEqual(effective["permission_mode"], "default")
+                self.assertEqual(effective["max_permission_mode"], "default")
+
+            audits = self.client.get("/api/v1/audit-events", headers=owner_headers)
+            self.assertTrue(
+                any(
+                    event["action"] == "workspace.permission_mode_updated"
+                    for event in audits.json()["events"]
+                )
+            )
+        finally:
+            restore = self.client.put(
+                f"/api/v1/workspaces/{self.owner_workspace}/permission-mode",
+                headers=owner_headers,
+                json={"permission_mode": "default"},
+            )
+            self.assertEqual(restore.status_code, 200, restore.text)
+
+    def test_auto_approve_mode_approves_plan_on_save_and_default_does_not(self):
+        owner_headers = self.auth_headers(self.owner_token, self.owner_workspace)
+        project = self.client.post(
+            "/api/v1/projects",
+            headers=owner_headers,
+            json={"name": "Approval modes", "description": "Verify auto approval", "color": "#5B5BD6"},
+        )
+        self.assertEqual(project.status_code, 201, project.text)
+        task = self.client.post(
+            "/api/v1/tasks",
+            headers=owner_headers,
+            json={"project_id": project.json()["project"]["id"], "title": "Auto approve me"},
+        )
+        self.assertEqual(task.status_code, 201, task.text)
+        task_id = task.json()["task"]["id"]
+        plan_body = {
+            "objective": "Verify approval behaviour",
+            "steps": [{"title": "Only step", "instructions": "Do the thing."}],
+        }
+
+        draft = self.client.put(
+            f"/api/v1/tasks/{task_id}/plan", headers=owner_headers, json=plan_body
+        )
+        self.assertEqual(draft.status_code, 200, draft.text)
+        self.assertEqual(draft.json()["plan"]["status"], "draft")
+
+        try:
+            promoted = self.client.put(
+                f"/api/v1/workspaces/{self.owner_workspace}/permission-mode",
+                headers=owner_headers,
+                json={"permission_mode": "auto_approve"},
+            )
+            self.assertEqual(promoted.status_code, 200, promoted.text)
+
+            automatic = self.client.put(
+                f"/api/v1/tasks/{task_id}/plan", headers=owner_headers, json=plan_body
+            )
+            self.assertEqual(automatic.status_code, 200, automatic.text)
+            plan = automatic.json()["plan"]
+            self.assertEqual(plan["status"], "approved")
+            self.assertEqual(plan["approved_by"], self.owner_id)
+            self.assertTrue(plan["approved_at"])
+
+            audits = self.client.get("/api/v1/audit-events", headers=owner_headers)
+            auto_events = [
+                event for event in audits.json()["events"]
+                if event["action"] == "work_plan.auto_approved"
+            ]
+            self.assertTrue(auto_events)
+            self.assertEqual(auto_events[0]["metadata"]["permission_mode"], "auto_approve")
+        finally:
+            restore = self.client.put(
+                f"/api/v1/workspaces/{self.owner_workspace}/permission-mode",
+                headers=owner_headers,
+                json={"permission_mode": "default"},
+            )
+            self.assertEqual(restore.status_code, 200, restore.text)
+
+        # 档位恢复后，保存计划重新回到草稿，必须人工批准。
+        manual = self.client.put(
+            f"/api/v1/tasks/{task_id}/plan", headers=owner_headers, json=plan_body
+        )
+        self.assertEqual(manual.status_code, 200, manual.text)
+        self.assertEqual(manual.json()["plan"]["status"], "draft")
+
+    def test_request_cannot_escalate_above_the_workspace_permission_mode(self):
+        from api.routes import _effective_permission_mode
+        from db.models import Workspace
+
+        workspace = Workspace(
+            id="ws-1", name="n", slug="s", owner_id="u-1", permission_mode="default"
+        )
+        # 向上提权被静默丢弃，而不是报错。
+        self.assertEqual(_effective_permission_mode(workspace, "full_access"), "default")
+        self.assertEqual(_effective_permission_mode(workspace, "auto_approve"), "default")
+        self.assertEqual(_effective_permission_mode(workspace), "default")
+
+        workspace.permission_mode = "full_access"
+        # 向下收紧生效。
+        self.assertEqual(_effective_permission_mode(workspace, "default"), "default")
+        self.assertEqual(_effective_permission_mode(workspace, "auto_approve"), "auto_approve")
+        self.assertEqual(_effective_permission_mode(workspace), "full_access")
+
+        # 部署上限优先于工作区档位。
+        with patch.object(settings, "max_permission_mode", "auto_approve"):
+            self.assertEqual(_effective_permission_mode(workspace), "auto_approve")
+        # 非法上限按最严格处理，失败方向是“更严”。
+        with patch.object(settings, "max_permission_mode", "nonsense"):
+            self.assertEqual(_effective_permission_mode(workspace), "default")
+        # 历史数据里的未知档位也归到 default。
+        workspace.permission_mode = "legacy-unknown"
+        self.assertEqual(_effective_permission_mode(workspace), "default")
+
+    def test_supervised_modes_require_their_termination_criterion(self):
+        owner_headers = self.auth_headers(self.owner_token, self.owner_workspace)
+        # goal 靠目标判定达成，缺了它监督者只能一直迭代到烧完预算。
+        goal_missing = self.client.post(
+            "/api/v1/chat/agent",
+            headers=owner_headers,
+            json={"query": "x", "model_id": "gpt-4o-mini", "skill_name": "default", "mode": "goal"},
+        )
+        self.assertEqual(goal_missing.status_code, 422, goal_missing.text)
+        self.assertIn("目标", goal_missing.json()["detail"])
+
+        loop_missing = self.client.post(
+            "/api/v1/chat/agent",
+            headers=owner_headers,
+            json={"query": "x", "model_id": "gpt-4o-mini", "skill_name": "default", "mode": "loop"},
+        )
+        self.assertEqual(loop_missing.status_code, 422, loop_missing.text)
+        self.assertIn("停止条件", loop_missing.json()["detail"])
+
+        unknown_mode = self.client.post(
+            "/api/v1/chat/agent",
+            headers=owner_headers,
+            json={"query": "x", "model_id": "gpt-4o-mini", "skill_name": "default", "mode": "turbo"},
+        )
+        self.assertEqual(unknown_mode.status_code, 422, unknown_mode.text)
+
+    def test_agent_mode_is_persisted_so_a_retry_reproduces_it(self):
+        owner_headers = self.auth_headers(self.owner_token, self.owner_workspace)
+        project = self.client.post(
+            "/api/v1/projects",
+            headers=owner_headers,
+            json={"name": "Mode persistence", "description": "Verify mode is stored", "color": "#5B5BD6"},
+        )
+        self.assertEqual(project.status_code, 201, project.text)
+        task = self.client.post(
+            "/api/v1/tasks",
+            headers=owner_headers,
+            json={"project_id": project.json()["project"]["id"], "title": "Goal mode run"},
+        )
+        task_id = task.json()["task"]["id"]
+        plan = self.client.put(
+            f"/api/v1/tasks/{task_id}/plan",
+            headers=owner_headers,
+            json={"objective": "完成报告", "steps": [{"title": "起草章节", "instructions": "写出三章"}]},
+        )
+        self.assertEqual(plan.status_code, 200, plan.text)
+        approved = self.client.post(f"/api/v1/tasks/{task_id}/plan/approve", headers=owner_headers)
+        self.assertEqual(approved.status_code, 200, approved.text)
+        step_id = approved.json()["plan"]["steps"][0]["id"]
+
+        class FakeSkillManager:
+            @staticmethod
+            def get_skill(name):
+                return object() if name == "default" else None
+
+        class FakeMcpManager:
+            servers: dict = {}
+
+        class FakeEngine:
+            skill_manager = FakeSkillManager()
+            mcp_manager = FakeMcpManager()
+
+            @staticmethod
+            def validate_permissions(*_args, **_kwargs):
+                return None
+
+            async def run(self, **kwargs):
+                # 侧信道写入一轮判定，验证路由会落库并回传。
+                kwargs["config"]["iterations"].append(
+                    {"iteration": 1, "verdict": "met", "reason": "已达成"}
+                )
+                yield "goal mode output"
+
+        with (
+            patch("api.routes.get_agent_engine", return_value=FakeEngine()),
+            patch("api.routes._ensure_model_ready"),
+        ):
+            response = self.client.post(
+                f"/api/v1/tasks/{task_id}/execute",
+                headers=owner_headers,
+                json={
+                    "model_id": "gpt-4o-mini",
+                    "skill_name": "default",
+                    "step_id": step_id,
+                    "mode": "goal",
+                    "goal": "完成报告",
+                    "success_criteria": "包含三章",
+                    "max_iterations": 3,
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("event: iteration", response.text)
+
+        runs = self.client.get(f"/api/v1/tasks/{task_id}/runs", headers=owner_headers)
+        self.assertEqual(runs.status_code, 200, runs.text)
+        run = runs.json()["runs"][0]
+        self.assertEqual(run["agent_mode"], "goal")
+        self.assertEqual(run["iterations"][0]["verdict"], "met")
+        self.assertEqual(run["iterations"][0]["reason"], "已达成")
+
+    def test_subagent_usage_is_persisted_against_the_parent_run(self):
+        owner_headers = self.auth_headers(self.owner_token, self.owner_workspace)
+        project = self.client.post(
+            "/api/v1/projects",
+            headers=owner_headers,
+            json={"name": "Subagent usage", "description": "Verify attribution", "color": "#5B5BD6"},
+        )
+        task = self.client.post(
+            "/api/v1/tasks",
+            headers=owner_headers,
+            json={"project_id": project.json()["project"]["id"], "title": "Delegate work"},
+        )
+        task_id = task.json()["task"]["id"]
+        plan = self.client.put(
+            f"/api/v1/tasks/{task_id}/plan",
+            headers=owner_headers,
+            json={"objective": "分发子任务", "steps": [{"title": "执行子任务", "instructions": "交给子代理"}]},
+        )
+        self.client.post(f"/api/v1/tasks/{task_id}/plan/approve", headers=owner_headers)
+        step_id = plan.json()["plan"]["steps"][0]["id"]
+
+        class FakeSkillManager:
+            @staticmethod
+            def get_skill(name):
+                return object() if name == "default" else None
+
+        class FakeMcpManager:
+            servers: dict = {}
+
+        class FakeEngine:
+            skill_manager = FakeSkillManager()
+            mcp_manager = FakeMcpManager()
+
+            @staticmethod
+            def validate_permissions(*_args, **_kwargs):
+                return None
+
+            async def run(self, **kwargs):
+                config = kwargs["config"]
+                config["usage_by_message"]["parent-call"] = {
+                    "input_tokens": 50, "output_tokens": 10, "total_tokens": 60,
+                }
+                # 两个子代理：一个成功，一个超时但已消耗 token。
+                config["subagent_usage"] = [
+                    {
+                        "model_id": "child-model", "skill_name": "coder", "status": "succeeded",
+                        "depth": 1, "tool_calls": 2, "duration_ms": 800,
+                        "usage": {"input_tokens": 30, "output_tokens": 5, "total_tokens": 35, "llm_calls": 1},
+                    },
+                    {
+                        "model_id": "child-model", "skill_name": "coder", "status": "timeout",
+                        "depth": 1, "tool_calls": 0, "duration_ms": 1500,
+                        "usage": {"input_tokens": 8, "output_tokens": 0, "total_tokens": 8, "llm_calls": 1},
+                    },
+                ]
+                yield "delegated output"
+
+        with (
+            patch("api.routes.get_agent_engine", return_value=FakeEngine()),
+            patch("api.routes._ensure_model_ready"),
+        ):
+            response = self.client.post(
+                f"/api/v1/tasks/{task_id}/execute",
+                headers=owner_headers,
+                json={"model_id": "gpt-4o-mini", "skill_name": "default", "step_id": step_id},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        from sqlmodel import Session, select
+        from db.models import UsageRecord
+
+        run_id = self.client.get(
+            f"/api/v1/tasks/{task_id}/runs", headers=owner_headers
+        ).json()["runs"][0]["id"]
+        with Session(database.engine) as session:
+            rows = session.exec(
+                select(UsageRecord).where(UsageRecord.source_id == run_id)
+            ).all()
+        parents = [row for row in rows if row.source == "agent_run"]
+        children = [row for row in rows if row.source == "subagent"]
+        self.assertEqual(len(parents), 1)
+        self.assertEqual(parents[0].total_tokens, 60)
+        self.assertIsNone(parents[0].parent_run_id)
+        # 失败与超时的子代理同样入账，因为 token 已经真实消耗。
+        self.assertEqual(len(children), 2)
+        self.assertEqual({row.parent_run_id for row in children}, {run_id})
+        self.assertEqual(sorted(row.total_tokens for row in children), [8, 35])
+        self.assertTrue(all(row.model_id == "child-model" for row in children))
+
+        detail = self.client.get(f"/api/v1/tasks/{task_id}/runs", headers=owner_headers)
+        usage = detail.json()["runs"][0]["usage"]
+        # run 总量包含子代理，并单独给出明细。
+        self.assertEqual(usage["total_tokens"], 60 + 35 + 8)
+        self.assertEqual(usage["subagent_records"], 2)
+        self.assertEqual(len(usage["subagents"]), 2)
+
     def test_task_execution_persists_a_reviewable_run_and_activity(self):
         owner_headers = self.auth_headers(self.owner_token, self.owner_workspace)
         project = self.client.post(
@@ -633,6 +1108,12 @@ class ProductApiTests(unittest.TestCase):
                         "result_preview": "acceptance evidence source",
                     }
                 )
+                # 模拟引擎按模型调用上报用量，验证路由侧确实落库。
+                kwargs["config"]["usage_by_message"]["call-run-1"] = {
+                    "input_tokens": 120,
+                    "output_tokens": 30,
+                    "total_tokens": 150,
+                }
                 yield "Release note draft with acceptance evidence."
 
         with (
@@ -657,8 +1138,22 @@ class ProductApiTests(unittest.TestCase):
         self.assertIn("acceptance evidence", runs.json()["runs"][0]["output"])
         first_run_id = runs.json()["runs"][0]["id"]
 
-        from sqlmodel import Session
-        from db.models import AgentRun
+        from sqlmodel import Session, select
+        from db.models import AgentRun, UsageRecord
+
+        # 成功执行必须留下一条可汇总的真实用量记录。
+        with Session(database.engine) as session:
+            usage_rows = session.exec(
+                select(UsageRecord).where(UsageRecord.source_id == first_run_id)
+            ).all()
+        self.assertEqual(len(usage_rows), 1)
+        self.assertEqual(usage_rows[0].source, "agent_run")
+        self.assertEqual(usage_rows[0].total_tokens, 150)
+        self.assertEqual(usage_rows[0].input_tokens, 120)
+        self.assertEqual(usage_rows[0].output_tokens, 30)
+        self.assertEqual(usage_rows[0].llm_calls, 1)
+        self.assertEqual(usage_rows[0].tool_calls, 1)
+        self.assertEqual(usage_rows[0].workspace_id, self.owner_workspace)
 
         with Session(database.engine) as session:
             retry_parent = AgentRun(

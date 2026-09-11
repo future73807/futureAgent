@@ -16,6 +16,7 @@ import Flex from 'antd/es/flex'
 import Form from 'antd/es/form'
 import Grid from 'antd/es/grid'
 import Input from 'antd/es/input'
+import InputNumber from 'antd/es/input-number'
 import Layout from 'antd/es/layout'
 import List from 'antd/es/list'
 import Menu from 'antd/es/menu'
@@ -79,7 +80,7 @@ import {
   streamSSE,
   uploadAttachment,
 } from './api.js'
-import { mcpOptionLabel, mcpServerUnavailable, skillDisplayName } from './ui-labels.js'
+import { agentModeDisplayName, agentModeHint, agentModeRequirement, agentModes, iterationVerdictLabel, mcpOptionLabel, mcpServerUnavailable, skillDisplayName } from './ui-labels.js'
 import { applyThemeMode, getThemeMode, toggleThemeMode } from './theme.js'
 import { applyLocale, getLocale, t, toggleLocale, antdLocaleOf } from './i18n.js'
 import { validateUpload } from './upload-guard.js'
@@ -101,6 +102,19 @@ const taskStatusLabels = Object.fromEntries(columns.map((item) => [item.key, ite
 const priorityLabels = { low: '低', medium: '中', high: '高', urgent: '紧急' }
 const roleLabels = { owner: '所有者', admin: '管理员', member: '成员', viewer: '只读成员' }
 const planStatusLabels = { draft: '草稿', approved: '已批准', in_progress: '执行中', completed: '已完成' }
+// 权限档位按宽松程度递增；超出部署上限的选项会被禁用。
+const permissionModeOrder = ['default', 'auto_approve', 'full_access']
+const permissionModeLabels = { default: '默认权限', auto_approve: '自动审批', full_access: '完全访问' }
+const permissionModeHints = {
+  default: '计划必须由所有者或管理员人工批准后才能执行。',
+  auto_approve: '保存计划即视为批准，仍保留步骤级人工复核。',
+  full_access: '自动批准且执行成功后直接把步骤标为完成，跳过人工复核。',
+}
+const permissionModeRisks = {
+  default: '',
+  auto_approve: '开启后任何成员保存的计划都会立即变为可执行，不再有人工门禁。',
+  full_access: '开启后计划自动批准、步骤自动完成，AI 产出将不经人工确认直接计入计划进度。租户隔离、RBAC 与 run_python 禁用仍生效。',
+}
 const stepStatusLabels = { pending: '待执行', running: '执行中', blocked: '受阻', done: '已完成' }
 const runStatusLabels = { running: '执行中', succeeded: '已完成', failed: '执行失败', cancelled: '已取消' }
 const historicRunErrorLabels = {
@@ -146,6 +160,14 @@ function readableRunError(message) {
 
 function readableStatus(status) {
   return taskStatusLabels[status] || planStatusLabels[status] || stepStatusLabels[status] || runStatusLabels[status] || chineseMessage(status, '状态已更新')
+}
+
+// 用量缺失时明确标注“未上报”，不用 0 冒充——未计量与零消耗是两件事。
+function formatRunUsage(usage) {
+  if (!usage || !usage.records) return '用量未上报'
+  const base = `${usage.total_tokens} token（入 ${usage.input_tokens} / 出 ${usage.output_tokens}）· 模型调用 ${usage.llm_calls} 次 · 工具调用 ${usage.tool_calls} 次`
+  // 总量已包含子代理，这里只标注占比来源，避免重复相加。
+  return usage.subagent_records ? `${base} · 含 ${usage.subagent_records} 个子代理` : base
 }
 
 function formatDateTime(value) {
@@ -476,6 +498,119 @@ function BoardPage({ projects, tasks, members, onRefresh, openTask, workspaceRol
   )
 }
 
+// 差异行的语义完全由前缀决定；表头行必须先判，否则会被当成增删。
+function diffLineClass(line) {
+  if (line.startsWith('+++') || line.startsWith('---')) return 'diff-header'
+  if (line.startsWith('@@')) return 'diff-hunk'
+  if (line.startsWith('+')) return 'diff-add'
+  if (line.startsWith('-')) return 'diff-remove'
+  return ''
+}
+
+function DiffView({ diff }) {
+  if (!diff) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="选择文件与两个版本后点“比对”" />
+  if (!diff.diff_available) return <Alert type="info" showIcon message="该文件不提供文本差异" description={diff.reason || '二进制格式可分别下载各版本后自行比对。'} />
+  if (diff.format === 'side-by-side') {
+    return <>
+      <div className="diff-side-by-side">{diff.rows.map((row, index) => (
+        <div key={index} className={`diff-row diff-${row.kind}`}>
+          <span className="diff-cell">{row.left || ' '}</span>
+          <span className="diff-cell">{row.right || ' '}</span>
+        </div>
+      ))}</div>
+      {diff.truncated && <Text type="secondary">差异过长，已截断展示。</Text>}
+    </>
+  }
+  if (!diff.changed) return <Alert type="success" showIcon message="两个版本内容完全相同" />
+  return <>
+    <pre className="attachment-preview diff-unified">{diff.lines.map((line, index) => (
+      <div key={index} className={diffLineClass(line)}>{line || ' '}</div>
+    ))}</pre>
+    {diff.truncated && <Text type="secondary">差异过长，已截断展示。</Text>}
+  </>
+}
+
+function WorkspaceChangesPanel() {
+  const { message } = AntApp.useApp()
+  const [files, setFiles] = useState([])
+  const [filesLoading, setFilesLoading] = useState(false)
+  const [path, setPath] = useState('')
+  const [versions, setVersions] = useState([])
+  const [versionsLoading, setVersionsLoading] = useState(false)
+  const [fromVersion, setFromVersion] = useState(null)
+  const [toVersion, setToVersion] = useState(0)
+  const [format, setFormat] = useState('unified')
+  const [diff, setDiff] = useState(null)
+  const [diffLoading, setDiffLoading] = useState(false)
+
+  const loadFiles = useCallback(async () => {
+    setFilesLoading(true)
+    try {
+      const data = await apiFetch('/api/v1/workspace/files')
+      setFiles(data.files || [])
+    } catch (error) { message.error(readableError(error)) } finally { setFilesLoading(false) }
+  }, [])
+  useEffect(() => { loadFiles() }, [loadFiles])
+
+  const selectFile = async (nextPath) => {
+    setPath(nextPath)
+    setDiff(null)
+    setVersions([])
+    setFromVersion(null)
+    if (!nextPath) return
+    setVersionsLoading(true)
+    try {
+      const data = await apiFetch(`/api/v1/workspace/files/versions?path=${encodeURIComponent(nextPath)}`)
+      const items = data.versions || []
+      setVersions(items)
+      // 默认拿最新快照与当前文件比，这就是“AI 刚刚改了什么”。
+      setFromVersion(items.length ? items[items.length - 1].version : null)
+      if (!items.length) message.info('该文件还没有历史版本：只有被覆盖过的文件才会留下快照。')
+    } catch (error) { message.error(readableError(error)) } finally { setVersionsLoading(false) }
+  }
+
+  const compare = async () => {
+    if (!path || fromVersion === null || fromVersion === toVersion) return
+    setDiffLoading(true)
+    try {
+      const params = new URLSearchParams({ path, from: String(fromVersion), to: String(toVersion), format })
+      setDiff(await apiFetch(`/api/v1/workspace/files/diff?${params.toString()}`))
+    } catch (error) { message.error(readableError(error)); setDiff(null) } finally { setDiffLoading(false) }
+  }
+
+  const versionOptions = versions.map((item) => ({
+    value: item.version,
+    label: `v${item.version} · ${item.change_kind === 'generate' ? '生成' : item.change_kind === 'edit' ? '编辑' : '覆写'}${item.snapshot ? '' : '（无副本）'}`,
+    disabled: !item.snapshot,
+  }))
+  const targetOptions = [
+    { value: 0, label: '当前文件' },
+    ...versionOptions,
+  ]
+
+  return <Space direction="vertical" size="small" style={{ width: '100%' }}>
+    <Alert type="info" showIcon message="版本快照在文件被覆盖前自动保存" description="快照存放在租户目录之外，模型无法读写；清单只保留最近若干个版本，更早的改动已被清理。" />
+    <Flex gap={8} wrap="wrap" align="center">
+      <Select
+        showSearch
+        style={{ width: 260, maxWidth: '100%' }}
+        placeholder="选择工作区文件"
+        value={path || undefined}
+        onChange={selectFile}
+        loading={filesLoading}
+        notFoundContent="工作区暂无文件"
+        options={files.map((file) => ({ value: file.path, label: file.path }))}
+      />
+      <Select style={{ width: 190 }} placeholder="起始版本" value={fromVersion ?? undefined} onChange={setFromVersion} options={versionOptions} disabled={!versionOptions.length} notFoundContent="暂无历史版本" />
+      <Select style={{ width: 150 }} placeholder="对比到" value={toVersion} onChange={setToVersion} options={targetOptions} disabled={!versions.length} />
+      <Segmented size="small" value={format} onChange={setFormat} options={[{ label: '统一差异', value: 'unified' }, { label: '左右对照', value: 'side-by-side' }]} />
+      <Button size="small" type="primary" loading={diffLoading} disabled={!path || fromVersion === null || fromVersion === toVersion} onClick={compare}>比对</Button>
+      <Button size="small" icon={<ReloadOutlined />} onClick={loadFiles} loading={filesLoading}>刷新文件</Button>
+    </Flex>
+    {versionsLoading ? <Spin /> : <DiffView diff={diff} />}
+  </Space>
+}
+
 function TaskResultsPanel({ taskId, canWrite, members, refreshKey }) {
   const { message } = AntApp.useApp()
   const [attachments, setAttachments] = useState([])
@@ -603,7 +738,7 @@ function TaskResultsPanel({ taskId, canWrite, members, refreshKey }) {
   }} />
   const previewContent = !preview ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请选择任务文件进行预览" /> : <Space direction="vertical" size="small" style={{ width: '100%' }}><Text strong>{preview.attachment.original_name}</Text>{preview.preview_kind === 'image' ? <img className="artifact-image-preview" src={preview.objectUrl} alt={preview.attachment.original_name} /> : preview.preview_kind === 'pdf' ? <iframe className="artifact-pdf-preview" title={preview.attachment.original_name} src={preview.objectUrl} /> : preview.preview_available ? <pre className="attachment-preview">{preview.text}</pre> : <Text type="secondary">{chineseMessage(preview.message, '此文件暂不支持在线预览。')}</Text>}</Space>
   return <Card className="work-results" title={t('work.card.results')} extra={canWrite && <Space><Button size="small" icon={<FileAddOutlined />} onClick={() => { setRegisterOpen(true); loadWorkspaceFiles() }}>{t('work.btn.registerDeliverable')}</Button><Upload showUploadList={false} customRequest={attach} beforeUpload={(file) => { const invalid = validateUpload(file); if (invalid) { message.error(invalid); return Upload.LIST_IGNORE } return true }}><Button size="small" icon={<PaperClipOutlined />}>{t('work.btn.addContext')}</Button></Upload></Space>}>
-    <Tabs size="small" items={[{ key: 'deliverables', label: `${t('work.tab.deliverables')}（${deliverables.length}）`, children: deliverableList }, { key: 'files', label: `${t('work.tab.files')}（${attachments.length}）`, children: files }, { key: 'preview', label: t('work.tab.preview'), children: previewContent }, { key: 'activity', label: `${t('work.tab.activity')}（${events.length}）`, children: activity }]} />
+    <Tabs size="small" items={[{ key: 'deliverables', label: `${t('work.tab.deliverables')}（${deliverables.length}）`, children: deliverableList }, { key: 'files', label: `${t('work.tab.files')}（${attachments.length}）`, children: files }, { key: 'preview', label: t('work.tab.preview'), children: previewContent }, { key: 'changes', label: t('work.tab.changes'), children: <WorkspaceChangesPanel /> }, { key: 'activity', label: `${t('work.tab.activity')}（${events.length}）`, children: activity }]} />
     <Modal title="从工作区登记交付物" open={registerOpen} onCancel={() => setRegisterOpen(false)} footer={null} destroyOnHidden>
       <Alert type="info" showIcon message="这里列出 AI 执行期间在工作区生成的文件" description="登记后会复制到交付物库，可随时下载，并随任务留痕。" style={{ marginBottom: 12 }} />
       {workspaceFilesLoading ? <div style={{ textAlign: 'center', padding: 24 }}><Spin /></div> : workspaceFiles.length ? (
@@ -623,6 +758,11 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
   const [modelId, setModelId] = useState('')
   const [skillName, setSkillName] = useState('')
   const [selectedMcpServers, setSelectedMcpServers] = useState([])
+  const [mode, setMode] = useState('agent')
+  const [goal, setGoal] = useState('')
+  const [criteria, setCriteria] = useState('')
+  const [maxIterations, setMaxIterations] = useState(5)
+  const [iterations, setIterations] = useState([])
   const [stepId, setStepId] = useState('')
   const [running, setRunning] = useState(false)
   const [liveOutput, setLiveOutput] = useState('')
@@ -675,7 +815,7 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
     if (!models.some((item) => item.id === modelId && item.ready)) setModelId(models.find((item) => item.ready)?.id || '')
     if (!skills.some((item) => item.name === skillName)) setSkillName(skills[0]?.name || '')
   }, [modelId, models, skillName, skills])
-  useEffect(() => { setStepId(''); setRuns([]); setLiveOutput(''); setActiveRunId('') }, [taskId])
+  useEffect(() => { setStepId(''); setRuns([]); setLiveOutput(''); setActiveRunId(''); setIterations([]) }, [taskId])
   useEffect(() => {
     const availableSteps = (plan?.steps || []).filter((item) => item.status !== 'done')
     if (!availableSteps.some((item) => item.id === stepId)) setStepId(availableSteps[0]?.id || '')
@@ -697,7 +837,13 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
       retryOfId: retryRun.id,
       mcpServers: retryMcpServers ?? selectedMcpServers,
       hasRecordedMcpConfig: retryMcpServers !== null,
-    } : { modelId, skillName, stepId, retryOfId: null, mcpServers: selectedMcpServers, hasRecordedMcpConfig: true }
+      // 重试复现原来的运行模式，否则一次 goal 执行重试后会变成普通 agent。
+      mode: retryRun.agent_mode || 'agent',
+      goal, criteria, maxIterations,
+    } : { modelId, skillName, stepId, retryOfId: null, mcpServers: selectedMcpServers, hasRecordedMcpConfig: true, mode, goal, criteria, maxIterations }
+    const requirement = agentModeRequirement(execution.mode)
+    if (requirement === 'goal' && !execution.goal.trim()) { message.warning('目标模式需要先填写目标，否则无法判定是否达成'); return }
+    if (requirement === 'criteria' && !execution.criteria.trim()) { message.warning('循环模式需要先填写停止条件，否则会一直迭代到轮次上限'); return }
     if (execution.stepId && !(plan.steps || []).some((item) => item.id === execution.stepId)) {
       message.warning('所选步骤不属于当前任务，已为你切换到当前计划的可执行步骤。')
       setStepId((plan.steps || []).find((item) => item.status !== 'done')?.id || '')
@@ -708,12 +854,15 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
     let terminalStatus = 'succeeded'
     cancellationRequestedRef.current = false
     executionAbortRef.current = abortController
-    setActiveRunId(''); setLiveOutput(''); setRunning(true)
+    setActiveRunId(''); setLiveOutput(''); setRunning(true); setIterations([])
     try {
-      await streamSSE(`/api/v1/tasks/${executionTaskId}/execute`, { model_id: execution.modelId, skill_name: execution.skillName, step_id: execution.stepId || null, mcp_servers: execution.mcpServers, retry_of_id: execution.retryOfId, idempotency_key: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}` }, { signal: abortController.signal, onEvent: (event, data) => {
+      await streamSSE(`/api/v1/tasks/${executionTaskId}/execute`, { model_id: execution.modelId, skill_name: execution.skillName, step_id: execution.stepId || null, mcp_servers: execution.mcpServers, retry_of_id: execution.retryOfId, mode: execution.mode, goal: execution.goal.trim(), success_criteria: execution.criteria.trim(), max_iterations: execution.maxIterations, idempotency_key: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}` }, { signal: abortController.signal, onEvent: (event, data) => {
         if (currentTaskIdRef.current !== executionTaskId) return
         if (event === 'meta') {
           try { setActiveRunId(JSON.parse(data)?.run?.id || '') } catch { /* The run list remains the source of truth. */ }
+        }
+        if (event === 'iteration') {
+          try { setIterations((previous) => [...previous, JSON.parse(data)]) } catch { /* 单条轮次事件解析失败不影响正文。 */ }
         }
         if (event === 'token') setLiveOutput((previous) => previous + data)
         if (event === 'cancelled') terminalStatus = 'cancelled'
@@ -755,7 +904,7 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
   const runItems = runs.map((run) => {
     const hasRecordedMcpConfig = recordedRunMcpServers(run) !== null
     const retryButton = <Button size="small" onClick={() => execute(run)} disabled={running || batchRunning}>{hasRecordedMcpConfig ? '使用原配置重试' : '复用原模型与技能重试'}</Button>
-    return { key: run.id, label: <Space size={6}>{run.batch_id && <Tag color="geekblue">并行批次</Tag>}{readableStatus(run.status)} · {formatDateTime(run.started_at)}</Space>, children: <Space direction="vertical" size="small" style={{ width: '100%' }}><Text type="secondary">{run.model_id} · {skillDisplayName(run.skill_name)} · 第 {run.attempt || 1} 次尝试</Text>{run.output ? <pre className="attachment-preview">{run.output}</pre> : <Text type="secondary">{readableRunError(run.error_message)}</Text>}<Space>{['failed', 'cancelled'].includes(run.status) && canWrite && (hasRecordedMcpConfig ? retryButton : <Tooltip title="历史记录未包含 MCP 配置，重试时会使用当前工具选择。">{retryButton}</Tooltip>)}{run.status === 'running' && canWrite && <Button size="small" danger onClick={() => cancelRun(run.id)} disabled={running && activeRunId && activeRunId !== run.id}>取消执行</Button>}</Space></Space> }
+    return { key: run.id, label: <Space size={6}>{run.batch_id && <Tag color="geekblue">并行批次</Tag>}{run.agent_mode && run.agent_mode !== 'agent' && <Tag color="cyan">{agentModeDisplayName(run.agent_mode)}</Tag>}{readableStatus(run.status)} · {formatDateTime(run.started_at)}</Space>, children: <Space direction="vertical" size="small" style={{ width: '100%' }}><Text type="secondary">{run.model_id} · {skillDisplayName(run.skill_name)} · 第 {run.attempt || 1} 次尝试 · {formatRunUsage(run.usage)}</Text>{(run.usage?.subagents || []).length > 0 && <Space size={[4, 4]} wrap>{run.usage.subagents.map((item, index) => <Tag key={index} color="purple">子代理 · {skillDisplayName(item.skill_name)} · {item.model_id} · {item.total_tokens} token</Tag>)}</Space>}{(run.iterations || []).length > 0 && <div className="execution-iterations">{run.iterations.map((item, index) => <Alert key={index} type={item.verdict === 'met' ? 'success' : item.verdict === 'not_met' ? 'info' : 'warning'} showIcon message={`第 ${item.iteration} 轮 · ${iterationVerdictLabel(item.verdict)}`} description={item.reason} />)}</div>}{run.output ? <pre className="attachment-preview">{run.output}</pre> : <Text type="secondary">{readableRunError(run.error_message)}</Text>}<Space>{['failed', 'cancelled'].includes(run.status) && canWrite && (hasRecordedMcpConfig ? retryButton : <Tooltip title="历史记录未包含 MCP 配置，重试时会使用当前工具选择。">{retryButton}</Tooltip>)}{run.status === 'running' && canWrite && <Button size="small" danger onClick={() => cancelRun(run.id)} disabled={running && activeRunId && activeRunId !== run.id}>取消执行</Button>}</Space></Space> }
   })
   const executable = Boolean(plan && ['approved', 'in_progress'].includes(plan.status) && canWrite && models.some((item) => item.id === modelId && item.ready) && skillName && stepId)
   const pendingSteps = (plan?.steps || []).filter((step) => step.status === 'pending')
@@ -838,7 +987,7 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
       <Card key={item.stepId} size="small" className={`batch-step-card batch-step-${item.status}`} title={<Space size={6}>{item.title}<Tag color={item.status === 'succeeded' ? 'success' : item.status === 'failed' ? 'error' : item.status === 'cancelled' ? 'default' : 'processing'}>{item.status === 'running' ? '执行中' : item.status === 'succeeded' ? '已完成' : item.status === 'failed' ? '失败' : '已取消'}</Tag></Space>} extra={item.error ? <Text type="danger">{item.error}</Text> : undefined}>
         {item.text ? <pre className="attachment-preview">{item.text}</pre> : <Text type="secondary">等待模型输出…</Text>}
       </Card>
-    ))}</div>}<Flex gap={8} wrap="wrap" className="execution-controls"><Select value={stepId || undefined} onChange={setStepId} placeholder="选择计划步骤" options={(plan?.steps || []).filter((step) => step.status !== 'done').map((step) => ({ value: step.id, label: `${stepStatusLabels[step.status] || step.status} · ${step.title}` }))} /><Select value={modelId || undefined} onChange={setModelId} placeholder="选择模型" options={models.map((item) => ({ value: item.id, label: `${item.id}${item.ready ? '' : '（未就绪）'}`, disabled: !item.ready }))} /><Select value={skillName || undefined} onChange={setSkillName} placeholder="选择技能" options={skills.map((item) => ({ value: item.name, label: skillDisplayName(item.name) }))} /><Select mode="multiple" value={selectedMcpServers} onChange={setSelectedMcpServers} maxTagCount="responsive" placeholder={mcpServers.length ? '按需启用 MCP 工具' : '暂无 MCP 工具'} disabled={!mcpServers.length} options={mcpServers.map((item) => ({ value: item.name || item, label: mcpOptionLabel(item), title: mcpOptionLabel(item), tools: Array.isArray(item.tools) ? item.tools : [], disabled: mcpServerUnavailable(item) }))} optionRender={(option) => <div className="mcp-option"><span>{option.label}</span><small>{option.data?.tools?.length ? option.data.tools.join(' · ') : option.data?.disabled ? '连接不可用' : '工具清单将在连接后显示'}</small></div>} /></Flex>{liveOutput && <pre className="attachment-preview">{liveOutput}</pre>}{batchHistory.length > 0 && <Collapse size="small" className="batch-history" items={batchHistory.map((batch) => {
+    ))}</div>}<Flex gap={8} wrap="wrap" className="execution-controls"><Select value={stepId || undefined} onChange={setStepId} placeholder="选择计划步骤" options={(plan?.steps || []).filter((step) => step.status !== 'done').map((step) => ({ value: step.id, label: `${stepStatusLabels[step.status] || step.status} · ${step.title}` }))} /><Select value={modelId || undefined} onChange={setModelId} placeholder="选择模型" options={models.map((item) => ({ value: item.id, label: `${item.id}${item.ready ? '' : '（未就绪）'}`, disabled: !item.ready }))} /><Select value={skillName || undefined} onChange={setSkillName} placeholder="选择技能" options={skills.map((item) => ({ value: item.name, label: skillDisplayName(item.name) }))} /><Select mode="multiple" value={selectedMcpServers} onChange={setSelectedMcpServers} maxTagCount="responsive" placeholder={mcpServers.length ? '按需启用 MCP 工具' : '暂无 MCP 工具'} disabled={!mcpServers.length} options={mcpServers.map((item) => ({ value: item.name || item, label: mcpOptionLabel(item), title: mcpOptionLabel(item), tools: Array.isArray(item.tools) ? item.tools : [], disabled: mcpServerUnavailable(item) }))} optionRender={(option) => <div className="mcp-option"><span>{option.label}</span><small>{option.data?.tools?.length ? option.data.tools.join(' · ') : option.data?.disabled ? '连接不可用' : '工具清单将在连接后显示'}</small></div>} /><Segmented value={mode} onChange={setMode} aria-label="选择运行模式" options={agentModes.map((item) => ({ value: item, label: agentModeDisplayName(item), title: agentModeHint(item) }))} /></Flex><Text type="secondary" className="execution-mode-hint">{agentModeHint(mode)}</Text>{(mode === 'goal' || mode === 'loop') && <Flex gap={8} wrap="wrap" className="execution-mode-fields">{mode === 'goal' && <Input size="small" style={{ width: 240, maxWidth: '100%' }} placeholder="目标（必填）" value={goal} onChange={(event) => setGoal(event.target.value)} aria-label="目标" />}<Input size="small" style={{ width: 240, maxWidth: '100%' }} placeholder={mode === 'goal' ? '达成标准（必填）' : '停止条件（必填）'} value={criteria} onChange={(event) => setCriteria(event.target.value)} aria-label="达成标准或停止条件" /><InputNumber size="small" min={1} max={20} value={maxIterations} onChange={(value) => setMaxIterations(value || 1)} aria-label="最大轮次" addonAfter="轮" /></Flex>}{iterations.length > 0 && <div className="execution-iterations">{iterations.map((item, index) => <Alert key={index} type={item.verdict === 'met' ? 'success' : item.verdict === 'not_met' ? 'info' : 'warning'} showIcon message={`第 ${item.iteration} 轮 · ${iterationVerdictLabel(item.verdict)}`} description={item.reason} />)}</div>}{liveOutput && <pre className="attachment-preview">{liveOutput}</pre>}{batchHistory.length > 0 && <Collapse size="small" className="batch-history" items={batchHistory.map((batch) => {
   const detail = batchDetails[batch.id]
   return {
     key: batch.id,
@@ -1038,6 +1187,46 @@ function TeamPage({ workspace, members, workspaceRole, onRefresh }) {
   return <div className="page-shell"><Flex justify="space-between" align="center" wrap="wrap" gap={12} className="page-heading"><div><Title level={2}>团队成员</Title><Text type="secondary">成员归属工作区管理；管理员可添加已注册用户，并按最小权限原则分配角色。</Text></div>{manager && <Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>添加成员</Button>}</Flex><Card><List dataSource={members} renderItem={(member) => <List.Item actions={manager && member.role !== 'owner' ? [<Popconfirm key="remove" title="确认移除此成员？" onConfirm={() => removeMember(member)} okText="确认" cancelText="取消"><Button danger type="link">移除</Button></Popconfirm>] : []}><List.Item.Meta avatar={<Avatar icon={<UserOutlined />} />} title={<Space><Text strong>{member.user.display_name}</Text>{member.user.is_platform_admin && <Tag color="purple">平台管理员</Tag>}</Space>} description={member.user.email} /><Tag color={member.role === 'owner' ? 'gold' : member.role === 'admin' ? 'blue' : 'default'}>{roleLabels[member.role] || member.role}</Tag></List.Item>} /></Card><Modal title="添加已注册成员" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} okText="确认" cancelText="取消" destroyOnHidden><Form form={form} layout="vertical" onFinish={addMember} initialValues={{ role: 'member' }}><Form.Item name="email" label="邮箱" rules={[{ required: true, type: 'email' }]}><Input placeholder="对方需要先完成注册" /></Form.Item><Form.Item name="role" label="角色"><Select options={['admin', 'member', 'viewer'].map((value) => ({ value, label: roleLabels[value] }))} /></Form.Item></Form></Modal></div>
 }
 
+function WorkspaceUsageCard() {
+  const [range, setRange] = useState('30d')
+  const [data, setData] = useState({ totals: {}, groups: [] })
+  const [loading, setLoading] = useState(false)
+  const load = useCallback(async (nextRange) => {
+    setLoading(true)
+    try {
+      setData(await apiFetch(`/api/v1/usage/summary?range=${nextRange ?? range}&group_by=model`))
+    } catch { setData({ totals: {}, groups: [] }) } finally { setLoading(false) }
+  }, [range])
+  useEffect(() => { load(range) }, [range])
+  const totals = data.totals || {}
+  const partialPricing = (totals.priced_rows || 0) < (totals.runs || 0)
+  return (
+    <Card className="settings-card" title="模型用量" extra={<Segmented size="small" value={range} onChange={setRange} options={[{ label: '近 7 天', value: '7d' }, { label: '近 30 天', value: '30d' }, { label: '全部', value: 'all' }]} />}>
+      <Paragraph type="secondary" style={{ marginTop: 0 }}>数字均为模型真实上报；未上报用量的调用不会计入，也不会被当成零消耗。</Paragraph>
+      {loading ? <Spin /> : (
+        <>
+          <Flex gap={24} wrap="wrap" style={{ marginBottom: 12 }}>
+            <Statistic title="调用记录" value={totals.runs || 0} />
+            <Statistic title="模型调用" value={totals.llm_calls || 0} />
+            <Statistic title="总 token" value={totals.total_tokens || 0} />
+            <Statistic title="工具调用" value={totals.tool_calls || 0} />
+          </Flex>
+          {partialPricing && (totals.runs || 0) > 0 && <Alert type="info" showIcon style={{ marginBottom: 10 }} message={`共 ${totals.runs} 条记录，其中 ${totals.priced_rows || 0} 条已登记单价，成本数据不完整。`} />}
+          {data.truncated && <Alert type="warning" showIcon style={{ marginBottom: 10 }} message="记录数超过单次汇总上限，请缩小时间范围。" />}
+          {(data.groups || []).length ? (
+            <List size="small" dataSource={data.groups} renderItem={(group) => (
+              <List.Item>
+                <List.Item.Meta title={<span className="code-text">{group.label || group.key}</span>} description={`${group.total_tokens} token（入 ${group.input_tokens} / 出 ${group.output_tokens}）· ${group.runs} 条记录`} />
+                <Text type="secondary">{group.cost === null || group.cost === undefined ? '未定价' : Number(group.cost).toFixed(4)}</Text>
+              </List.Item>
+            )} />
+          ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="所选范围内暂无用量记录" />}
+        </>
+      )}
+    </Card>
+  )
+}
+
 function WorkspaceSettingsPage({ workspace, members, workspaceRole, onRefresh }) {
   const { message, modal } = AntApp.useApp()
   const isOwner = workspaceRole === 'owner'
@@ -1049,6 +1238,7 @@ function WorkspaceSettingsPage({ workspace, members, workspaceRole, onRefresh })
   const [targetOpen, setTargetOpen] = useState(false)
   const [creatingTarget, setCreatingTarget] = useState(false)
   const [transferMemberId, setTransferMemberId] = useState('')
+  const [savingMode, setSavingMode] = useState(false)
   const [form] = Form.useForm()
   const [targetForm] = Form.useForm()
   useEffect(() => { setName(workspace?.name || '') }, [workspace?.id, workspace?.name])
@@ -1141,6 +1331,30 @@ function WorkspaceSettingsPage({ workspace, members, workspaceRole, onRefresh })
   }
   const transferCandidates = members.filter((m) => m.id !== workspace?.owner_id && m.role !== 'viewer')
   const targetKindLabels = { webhook: 'Webhook', wecom: '企业微信', feishu: '飞书', dingtalk: '钉钉' }
+  const currentMode = workspace?.permission_mode || 'default'
+  const capIndex = permissionModeOrder.indexOf(workspace?.max_permission_mode || 'full_access')
+  const changePermissionMode = (mode) => {
+    if (mode === currentMode) return
+    const apply = async () => {
+      setSavingMode(true)
+      try {
+        await apiFetch(`/api/v1/workspaces/${workspace.id}/permission-mode`, { method: 'PUT', body: JSON.stringify({ permission_mode: mode }) })
+        message.success(`权限档位已切换为${permissionModeLabels[mode]}`)
+        onRefresh()
+      } catch (error) { message.error(readableError(error)) } finally { setSavingMode(false) }
+    }
+    // 放宽档位会改变整个工作区的治理强度，必须先把代价说清楚再确认。
+    const risk = permissionModeRisks[mode]
+    if (!risk) { apply(); return }
+    modal.confirm({
+      title: `切换到${permissionModeLabels[mode]}？`,
+      content: risk,
+      okText: '确认切换',
+      cancelText: '取消',
+      okButtonProps: { danger: mode === 'full_access' },
+      onOk: apply,
+    })
+  }
   return (
     <div className="page-shell settings-page">
       <Flex justify="space-between" align="center" wrap="wrap" gap={12} className="page-heading">
@@ -1153,6 +1367,29 @@ function WorkspaceSettingsPage({ workspace, members, workspaceRole, onRefresh })
         </Flex>
         <Paragraph type="secondary" style={{ marginTop: 10, marginBottom: 0 }}><Text type="secondary">标识：{workspace?.slug || '-'} · 所有者：{members.find((m) => m.user.id === workspace?.owner_id)?.user.display_name || '未知'}</Text></Paragraph>
       </Card>
+      <Card className="settings-card" title="权限档位">
+        <Paragraph type="secondary" style={{ marginTop: 0 }}>档位只放宽人工审批环节：Casbin RBAC、租户目录隔离与 run_python 禁用在任何档位下都不变。</Paragraph>
+        <Flex gap={12} align="center" wrap="wrap">
+          {isOwner ? (
+            <Segmented
+              value={currentMode}
+              onChange={changePermissionMode}
+              disabled={savingMode}
+              options={permissionModeOrder.map((mode) => ({
+                value: mode,
+                label: permissionModeLabels[mode],
+                // 超出部署上限的档位直接禁用，而不是选了之后静默不生效。
+                disabled: capIndex >= 0 && permissionModeOrder.indexOf(mode) > capIndex,
+              }))}
+            />
+          ) : <Tag color="blue">{permissionModeLabels[currentMode]}</Tag>}
+          {savingMode && <Spin size="small" />}
+        </Flex>
+        <Paragraph type="secondary" style={{ marginTop: 10, marginBottom: 0 }}>{permissionModeHints[currentMode]}</Paragraph>
+        {capIndex >= 0 && capIndex < permissionModeOrder.length - 1 && <Paragraph type="secondary" style={{ marginBottom: 0 }}>当前部署将档位上限设为{permissionModeLabels[permissionModeOrder[capIndex]]}，更宽松的档位不可选。</Paragraph>}
+        {!isOwner && <Paragraph type="secondary" style={{ marginBottom: 0 }}>只有工作区所有者可以调整档位。</Paragraph>}
+      </Card>
+      <WorkspaceUsageCard />
       {isManager && (
         <Card className="settings-card" title={t("settings.card.targets")} extra={<Button size="small" icon={<PlusOutlined />} onClick={() => setTargetOpen(true)}>{t('settings.btn.newTarget')}</Button>}>
           <Paragraph type="secondary" style={{ marginTop: 0 }}>预警扫描与关键事件可推送到企业微信群机器人、飞书、钉钉或任意 Webhook。</Paragraph>

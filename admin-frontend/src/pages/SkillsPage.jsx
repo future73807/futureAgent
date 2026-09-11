@@ -4,7 +4,7 @@ import { App, Button, Card, Input, Modal, Popconfirm, Space, Table, Tag, Typogra
 import { apiFetch, getAccessToken, toUserErrorMessage } from '../api.js'
 
 const { Title, Text } = Typography
-const emptySkill = { name: '', description: '', system_prompt: '', allowed_tool_names: [] }
+const emptySkill = { name: '', description: '', system_prompt: '', allowed_tool_names: [], model_override: '' }
 
 export default function SkillsPage() {
   const { message } = App.useApp()
@@ -32,7 +32,7 @@ export default function SkillsPage() {
 
   const save = async () => {
     if (!draft.name || !draft.description || !draft.system_prompt) return message.warning('请完整填写技能信息')
-    const payload = { ...draft, allowed_tool_names: tools.split(',').map((item) => item.trim()).filter(Boolean) }
+    const payload = { ...draft, model_override: (draft.model_override || '').trim(), allowed_tool_names: tools.split(',').map((item) => item.trim()).filter(Boolean) }
     try {
       await apiFetch(editing ? `/api/v1/skills/${draft.name}` : '/api/v1/skills', {
         method: editing ? 'PUT' : 'POST', body: JSON.stringify(payload),
@@ -75,7 +75,8 @@ export default function SkillsPage() {
   const columns = [
     { title: '名称', dataIndex: 'name', render: (value) => <span className="code-text">{value}</span> },
     { title: '描述', dataIndex: 'description' },
-    { title: '工具白名单', dataIndex: 'allowed_tool_names', render: (values) => <Space wrap>{values?.length ? values.map((value) => <Tag color="cyan" key={value}>{value}</Tag>) : <Tag>全部授权工具</Tag>}</Space> },
+    { title: '工具白名单', dataIndex: 'allowed_tool_names', render: (values) => <Space wrap>{values?.length ? values.map((value) => <Tag color={value === 'dispatch_subagent' ? 'purple' : 'cyan'} key={value}>{value}</Tag>) : <Tag>全部授权工具</Tag>}</Space> },
+    { title: '子代理模型', dataIndex: 'model_override', render: (value) => value ? <span className="code-text">{value}</span> : <Text type="secondary">沿用父代理</Text> },
     {
       title: '操作', width: 260,
       render: (_, skill) => skill.name === 'default' ? <Tag>内置</Tag> : (
@@ -102,6 +103,8 @@ export default function SkillsPage() {
           <div><label htmlFor="skill-description">描述</label><Input id="skill-description" aria-required="true" value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></div>
           <div><label htmlFor="skill-system-prompt">系统提示词</label><Input.TextArea id="skill-system-prompt" aria-required="true" rows={8} value={draft.system_prompt} onChange={(event) => setDraft({ ...draft, system_prompt: event.target.value })} /></div>
           <div><label htmlFor="skill-tools">工具白名单（逗号分隔，留空表示全部授权工具）</label><Input id="skill-tools" value={tools} onChange={(event) => setTools(event.target.value)} placeholder="read_file, read_csv" /></div>
+          <div><label htmlFor="skill-model-override">子代理模型（可选）</label><Input id="skill-model-override" value={draft.model_override || ''} onChange={(event) => setDraft({ ...draft, model_override: event.target.value })} placeholder="留空则沿用父代理的模型" /></div>
+          <Text type="secondary">子代理需同时满足三个条件才会生效：白名单里列出 dispatch_subagent、角色拥有 tool:dispatch_subagent 权限、且未达嵌套层数上限。白名单留空不会自动获得子代理能力。</Text>
         </div>
       </Modal>
     </div>

@@ -1,9 +1,13 @@
+import asyncio
+import functools
 import hashlib
 import hmac
 import tempfile
+import time
 import unittest
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 from auth.auth_manager import AuthManager
 from core.agent_engine import AgentEngine
@@ -13,7 +17,7 @@ from core.model_hub import ModelHub
 from core.skill_manager import Skill, SkillManager
 from config import Settings, settings
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessageChunk, ToolMessage
 from langchain_core.tools import StructuredTool
 from unittest.mock import patch
 
@@ -87,6 +91,70 @@ class AgentHelpersTests(unittest.TestCase):
         self.assertEqual(config["tool_trace"][0]["name"], "web_search")
         self.assertEqual(config["tool_trace"][0]["tool_call_id"], "call-1")
         self.assertEqual(len(config["tool_trace"][0]["result_preview"]), 2_000)
+
+    def test_usage_is_counted_once_per_model_call_and_summed_across_the_tool_loop(self):
+        config: dict = {"usage_by_message": {}}
+        # 同一次调用的多个流式 chunk 共享 id，只应计一次（取最后一次完整值）。
+        for tokens in (3, 7):
+            AgentEngine._record_usage(
+                config,
+                AIMessageChunk(
+                    content="x",
+                    id="call-1",
+                    usage_metadata={
+                        "input_tokens": 10,
+                        "output_tokens": tokens,
+                        "total_tokens": 10 + tokens,
+                    },
+                ),
+            )
+        # 工具循环里的第二次模型调用使用不同 id，应累加。
+        AgentEngine._record_usage(
+            config,
+            AIMessageChunk(
+                content="y",
+                id="call-2",
+                usage_metadata={"input_tokens": 4, "output_tokens": 1, "total_tokens": 5},
+            ),
+        )
+        self.assertEqual(
+            AgentEngine.summarize_usage(config),
+            {"input_tokens": 14, "output_tokens": 8, "total_tokens": 22, "llm_calls": 2},
+        )
+
+    def test_provider_that_never_reports_usage_is_not_recorded_as_zero_consumption(self):
+        config: dict = {"usage_by_message": {}}
+        AgentEngine._record_usage(config, AIMessageChunk(content="x", id="call-1"))
+        summary = AgentEngine.summarize_usage(config)
+        self.assertEqual(summary["llm_calls"], 0)
+        self.assertEqual(summary["total_tokens"], 0)
+
+    def test_unidentified_chunks_share_one_key_instead_of_growing_without_bound(self):
+        config: dict = {"usage_by_message": {}}
+        for _ in range(5):
+            AgentEngine._record_usage(
+                config,
+                AIMessageChunk(
+                    content="x",
+                    usage_metadata={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                ),
+            )
+        self.assertEqual(AgentEngine.summarize_usage(config)["llm_calls"], 1)
+
+    def test_cost_is_only_computed_for_models_with_a_registered_price(self):
+        from core.pricing import PRICE_PER_MILLION_TOKENS, aggregate_cost, estimate_cost
+
+        self.assertIsNone(estimate_cost("unpriced-model", 1_000, 1_000))
+        PRICE_PER_MILLION_TOKENS["priced-model"] = (1.0, 3.0)
+        try:
+            self.assertEqual(estimate_cost("priced-model", 1_000_000, 1_000_000), 4.0)
+            total, priced_rows = aggregate_cost(
+                [{"cost": 4.0}, {"cost": None}]
+            )
+            self.assertEqual((total, priced_rows), (4.0, 1))
+            self.assertEqual(aggregate_cost([{"cost": None}]), (None, 0))
+        finally:
+            PRICE_PER_MILLION_TOKENS.pop("priced-model", None)
 
 
 class ModelReadinessTests(unittest.TestCase):
@@ -301,6 +369,528 @@ class ToolAvailabilityTests(unittest.TestCase):
                 "developer", tools, workspace_id="workspace-a"
             )
         self.assertEqual([tool.name for tool in filtered], ["read_file"])
+
+    def test_full_access_widens_workspace_tools_but_never_python(self):
+        engine = AgentEngine(
+            model_hub=object(),
+            mcp_manager=object(),
+            skill_manager=object(),
+            auth_manager=AuthManager(),
+        )
+        tools = [self._tool("run_python"), self._tool("write_file")]
+        # 部署开关关闭时，full_access 仍可放开工作区写工具。
+        with patch.object(settings, "enable_local_mcp_tools", False):
+            filtered = engine.filter_available_tools(
+                "developer",
+                tools,
+                workspace_id="workspace-a",
+                permission_mode="full_access",
+            )
+        # run_python 是永久底线，任何档位都不得放开。
+        self.assertEqual([tool.name for tool in filtered], ["write_file"])
+
+    def test_full_access_still_fails_closed_without_server_derived_scope(self):
+        engine = AgentEngine(
+            model_hub=object(),
+            mcp_manager=object(),
+            skill_manager=object(),
+            auth_manager=AuthManager(),
+        )
+        tools = [self._tool("write_file"), self._tool("fetch_url")]
+        with patch.object(settings, "enable_local_mcp_tools", False):
+            filtered = engine.filter_available_tools(
+                "developer", tools, permission_mode="full_access"
+            )
+        # 放宽的是审批，不是租户边界：无服务端派生工作区仍失败关闭。
+        self.assertEqual([tool.name for tool in filtered], ["fetch_url"])
+
+    def test_rbac_still_filters_tools_under_full_access(self):
+        engine = AgentEngine(
+            model_hub=object(),
+            mcp_manager=object(),
+            skill_manager=object(),
+            auth_manager=AuthManager(),
+        )
+        # rbac_policy.csv 未给 user 角色 write_file，档位不得绕过 RBAC。
+        tools = [self._tool("write_file"), self._tool("read_file")]
+        with patch.object(settings, "enable_local_mcp_tools", False):
+            filtered = engine.filter_available_tools(
+                "user",
+                tools,
+                workspace_id="workspace-a",
+                permission_mode="full_access",
+            )
+        self.assertEqual([tool.name for tool in filtered], ["read_file"])
+
+
+class AgentModeTests(unittest.TestCase):
+    """五档运行模式的工具面、提示词与监督循环。"""
+
+    class _ScriptedJudge:
+        """按脚本回应监督判定，避免与 agent 共用一个假模型而互相干扰。"""
+
+        def __init__(self, replies):
+            self.replies = list(replies)
+            self.calls = 0
+
+        async def ainvoke(self, _messages):
+            self.calls += 1
+            content = self.replies.pop(0) if self.replies else '{"met": true, "reason": "done"}'
+            return SimpleNamespace(content=content)
+
+    @staticmethod
+    def _tool(name):
+        return StructuredTool.from_function(func=lambda: name, name=name, description=f"{name} tool")
+
+    def _supervisor(self, judge, *, mode="goal", max_iterations=3, iteration=0):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = AgentEngine(
+                model_hub=object(),
+                mcp_manager=MCPManager({}),
+                skill_manager=SkillManager(directory),
+                auth_manager=AuthManager(),
+            )
+        config: dict = {"iterations": []}
+        node = engine._supervisor_node_factory(judge, mode, config)
+        state = {
+            "messages": [],
+            "mode": mode,
+            "goal": "把报告写完",
+            "success_criteria": "包含三个章节",
+            "iteration": iteration,
+            "max_iterations": max_iterations,
+            "verdict": "",
+        }
+        return engine, config, node, state
+
+    def test_parse_judgement_accepts_only_the_documented_contract(self):
+        parse = AgentEngine._parse_judgement
+        self.assertEqual(parse('{"met": true, "reason": "已完成"}'), (True, "已完成"))
+        self.assertEqual(parse('前置说明 {"met": false, "reason": "缺少数据"} 后缀'), (False, "缺少数据"))
+        self.assertEqual(parse('{"met": false}')[1], "（监督者未说明原因）")
+        # 不合约定一律返回 None，由调用方终止而不是猜一个结果。
+        self.assertIsNone(parse("已完成"))
+        self.assertIsNone(parse('{"done": true}'))
+        self.assertIsNone(parse("{broken"))
+
+    def test_supervisor_loops_only_on_an_explicit_not_met(self):
+        judge = self._ScriptedJudge(['{"met": false, "reason": "再补一章"}'])
+        engine, config, node, state = self._supervisor(judge)
+        result = asyncio.run(node(state))
+        self.assertEqual(result["verdict"], "not_met")
+        self.assertEqual(result["iteration"], 1)
+        # 监督者的下一步指令必须回注为人类消息，否则下一轮无从推进。
+        self.assertEqual(result["messages"][0].content, "再补一章")
+        self.assertEqual(config["iterations"][0]["verdict"], "not_met")
+
+    def test_supervisor_stops_when_the_goal_is_met(self):
+        judge = self._ScriptedJudge(['{"met": true, "reason": "已满足"}'])
+        _engine, config, node, state = self._supervisor(judge)
+        result = asyncio.run(node(state))
+        self.assertEqual(result["verdict"], "met")
+        self.assertNotIn("messages", result)
+        self.assertEqual(config["iterations"][0]["verdict"], "met")
+
+    def test_supervisor_exhausts_the_budget_without_calling_the_judge(self):
+        judge = self._ScriptedJudge([])
+        _engine, config, node, state = self._supervisor(judge, max_iterations=2, iteration=2)
+        result = asyncio.run(node(state))
+        self.assertEqual(result["verdict"], "budget_exhausted")
+        self.assertEqual(judge.calls, 0)
+        self.assertIn("最大迭代轮次", config["iterations"][0]["reason"])
+
+    def test_unparseable_judgement_stops_instead_of_burning_the_budget(self):
+        judge = self._ScriptedJudge(["我觉得差不多了"])
+        _engine, config, node, state = self._supervisor(judge)
+        result = asyncio.run(node(state))
+        # 判定不可用时必须终止；继续循环只会白耗 token。
+        self.assertEqual(result["verdict"], "judge_unavailable")
+        self.assertNotIn("messages", result)
+        self.assertEqual(config["iterations"][0]["verdict"], "judge_unavailable")
+
+    def test_loop_mode_judges_against_the_stop_condition(self):
+        captured: dict = {}
+
+        class RecordingJudge:
+            async def ainvoke(self, messages):
+                captured["messages"] = messages
+                return SimpleNamespace(content='{"met": true, "reason": "ok"}')
+
+        _engine, _config, node, state = self._supervisor(RecordingJudge(), mode="loop")
+        asyncio.run(node(state))
+        self.assertIn("执行质量监督者", captured["messages"][0].content)
+        prompt = captured["messages"][1].content
+        # loop 只看停止条件；把目标也堆上去会稀释判据。
+        self.assertIn("停止条件：包含三个章节", prompt)
+        self.assertNotIn("目标：", prompt)
+
+    def test_goal_mode_judges_against_goal_and_criteria(self):
+        captured: dict = {}
+
+        class RecordingJudge:
+            async def ainvoke(self, messages):
+                captured["messages"] = messages
+                return SimpleNamespace(content='{"met": true, "reason": "ok"}')
+
+        _engine, _config, node, state = self._supervisor(RecordingJudge(), mode="goal")
+        asyncio.run(node(state))
+        prompt = captured["messages"][1].content
+        self.assertIn("目标：把报告写完", prompt)
+        self.assertIn("达成标准：包含三个章节", prompt)
+
+    def test_mode_prompt_layers_constraints_on_top_of_the_skill(self):
+        prompt = AgentEngine._mode_prompt
+        self.assertEqual(prompt("基础", "chat", {}), "基础")
+        self.assertEqual(prompt("基础", "agent", {}), "基础")
+        self.assertIn("仅输出一段 JSON", prompt("基础", "plan", {}))
+        goal = prompt("基础", "goal", {"goal": "完成报告", "success_criteria": "三章节"})
+        self.assertIn("基础", goal)
+        self.assertIn("完成报告", goal)
+        self.assertIn("三章节", goal)
+        loop = prompt("基础", "loop", {"success_criteria": "无错别字"})
+        self.assertIn("循环迭代", loop)
+        self.assertIn("无错别字", loop)
+
+    def test_only_supervised_modes_attach_a_supervisor_node(self):
+        async def worker(_state):
+            return {"messages": []}
+
+        async def supervisor(_state):
+            return {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            engine = AgentEngine(
+                model_hub=object(),
+                mcp_manager=MCPManager({}),
+                skill_manager=SkillManager(directory),
+                auth_manager=AuthManager(),
+            )
+        plain = engine._graph_factory(worker, [])
+        self.assertNotIn("supervisor", set(plain.nodes))
+        supervised = engine._graph_factory(worker, [], supervisor_node=supervisor)
+        self.assertIn("supervisor", set(supervised.nodes))
+        with_tools = engine._graph_factory(
+            worker, [self._tool("read_file")], supervisor_node=supervisor
+        )
+        self.assertTrue(
+            {"agent_node", "tools", "supervisor"}.issubset(set(with_tools.nodes))
+        )
+
+    def test_chat_mode_binds_no_tools_and_plan_mode_is_read_only(self):
+        tools = [
+            self._tool("read_file"),
+            self._tool("write_file"),
+            self._tool("web_search"),
+        ]
+        for mode, expected in (
+            ("chat", []),
+            ("plan", ["read_file", "web_search"]),
+            ("agent", ["read_file", "write_file", "web_search"]),
+        ):
+            with self.subTest(mode=mode):
+                captured = self._run_capturing_agent_factory(tools, mode)
+                self.assertEqual(captured["tools"], expected)
+
+    def _run_capturing_agent_factory(self, tools, mode):
+        """跑一次 run()，侧录实际绑定给模型的工具与提示词。
+
+        FakeListChatModel 不支持 bind_tools，因此记录后用空工具列表
+        走真实的不绑定分支，图形态与提示词仍由真实代码路径产生。
+        """
+        captured: dict = {}
+
+        class FakeModelHub:
+            def get_chat_model(self, **_kwargs):
+                return FakeListChatModel(responses=["ok"])
+
+        class FakeMcpManager:
+            servers = {"local_tools": "http://mcp.invalid/mcp"}
+
+            @asynccontextmanager
+            async def connect_many(self, _names, **_kwargs):
+                yield [object()]
+
+            async def get_mcp_tools(self, _session):
+                return list(tools)
+
+        with tempfile.TemporaryDirectory() as directory:
+            engine = AgentEngine(
+                model_hub=FakeModelHub(),
+                mcp_manager=FakeMcpManager(),
+                skill_manager=SkillManager(directory),
+                auth_manager=AuthManager(),
+            )
+            original = AgentEngine._agent_factory
+
+            def recorder(instance, llm, bound_tools, system_prompt):
+                captured["tools"] = [tool.name for tool in bound_tools]
+                captured["prompt"] = system_prompt
+                return original(instance, llm, [], system_prompt)
+
+            async def drive():
+                with patch.object(settings, "enable_local_mcp_tools", True):
+                    with patch.object(AgentEngine, "_agent_factory", recorder):
+                        async for _chunk in engine.run(
+                            "developer",
+                            "hi",
+                            {
+                                "model_id": "fake-model",
+                                "skill_name": "default",
+                                "mcp_servers": ["local_tools"],
+                                "workspace_id": "workspace-a",
+                                "mode": mode,
+                                "iterations": [],
+                            },
+                        ):
+                            pass
+
+            asyncio.run(drive())
+        return captured
+
+    def test_unknown_mode_is_rejected_rather_than_silently_downgraded(self):
+        class FakeModelHub:
+            def get_chat_model(self, **_kwargs):
+                return FakeListChatModel(responses=["ok"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            engine = AgentEngine(
+                model_hub=FakeModelHub(),
+                mcp_manager=MCPManager({}),
+                skill_manager=SkillManager(directory),
+                auth_manager=AuthManager(),
+            )
+
+            async def drive():
+                with self.assertRaisesRegex(ValueError, "不支持的运行模式"):
+                    async for _chunk in engine.run(
+                        "developer",
+                        "hi",
+                        {"model_id": "fake", "skill_name": "default", "mcp_servers": [], "mode": "turbo"},
+                    ):
+                        pass
+
+            asyncio.run(drive())
+
+
+class SubagentTests(unittest.TestCase):
+    """dispatch_subagent 的深度、权限、预算与用量归因。"""
+
+    @staticmethod
+    def _tool(name):
+        return StructuredTool.from_function(func=lambda: name, name=name, description=f"{name} tool")
+
+    def _engine(self, directory, responses=("子代理完成",)):
+        class FakeModelHub:
+            def get_chat_model(self, **_kwargs):
+                return FakeListChatModel(responses=list(responses))
+
+        manager = SkillManager(directory)
+        # 子代理是按技能显式开启的：白名单为空（如内置 default）不会获得。
+        manager.register_skill(
+            Skill(
+                name="orchestrator",
+                description="编排技能",
+                system_prompt="你是编排者。",
+                allowed_tool_names=["read_file", "dispatch_subagent"],
+            )
+        )
+        return AgentEngine(
+            model_hub=FakeModelHub(),
+            mcp_manager=MCPManager({}),
+            skill_manager=manager,
+            auth_manager=AuthManager(),
+        )
+
+    def _dispatch(self, engine, *, role="developer", depth=0, tools=None, deadline=None, max_depth=2):
+        config = {"deadline": deadline if deadline is not None else time.monotonic() + 30}
+        with patch.object(settings, "subagent_max_depth", max_depth):
+            tool = engine._subagent_tool(
+                user_role=role,
+                tools=list(tools if tools is not None else [self._tool("read_file")]),
+                model_id="fake-model",
+                config=config,
+                workspace_id="workspace-a",
+                permission_mode="default",
+                depth=depth,
+            )
+        return tool, config
+
+    def test_child_keeps_the_parent_tool_subset_and_nests_only_below_the_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = self._engine(directory)
+            captured: list = []
+
+            async def fake_run_child(_self, _parent, child_config, tools, _model, _skill, _task):
+                captured.append((child_config["subagent_depth"], [tool.name for tool in tools]))
+                return "ok"
+
+            with patch.object(AgentEngine, "_run_child", fake_run_child):
+                # depth=0 → 子代理处于 depth 1，1 < 2 且技能已开启，可再派生一层。
+                tool, _ = self._dispatch(engine, depth=0)
+                asyncio.run(tool.coroutine(skill_name="orchestrator", task="子任务"))
+                # depth=1 → 子代理处于 depth 2，已达上限，不得再派生。
+                tool, _ = self._dispatch(engine, depth=1)
+                asyncio.run(tool.coroutine(skill_name="orchestrator", task="子任务"))
+
+        self.assertEqual(captured[0][0], 1)
+        self.assertIn("dispatch_subagent", captured[0][1])
+        self.assertIn("read_file", captured[0][1])
+        self.assertEqual(captured[1][0], 2)
+        self.assertNotIn("dispatch_subagent", captured[1][1])
+        # 子代理工具集始终是父代理的子集，不会出现父代理没有的工具。
+        self.assertTrue(set(captured[1][1]).issubset({"read_file", "dispatch_subagent"}))
+
+    def test_exhausted_shared_budget_stops_the_subagent_before_it_starts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = self._engine(directory)
+            calls: list = []
+
+            async def fake_run_child(*_args):
+                calls.append(1)
+                return "should not run"
+
+            with patch.object(AgentEngine, "_run_child", fake_run_child):
+                tool, config = self._dispatch(engine, deadline=time.monotonic() - 1)
+                result = asyncio.run(tool.coroutine(skill_name="default", task="子任务"))
+
+        self.assertIn("时间预算已用尽", result)
+        self.assertEqual(calls, [])
+        # 未启动的子代理也要留痕，否则使用者无法区分“没派生”与“派生了但没预算”。
+        self.assertEqual(config["subagent_usage"][0]["status"], "skipped")
+
+    def test_subagent_usage_is_recorded_separately_from_the_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = self._engine(directory)
+            # max_depth=1 且 tools=[]：子代理不再嵌套也不挂工具，避开
+            # FakeListChatModel 不支持 bind_tools 的限制；本用例验证的是
+            # 用量归因而非工具循环。
+            tool, config = self._dispatch(engine, tools=[], max_depth=1)
+            result = asyncio.run(tool.coroutine(skill_name="orchestrator", task="子任务"))
+
+        self.assertEqual(result, "子代理完成")
+        records = config["subagent_usage"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["status"], "succeeded")
+        self.assertEqual(records[0]["depth"], 1)
+        self.assertTrue(records[0]["duration_ms"] >= 0)
+        # 子代理有独立计量桶，不会写进父代理的 usage_by_message。
+        self.assertFalse(config.get("usage_by_message"))
+
+    def test_unknown_skill_and_empty_task_are_refused_without_running_a_child(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = self._engine(directory)
+            tool, config = self._dispatch(engine)
+            missing = asyncio.run(tool.coroutine(skill_name="no-such-skill", task="x"))
+            empty = asyncio.run(tool.coroutine(skill_name="orchestrator", task="   "))
+        self.assertIn("不存在", missing)
+        self.assertIn("不能为空", empty)
+        self.assertEqual([item["status"] for item in config.get("subagent_usage", [])], [])
+
+    def test_model_override_cannot_bypass_model_level_rbac(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = SkillManager(directory)
+            manager.register_skill(
+                Skill(
+                    name="privileged",
+                    description="试图提权的技能",
+                    system_prompt="你是助手。",
+                    model_override="restricted-model",
+                )
+            )
+            engine = self._engine(directory)
+            engine.skill_manager = manager
+            tool, _config = self._dispatch(engine, role="user")
+            result = asyncio.run(tool.coroutine(skill_name="privileged", task="子任务"))
+        # user 角色只有 model:gpt-3.5-turbo 权限，model_override 不得绕过。
+        self.assertIn("无权使用", result)
+
+    def test_dispatch_tool_is_gated_by_rbac_and_depth_at_injection_time(self):
+        tools = [self._tool("read_file")]
+        for role, depth, max_depth, expected in (
+            # developer + 已开启的技能，在深度上限内获得子代理工具。
+            ("developer", 0, 2, True),
+            # 达到嵌套上限后不再注入，子代理自然无法再派生。
+            ("developer", 2, 2, False),
+            # 部署方将上限设为 0 即完全禁用子代理。
+            ("developer", 0, 0, False),
+            # user 角色未授予 tool:dispatch_subagent，即使深度允许也不注入。
+            ("user", 0, 2, False),
+        ):
+            with self.subTest(role=role, depth=depth, max_depth=max_depth):
+                injected = self._injected_tools(role, tools, depth, max_depth)
+                self.assertEqual("dispatch_subagent" in injected, expected)
+
+    def test_skills_that_do_not_opt_in_never_receive_the_dispatch_tool(self):
+        # 内置 default 技能的白名单为空（意为放开全部 MCP 工具），
+        # 但这不等于可以派生子代理；否则存量技能会静默改变行为。
+        injected = self._injected_tools("developer", [self._tool("read_file")], 0, 2, skill_name="default")
+        self.assertNotIn("dispatch_subagent", injected)
+        self.assertIn("read_file", injected)
+
+    def _injected_tools(self, role, tools, depth, max_depth, skill_name="orchestrator"):
+        captured: dict = {}
+
+        class FakeModelHub:
+            def get_chat_model(self, **_kwargs):
+                return FakeListChatModel(responses=["ok"])
+
+        class FakeMcpManager:
+            servers = {"local_tools": "http://mcp.invalid/mcp"}
+
+            @asynccontextmanager
+            async def connect_many(self, _names, **_kwargs):
+                yield [object()]
+
+            async def get_mcp_tools(self, _session):
+                return list(tools)
+
+        with tempfile.TemporaryDirectory() as directory:
+            manager = SkillManager(directory)
+            manager.register_skill(
+                Skill(
+                    name="orchestrator",
+                    description="编排技能",
+                    system_prompt="你是编排者。",
+                    allowed_tool_names=["read_file", "dispatch_subagent"],
+                )
+            )
+            engine = AgentEngine(
+                model_hub=FakeModelHub(),
+                mcp_manager=FakeMcpManager(),
+                skill_manager=manager,
+                auth_manager=AuthManager(),
+            )
+            original = AgentEngine._agent_factory
+
+            def recorder(instance, llm, bound_tools, system_prompt):
+                captured["tools"] = [tool.name for tool in bound_tools]
+                return original(instance, llm, [], system_prompt)
+
+            async def drive():
+                with (
+                    patch.object(settings, "enable_local_mcp_tools", True),
+                    patch.object(settings, "subagent_max_depth", max_depth),
+                    patch.object(AgentEngine, "_agent_factory", recorder),
+                    # 本用例只验证工具注入判定；资源级校验（如 user 角色
+                    # 无 skill:default）由其他用例覆盖，在此隔离掉。
+                    patch.object(AgentEngine, "validate_permissions", lambda *_a, **_k: None),
+                ):
+                    async for _chunk in engine.run(
+                        role,
+                        "hi",
+                        {
+                            "model_id": "gpt-3.5-turbo" if role == "user" else "fake-model",
+                            "skill_name": skill_name,
+                            "mcp_servers": ["local_tools"],
+                            "workspace_id": "workspace-a",
+                            "mode": "agent",
+                            "subagent_depth": depth,
+                        },
+                    ):
+                        pass
+
+            asyncio.run(drive())
+        return captured.get("tools", [])
 
 
 class WorkspaceScopeClaimTests(unittest.TestCase):

@@ -16,3 +16,7 @@ allowed_tool_names:
   - edit_file
   - web_search
   - fetch_url
+  # 子代理需在技能白名单里显式开启（且角色需有 tool:dispatch_subagent 权限）。
+  # 白名单为空的技能（如内置 default）默认就能用。
+  - dispatch_subagent
+model_override: ""

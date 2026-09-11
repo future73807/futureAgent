@@ -5,7 +5,7 @@
 from datetime import date, datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import CheckConstraint, UniqueConstraint
+from sqlalchemy import CheckConstraint, Index, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 
@@ -39,6 +39,11 @@ class Workspace(SQLModel, table=True):
     slug: str = Field(index=True, unique=True, max_length=80)
     owner_id: str = Field(foreign_key="users.id", index=True)
     plan: str = Field(default="starter", max_length=32)
+    # 审批与工具广度档位：default（计划必须人工批准）/ auto_approve
+    # （保存即批准）/ full_access（自动批准且跳过步骤级复核）。
+    # 它只放宽人工审批环节，不影响 Casbin RBAC、租户目录隔离与
+    # run_python 的永久禁用；单次请求只能在此基准上向下收紧。
+    permission_mode: str = Field(default="default", max_length=16)
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
 
@@ -203,6 +208,11 @@ class AgentRun(SQLModel, table=True):
     requested_by: str = Field(foreign_key="users.id", index=True)
     model_id: str = Field(max_length=120)
     skill_name: str = Field(max_length=120)
+    # 运行模式必须随 run 保存，否则重试无法复现原来的执行语义
+    # （与 mcp_servers_json 的持久化理由一致）。
+    agent_mode: str = Field(default="agent", max_length=16)
+    # 监督模式（goal/loop）的轮次判定证据；非监督模式为空列表。
+    iterations_json: str | None = Field(default=None, max_length=40_000)
     # NULL marks executions created before MCP selection was persisted.  New
     # runs always write a JSON list, including an explicit empty list.
     mcp_servers_json: str | None = Field(default=None, max_length=4000)
@@ -221,6 +231,43 @@ class AgentRun(SQLModel, table=True):
     error_message: str = Field(default="", max_length=4000)
     started_at: datetime = Field(default_factory=now_utc)
     completed_at: datetime | None = Field(default=None)
+
+
+class UsageRecord(SQLModel, table=True):
+    """一次 AI 调用的真实用量快照，对话与工作模式执行统一写入本表。
+
+    数值只来自模型返回的 usage_metadata。提供方未上报时保持 0 且
+    ``llm_calls`` 不递增，避免把“没有计量”伪装成“零消耗”。
+
+    ``agent_mode`` 与 ``parent_run_id`` 在建表时就存在，供运行模式与子代理
+    阶段直接填充，不再对同一张表重复做迁移。
+    """
+
+    __tablename__ = "usage_records"
+    __table_args__ = (
+        Index("ix_usage_records_workspace_created", "workspace_id", "created_at"),
+        Index("ix_usage_records_workspace_model", "workspace_id", "model_id"),
+    )
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    workspace_id: str = Field(foreign_key="workspaces.id", index=True)
+    user_id: str = Field(foreign_key="users.id", index=True)
+    model_id: str = Field(max_length=120)
+    skill_name: str = Field(default="", max_length=120)
+    source: str = Field(default="chat", max_length=16)  # chat/agent_run
+    # 对话写 conversation_id，工作模式写 agent_run_id。
+    source_id: str = Field(default="", max_length=64, index=True)
+    agent_mode: str = Field(default="chat", max_length=16)
+    parent_run_id: str | None = Field(
+        default=None, foreign_key="agent_runs.id", index=True
+    )
+    input_tokens: int = Field(default=0)
+    output_tokens: int = Field(default=0)
+    total_tokens: int = Field(default=0)
+    llm_calls: int = Field(default=0)
+    tool_calls: int = Field(default=0)
+    duration_ms: int = Field(default=0)
+    created_at: datetime = Field(default_factory=now_utc)
 
 
 # ---------------------------------------------------------------------------

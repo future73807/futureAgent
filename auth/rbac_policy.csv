@@ -3,6 +3,7 @@
 p, admin, *, *
 
 # developer 可以使用所有模型、Skill、MCP 服务和工具
+# （tool:* 也覆盖引擎本地注入的 dispatch_subagent）
 p, developer, model:*, use
 p, developer, skill:*, use
 p, developer, mcp:*, use
@@ -18,10 +19,16 @@ p, user, tool:read_csv, use
 p, user, tool:web_search, use
 p, user, tool:fetch_url, use
 p, user, tool:read_file_base64, use
+# 版本清单与历史版本读取（只读，用于差异分析）
+p, user, tool:list_file_versions, use
+p, user, tool:read_file_version, use
 # 工作区内的交付物生成工具（输出受租户目录与大小上限约束）
 p, user, tool:make_xlsx, use
 p, user, tool:make_docx, use
 p, user, tool:make_chart, use
+# 注意：user 角色刻意不授予 tool:dispatch_subagent。子代理会放大单次
+# 请求的模型调用量与耗时，只开放给 developer 及其继承者 admin。
+# 若确需开放，再显式追加：p, user, tool:dispatch_subagent, use
 
 # 角色继承：admin 继承 developer
 g, admin, developer

@@ -9,6 +9,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent
 
+# 审批与工具广度档位，按宽松程度递增排列；比较宽松度用下标。
+# 档位只影响人工审批环节与工作区写工具的启用，不绕过 Casbin RBAC。
+PERMISSION_MODES = ("default", "auto_approve", "full_access")
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -45,6 +49,17 @@ class Settings(BaseSettings):
     # deliberately applied server-side, rather than trusting a browser timer.
     agent_run_timeout_seconds: int = 180
     max_concurrent_agent_runs_per_workspace: int = 2
+    # goal/loop 模式的最大迭代轮次上限；请求值会被此上限二次收敛。
+    agent_max_iterations: int = 5
+    # LangGraph 递归上限（节点跳转次数），监督模式会随轮次放宽并另有硬顶。
+    agent_recursion_limit: int = 25
+    # 子代理嵌套层数上限：1 表示只允许父代理派生一层子代理，
+    # 0 完全禁用子代理。达到上限时不再注入 dispatch_subagent 工具。
+    subagent_max_depth: int = 2
+    # 同一父代理下并发运行的子代理上限。
+    subagent_max_parallel: int = 2
+    # 权限档位的部署上限：设为 default 可全局禁用自动批准与完全访问。
+    max_permission_mode: str = "full_access"
     # 认证接口每 IP 每分钟最大尝试次数；0 关闭限流
     auth_rate_limit_per_minute: int = 60
     storage_backend: str = "local"
@@ -119,6 +134,20 @@ class Settings(BaseSettings):
     hnsw_ef_construction: int = 64
     hnsw_ef_search: int = 40
     environment: str = "development"
+
+    @computed_field
+    @property
+    def effective_max_permission_mode(self) -> str:
+        """归一化部署上限；非法取值按最严格档位处理。
+
+        配置写错时失败方向必须是“更严”而不是“更宽”，否则一个
+        拼写错误就会静默地关掉全部人工审批。
+        """
+        return (
+            self.max_permission_mode
+            if self.max_permission_mode in PERMISSION_MODES
+            else "default"
+        )
 
     @computed_field
     @property

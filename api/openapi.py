@@ -99,7 +99,7 @@ OPENAPI_TAGS = [
     },
     {
         "name": "附件与预览",
-        "description": "受工作区权限保护的附件上传、下载、列表与内容预览。",
+        "description": "受工作区权限保护的附件上传、下载、列表与内容预览，以及工作区文件的版本清单与差异比对。",
     },
     {
         "name": "模型、技能与 MCP",
@@ -112,6 +112,10 @@ OPENAPI_TAGS = [
     {
         "name": "审计与概览",
         "description": "工作区审计记录、平台审计记录和运营概览。",
+    },
+    {
+        "name": "用量统计",
+        "description": "模型真实 token 用量、调用次数与成本汇总；数值只来自模型上报，未登记单价的模型不计算成本。",
     },
 ]
 
@@ -156,6 +160,11 @@ OPERATION_DOCUMENTATION: dict[tuple[str, str], dict[str, str]] = {
     ),
     ("PATCH", "/api/v1/workspaces/{workspace_id}"): _operation(
         "更新工作区", "更新工作区名称或套餐信息，需要工作区管理权限。", "工作区与成员"
+    ),
+    ("PUT", "/api/v1/workspaces/{workspace_id}/permission-mode"): _operation(
+        "调整工作区权限档位",
+        "在 default（计划必须人工批准）、auto_approve（保存即自动批准）与 full_access（自动批准且跳过步骤级复核）之间切换，仅限工作区所有者，且不得超出部署上限。档位只放宽人工审批环节：RBAC、租户目录隔离与 run_python 禁用均不受影响。",
+        "工作区与成员",
     ),
     ("GET", "/api/v1/workspaces/{workspace_id}/members"): _operation(
         "列出工作区成员", "查看指定工作区的成员与角色，需要该工作区访问权限。", "工作区与成员"
@@ -328,6 +337,16 @@ OPERATION_DOCUMENTATION: dict[tuple[str, str], dict[str, str]] = {
     ("GET", "/api/v1/attachments/{attachment_id}/preview"): _operation(
         "预览附件", "返回可安全预览的文本、图片或文档提取内容。", "附件与预览"
     ),
+    ("GET", "/api/v1/workspace/files/versions"): _operation(
+        "列出工作区文件版本",
+        "返回 AI 改动工作区文件时留下的历史版本清单（版本号、大小、摘要、变更类型、来源执行）；清单只保留最近若干个版本。",
+        "附件与预览",
+    ),
+    ("GET", "/api/v1/workspace/files/diff"): _operation(
+        "比对工作区文件版本",
+        "在服务端生成两个版本之间的 unified 或左右对照差异；to=0 表示与当前文件内容比对。二进制格式不做文本差异，而是返回 diff_available=false 与各版本大小、摘要。",
+        "附件与预览",
+    ),
     ("GET", "/api/v1/models"): _operation(
         "列出模型", "返回当前工作区允许使用的模型及其可用性状态。", "模型、技能与 MCP"
     ),
@@ -361,8 +380,18 @@ OPERATION_DOCUMENTATION: dict[tuple[str, str], dict[str, str]] = {
     ("GET", "/api/v1/settings"): _operation(
         "查看平台运行设置", "返回经过脱敏的运行设置，仅限平台管理员。", "平台治理"
     ),
+    ("GET", "/api/v1/usage/summary"): _operation(
+        "查看工作区用量汇总",
+        "按模型、用户、技能、运行模式或日期聚合当前工作区的真实 token 用量、调用次数与耗时；成本仅在该模型已登记单价时返回，priced_rows 小于 runs 说明部分消耗无法计价。",
+        "用量统计",
+    ),
+    ("GET", "/api/v1/admin/usage/summary"): _operation(
+        "查看平台用量汇总",
+        "跨工作区聚合真实 token 用量与调用次数，仅限平台管理员。",
+        "用量统计",
+    ),
     ("GET", "/api/v1/admin/overview"): _operation(
-        "查看平台运营概览", "返回用户、工作区、任务、模型和运行状态的汇总，仅限平台管理员。", "审计与概览"
+        "查看平台运营概览", "返回用户、工作区、任务、模型、用量记录和运行状态的汇总，仅限平台管理员。", "审计与概览"
     ),
     ("GET", "/api/v1/dashboard"): _operation(
         "查看工作区概览", "返回当前工作区的项目、任务、对话与执行概览。", "审计与概览"

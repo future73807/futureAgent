@@ -48,7 +48,11 @@ class MCPManager:
 
     @asynccontextmanager
     async def connect_many(
-        self, server_names: list[str], *, workspace_id: str | None = None
+        self,
+        server_names: list[str],
+        *,
+        workspace_id: str | None = None,
+        agent_run_id: str | None = None,
     ):
         """只连接本次请求选择的 MCP 服务。
 
@@ -56,6 +60,10 @@ class MCPManager:
         workspace claim.  File paths are then rooted by the MCP server itself,
         so a model cannot escape a tenant boundary with ``..``, absolute paths,
         or a symlink already present in the shared volume.
+
+        ``agent_run_id`` is attribution only: it lets the tool service record
+        which governed run touched a file.  Like the workspace claim it travels
+        in a server-set header and is never a tool argument.
         """
         unique_names = list(dict.fromkeys(server_names))
         unknown = [name for name in unique_names if name not in self.servers]
@@ -66,7 +74,11 @@ class MCPManager:
             sessions = []
             for server_name in unique_names:
                 session = await stack.enter_async_context(
-                    self._single_connection(server_name, workspace_id=workspace_id)
+                    self._single_connection(
+                        server_name,
+                        workspace_id=workspace_id,
+                        agent_run_id=agent_run_id,
+                    )
                 )
                 self.sessions[server_name] = session
                 sessions.append(session)
@@ -78,9 +90,17 @@ class MCPManager:
 
     @asynccontextmanager
     async def _single_connection(
-        self, server_name: str, *, workspace_id: str | None = None
+        self,
+        server_name: str,
+        *,
+        workspace_id: str | None = None,
+        agent_run_id: str | None = None,
     ) -> AsyncGenerator[ClientSession, None]:
-        headers = self.workspace_scope_headers(workspace_id) if server_name == "local_tools" else None
+        headers = (
+            self.workspace_scope_headers(workspace_id, agent_run_id)
+            if server_name == "local_tools"
+            else None
+        )
         async with self._open_transport(self.servers[server_name], headers=headers) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
@@ -116,7 +136,9 @@ class MCPManager:
                 yield read_stream, write_stream
 
     @staticmethod
-    def workspace_scope_headers(workspace_id: str | None) -> dict[str, str] | None:
+    def workspace_scope_headers(
+        workspace_id: str | None, agent_run_id: str | None = None
+    ) -> dict[str, str] | None:
         """Create an authenticated local-MCP workspace claim.
 
         Missing scope deliberately produces no headers.  The bundled server
@@ -129,10 +151,19 @@ class MCPManager:
             workspace_id.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
-        return {
+        headers = {
             "X-FutureAgent-Workspace": workspace_id,
             "X-FutureAgent-Workspace-Signature": signature,
         }
+        if agent_run_id:
+            # HTTP 头只能 latin-1；标识符本身是十六进制，这里再做一次
+            # 长度与字符集收敛，避免异常值污染请求头。
+            safe_run_id = "".join(
+                char for char in str(agent_run_id) if char.isalnum() or char in "-_"
+            )[:64]
+            if safe_run_id:
+                headers["X-FutureAgent-Agent-Run"] = safe_run_id
+        return headers
 
     @staticmethod
     def _httpx_client_factory(url: str):

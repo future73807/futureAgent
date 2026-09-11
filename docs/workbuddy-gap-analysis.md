@@ -2,6 +2,8 @@
 
 > 生成时间：2026-09-02 · 基于代码全量梳理 + WorkBuddy 公开产品信息
 > 结论先行：**产品骨架已经达到 WorkBuddy 的"工作台"层面，但"AI 交付能力"和"自动化能力"两条主线尚未真正落地**。当前最大的问题是：经营/汇报智能体的"AI"是确定性模板回复，不是大模型；没有定时任务；没有多模态交付物。
+>
+> **⚠️ 本文第 3、4 节已部分过时**（保留作为当时判断的历史记录）：交付物生成、通知中心、定时调度、知识检索均已落地。最新状态见第 7 节。
 
 ---
 
@@ -104,3 +106,41 @@ WorkBuddy 是腾讯云（CodeBuddy 团队）推出的 AI Agent 办公工具，�
 - **聊天**：用户气泡品牌渐变、输入框聚焦光环、建议提示卡悬停浮起。
 - **主题令牌**：antd token 细化（按钮主阴影、次级边框色、字重）；**管理端主色从 `#4263eb` 统一为用户端的 `#4f5fd5` 靛蓝色系**（菜单选中渐变、开关、图标、登录页按钮全部同步）。
 - 验证：两个前端 `npm run build` 通过；本地起 API + 前端实际登录截图验证登录页/对话/看板/工作模式/经营助手/管理端概览。
+
+## 7. Agent 基础能力补齐（2026-09-11 已实施）
+
+上文第 3、4 节写作时，交付物（`make_xlsx`/`make_docx`/`make_chart`）、通知中心、定时调度与知识检索均已落地，该部分结论不再成立。本节记录后续一次专项核查发现的五项 Agent 基础能力缺口及其实现。
+
+### 7.1 核查结论
+
+| 能力 | 核查时状态 | 现状 |
+| --- | --- | --- |
+| 模型配置 / MCP / Skill / 联网搜索 / 文件预览 | ✅ 已具备 | 保持不变 |
+| 用量统计 | ❌ 只有运维指标，`usage_metadata` 被丢弃 | ✅ 已补齐 |
+| 差异分析 | ❌ `edit_file` 不返回 diff、不存快照 | ✅ 已补齐 |
+| 子代理 | ❌ 单图单节点 | ✅ 已补齐（显式开启） |
+| plan/agent/goal/loop 模式 | ❌ 无模式体系 | ✅ 已补齐（五档） |
+| 权限三档 | ⚠️ 有 RBAC 但审批硬编码强制 | ✅ 已补齐 |
+
+### 7.2 实现要点
+
+1. **用量统计**：`AgentEngine._record_usage` 按消息 id 去重累加 `usage_metadata`（工具循环会多次调模型，流式 chunk 共享 id）；新增 `usage_records` 表与 `core/pricing.py`。未上报用量的提供方不写记录，也不计入 `llm_calls`——否则“没计量”会被当成“零消耗”。**单价表初始为空**，不内置任何猜测的价格，未定价模型界面显示“未定价”。
+2. **权限三档**：`workspaces.permission_mode` + `MAX_PERMISSION_MODE` 部署上限，三者（工作区/请求/上限）取最严。请求只能向下收紧，向上静默丢弃；而管理员显式配置超上限时**必须报 422**，否则管理员会以为已放宽而实际从未生效。
+3. **差异分析**：快照写在 MCP 服务端（唯一实际写文件的进程），存于 `.futureagent/versions`——租户目录之外，模型看不到也改不到。API 沿用 `api/deliverables.py` 的跳进程范式（签名工作区声明 + `call_tool`）取回数据，因为 `agent_workspace` 卷只挂载给 mcp 服务。二进制格式返回 `diff_available=false` 而不是硬凑一份不可读的“差异”。
+4. **五档模式**：chat/plan/agent 不挂监督节点，图形态与改造前逐字一致（零回归）；goal/loop 才多一个 supervisor，判定不可解析时以 `judge_unavailable` 终止而不是继续烧预算。
+   - **与原计划的一个偏差**：计划写的是默认 `mode="chat"`，实现改为默认 `agent`。因为引入模式前对话本来就会绑定已选 MCP 工具，默认成 chat 会静默关掉用户在聊天页选的工具。
+5. **子代理**：**与原计划的两个偏差**。
+   - 计划说给 `AgentRun` 加 `parent_run_id` 形成 run 树；实现改为用已有的 `UsageRecord.parent_run_id` + `source="subagent"`。因为子代理不绑定 task/step，而 `agent_runs.task_id` 是 NOT NULL，建子 run 行就得伪造任务关联；而只加列不建行则是死 schema。
+   - 计划说子代理定义复用 Skill；实现额外要求**技能白名单显式列出 `dispatch_subagent`**。最初按“RBAC 允许就注入”实现，结果 developer 的 `tool:*` 让所有白名单为空的存量技能（包括内置 default）静默获得了子代理能力，直接打穿了 `test_agent_stream_returns_only_model_text`。子代理会成倍放大调用量，必须单独授权。
+
+### 7.3 顺手发现并修复的问题
+
+- `_agent_factory` 原本用 `("system", prompt)` 元组，会被 `ChatPromptTemplate` 当成 f-string 模板。任何包含花括号的提示词（plan 模式的 JSON 输出契约、用户自建技能）都会报错或产生假变量。已改为传入 `SystemMessage` 实例按字面处理。
+- `admin-frontend` 的 bridge 文件缺 `CopyOutlined`（SkillsPage 已在用），导致 `npm run build` 在本地就是失败的。
+- `frontend` 的 `node_modules` 与 `package.json` 不同步（缺 `marked`），本地构建失败。
+- 本地 Python 环境缺 `apscheduler`/`openpyxl`/`pypdf`/`python-docx`/`matplotlib`，均已在 `requirements.txt` 声明但未安装。
+- `mcp_server/server.py` 的版本号最初用 `len(entries) + 1` 推算，保留策略裁剪后会与现存版本重号，导致两个不同内容共用同一个 blob 文件名。已改为取现有最大版本号 + 1。
+
+### 7.4 验证
+
+`python -m pytest tests/ -q`：176 通过，仅剩 `test_ollama_is_not_advertised_ready_when_runtime_is_offline` 失败——已用 `git stash` 对比基线确认属于环境性既有失败（本机 Ollama 实际在线，模型确实就绪），与本次改动无关。两个前端 `npm run build` 均通过。

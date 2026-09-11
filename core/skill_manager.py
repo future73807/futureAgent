@@ -16,6 +16,10 @@ class Skill(BaseModel):
     description: str = Field(min_length=1, max_length=500)
     system_prompt: str = Field(min_length=1)
     allowed_tool_names: list[str] = Field(default_factory=list)
+    # 作为子代理运行时可指定与父代理不同的模型（例如父用强模型
+    # 规划、子用轻模型执行）；留空则沿用父代理的模型。它只能改用哪个
+    # 模型，不能绕过模型级的 RBAC 校验。
+    model_override: str = Field(default="", max_length=120)
 
 
 class SkillManager:

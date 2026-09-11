@@ -51,12 +51,18 @@ from api.dependencies import (
 )
 from api.notifications import dispatch_to_targets, push_notification
 from auth.auth_manager import AuthManager
-from config import settings
+from config import PERMISSION_MODES, settings
 from core.agent_engine import AgentEngine, WORKSPACE_TOOL_NAMES
 from core.checkpointer import get_checkpointer
 from core.mcp_manager import MCPManager
 from core.model_hub import ModelHub
-from core.observability import metrics_payload, record_agent_run, record_attachment_upload
+from core.observability import (
+    metrics_payload,
+    record_agent_run,
+    record_attachment_upload,
+    record_llm_usage,
+)
+from core.pricing import aggregate_cost, estimate_cost, is_priced
 from core.skill_manager import Skill, SkillManager
 from core.storage import ObjectNotFound, StorageError, attachment_object_key, get_storage
 from db.database import get_session
@@ -84,6 +90,7 @@ from db.models import (
     AgentRunBatch,
     Task,
     TaskComment,
+    UsageRecord,
     User,
     Workspace,
     WorkPlan,
@@ -141,6 +148,10 @@ class WorkspaceCreateRequest(RequestModel):
 class WorkspaceUpdateRequest(RequestModel):
     name: str | None = Field(default=None, min_length=2, max_length=120)
     plan: str | None = Field(default=None, min_length=2, max_length=32)
+
+
+class PermissionModeRequest(RequestModel):
+    permission_mode: Literal["default", "auto_approve", "full_access"]
 
 
 class MembershipCreateRequest(RequestModel):
@@ -234,6 +245,14 @@ class ChatCompletionRequest(RequestModel):
 class AgentRequest(ChatCompletionRequest):
     skill_name: str = Field(default="default", max_length=120)
     mcp_servers: list[str] = Field(default_factory=list, max_length=20)
+    # 只允许在工作区档位基础上向下收紧；向上取值会被服务端忽略。
+    permission_mode: Literal["default", "auto_approve", "full_access"] | None = None
+    # 缺省 agent：引入模式前对话本来就会绑定已选 MCP 工具，
+    # 默认成 chat 会静默关掉用户选的工具。
+    mode: Literal["chat", "plan", "agent", "goal", "loop"] = "agent"
+    goal: str = Field(default="", max_length=2000)
+    success_criteria: str = Field(default="", max_length=2000)
+    max_iterations: int = Field(default=5, ge=1, le=20)
 
 
 class TaskExecutionRequest(RequestModel):
@@ -245,6 +264,11 @@ class TaskExecutionRequest(RequestModel):
     mcp_servers: list[str] = Field(default_factory=list, max_length=20)
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=96)
     retry_of_id: str | None = Field(default=None, max_length=64)
+    permission_mode: Literal["default", "auto_approve", "full_access"] | None = None
+    mode: Literal["chat", "plan", "agent", "goal", "loop"] = "agent"
+    goal: str = Field(default="", max_length=2000)
+    success_criteria: str = Field(default="", max_length=2000)
+    max_iterations: int = Field(default=5, ge=1, le=20)
 
 
 class PolicyRequest(RequestModel):
@@ -356,11 +380,83 @@ def _workspace_data(workspace: Workspace, role: str | None = None) -> dict[str, 
         "slug": workspace.slug,
         "owner_id": workspace.owner_id,
         "plan": workspace.plan,
+        "permission_mode": _effective_permission_mode(workspace),
+        # 部署上限一并下发，前端据此禁用超出上限的档位，而不是
+        # 让使用者选了一个永远不会生效的选项。
+        "max_permission_mode": settings.effective_max_permission_mode,
         "created_at": workspace.created_at,
     }
     if role is not None:
         data["role"] = role
     return data
+
+
+def _effective_permission_mode(workspace: Workspace, requested: str | None = None) -> str:
+    """取工作区档位、请求档位与部署上限中最严格的一个。
+
+    请求只能向下收紧：向上提权被静默丢弃而不报错，避免把内部
+    档位比较暴露成可探测的错误信息。未知取值一律归到最严格的
+    ``default``，使配置或历史数据异常时失败方向是“更严”。
+    """
+    baseline = (
+        workspace.permission_mode
+        if workspace.permission_mode in PERMISSION_MODES
+        else "default"
+    )
+    ranks = [
+        PERMISSION_MODES.index(baseline),
+        PERMISSION_MODES.index(settings.effective_max_permission_mode),
+    ]
+    if requested in PERMISSION_MODES:
+        ranks.append(PERMISSION_MODES.index(requested))
+    return PERMISSION_MODES[min(ranks)]
+
+
+def _validate_agent_mode(mode: str, goal: str, success_criteria: str) -> None:
+    """监督模式缺少判据就无法终止，必须在开流前拒绍。
+
+    goal 靠目标判定是否达成，loop 靠停止条件判定是否再迭代；
+    缺了它们监督者只能一直返回“未达成”，直到烧完轮次预算。
+    """
+    if mode == "goal" and not goal.strip():
+        raise HTTPException(status_code=422, detail="目标驱动模式需要提供目标")
+    if mode == "loop" and not success_criteria.strip():
+        raise HTTPException(status_code=422, detail="循环迭代模式需要提供停止条件")
+
+
+def _mode_config(request: Any) -> dict[str, Any]:
+    """把运行模式相关字段收敛成引擎配置片段。"""
+    return {
+        "mode": request.mode,
+        "goal": str(request.goal or "").strip(),
+        "success_criteria": str(request.success_criteria or "").strip(),
+        "max_iterations": min(
+            int(request.max_iterations or 1), max(1, settings.agent_max_iterations)
+        ),
+        # 轮次判定侧信道：与 tool_trace 同机制，由引擎写入、路由消费。
+        "iterations": [],
+    }
+
+
+def _iteration_events(
+    config: dict[str, Any], emitted: int
+) -> tuple[list[dict[str, str]], int]:
+    """把新产生的轮次判定转成 SSE 事件，并返回已发送计数。
+
+    在每个 token 之后检查，事件就落在本轮输出之后、下一轮输出之前，
+    前端看到的轮次推进与实际执行顺序一致。
+    """
+    trace = config.get("iterations")
+    if not isinstance(trace, list) or len(trace) <= emitted:
+        return [], emitted
+    events = [
+        {
+            "event": "iteration",
+            "data": json.dumps(item, ensure_ascii=False, default=str),
+        }
+        for item in trace[emitted:]
+    ]
+    return events, len(trace)
 
 
 def _project_data(project: Project) -> dict[str, Any]:
@@ -437,6 +533,8 @@ def _agent_run_data(run: AgentRun) -> dict[str, Any]:
         "skill_name": run.skill_name,
         "mcp_servers": _optional_json_list(run.mcp_servers_json),
         "tool_trace": _optional_json_list(run.tool_trace_json),
+        "agent_mode": run.agent_mode,
+        "iterations": _optional_json_list(run.iterations_json),
         "retry_of_id": run.retry_of_id,
         "attempt": run.attempt,
         "status": run.status,
@@ -462,6 +560,114 @@ def _serialize_tool_trace(events: list[Any]) -> str:
             }
         )
     return json.dumps(bounded, ensure_ascii=False)
+
+
+def _persist_usage(
+    session: Session,
+    *,
+    workspace_id: str,
+    user_id: str,
+    model_id: str,
+    skill_name: str,
+    source: str,
+    source_id: str,
+    agent_mode: str,
+    config: dict[str, Any],
+    status: str,
+    started_at: datetime,
+    parent_run_id: str | None = None,
+) -> None:
+    """落库一次调用的真实用量，并导出 Prometheus 计数。
+
+    模型未上报 usage_metadata 时 ``llm_calls`` 为 0，此时不写入记录：
+    一条全零的行无法与“确实消耗为零”区分，只会污染汇总。指标侧仍会
+    计数一次调用，因为“发生了调用但未计量”本身是需要暴露的事实。
+
+    ``started_at`` 必须由调用方传入流开始时采集的 ``now_utc()``，而不能用
+    数据库回读的时间戳——SQLite 下后者可能是 naive 的，相减会抛异常。
+    """
+    usage = AgentEngine.summarize_usage(config)
+    record_llm_usage(model_id, usage, status)
+    trace = config.get("tool_trace")
+    elapsed = now_utc() - started_at if started_at.tzinfo else timedelta()
+    if usage["llm_calls"]:
+        session.add(
+            UsageRecord(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                model_id=model_id,
+                skill_name=skill_name,
+                source=source,
+                source_id=source_id,
+                agent_mode=agent_mode,
+                parent_run_id=parent_run_id,
+                input_tokens=usage["input_tokens"],
+                output_tokens=usage["output_tokens"],
+                total_tokens=usage["total_tokens"],
+                llm_calls=usage["llm_calls"],
+                tool_calls=len(trace) if isinstance(trace, list) else 0,
+                duration_ms=max(0, int(elapsed.total_seconds() * 1000)),
+            )
+        )
+    _persist_subagent_usage(
+        session,
+        config,
+        workspace_id=workspace_id,
+        user_id=user_id,
+        source_id=source_id,
+        # 子代理行必须指向真实的 agent_runs 行；对话没有 run，
+        # 因此只能留空，否则会触发外键约束失败。
+        parent_run_id=source_id if source == "agent_run" else None,
+    )
+
+
+def _persist_subagent_usage(
+    session: Session,
+    config: dict[str, Any],
+    *,
+    workspace_id: str,
+    user_id: str,
+    source_id: str,
+    parent_run_id: str | None,
+) -> None:
+    """为每个子代理写一条独立用量行，挂到父执行的 run 上。
+
+    子代理有自己独立的计量桶，与父代理不重叠；分开存才能回答
+    “这次执行里多少消耗是子代理花掉的”。失败、超时与未启动的子代理
+    同样入账，因为它们可能已经消耗了真实 token。
+    """
+    records = config.get("subagent_usage")
+    if not isinstance(records, list):
+        return
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        usage = record.get("usage") or {}
+        if not isinstance(usage, dict) or not usage.get("llm_calls"):
+            continue
+        session.add(
+            UsageRecord(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                model_id=str(record.get("model_id") or "")[:120],
+                skill_name=str(record.get("skill_name") or "")[:120],
+                source="subagent",
+                source_id=source_id,
+                agent_mode="agent",
+                parent_run_id=parent_run_id,
+                input_tokens=int(usage.get("input_tokens") or 0),
+                output_tokens=int(usage.get("output_tokens") or 0),
+                total_tokens=int(usage.get("total_tokens") or 0),
+                llm_calls=int(usage.get("llm_calls") or 0),
+                tool_calls=int(record.get("tool_calls") or 0),
+                duration_ms=int(record.get("duration_ms") or 0),
+            )
+        )
+        record_llm_usage(
+            str(record.get("model_id") or ""),
+            {k: int(usage.get(k) or 0) for k in ("input_tokens", "output_tokens", "total_tokens", "llm_calls")},
+            str(record.get("status") or "failed"),
+        )
 
 
 def _plan_data(session: Session, plan: WorkPlan | None) -> dict[str, Any] | None:
@@ -558,6 +764,14 @@ def _require_workspace_manager(session: Session, user: User, workspace_id: str) 
     membership = _membership_for_workspace(session, user, workspace_id)
     if not user.is_platform_admin and membership.role not in {"owner", "admin"}:
         raise HTTPException(status_code=403, detail="需要工作区管理员权限")
+    return membership
+
+
+def _require_workspace_owner(session: Session, user: User, workspace_id: str) -> Membership:
+    """放宽审批档位会改变整个工作区的治理强度，只给所有者。"""
+    membership = _membership_for_workspace(session, user, workspace_id)
+    if not user.is_platform_admin and membership.role != "owner":
+        raise HTTPException(status_code=403, detail="只有工作区所有者可以调整权限档位")
     return membership
 
 
@@ -1131,6 +1345,43 @@ def update_workspace(
         target_id=workspace_id,
     )
     session.add(workspace)
+    session.commit()
+    return {"workspace": _workspace_data(workspace)}
+
+
+@router.put("/v1/workspaces/{workspace_id}/permission-mode")
+def update_workspace_permission_mode(
+    workspace_id: str,
+    request: PermissionModeRequest,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """调整工作区的审批与工具广度档位。
+
+    与单次请求的静默降级不同，这里是管理员的显式配置动作：超出部署
+    上限时必须报错，否则管理员会以为已放宽而实际从未生效。
+    """
+    _require_workspace_owner(session, user, workspace_id)
+    workspace = _workspace_or_404(session, workspace_id)
+    cap = settings.effective_max_permission_mode
+    if PERMISSION_MODES.index(request.permission_mode) > PERMISSION_MODES.index(cap):
+        raise HTTPException(
+            status_code=422,
+            detail=f"当前部署将权限档位上限设为 {cap}，无法选择更宽松的 {request.permission_mode}。",
+        )
+    previous = workspace.permission_mode
+    workspace.permission_mode = request.permission_mode
+    workspace.updated_at = now_utc()
+    session.add(workspace)
+    write_audit(
+        session,
+        actor_id=user.id,
+        workspace_id=workspace_id,
+        action="workspace.permission_mode_updated",
+        target_type="workspace",
+        target_id=workspace_id,
+        metadata={"previous_mode": previous, "permission_mode": request.permission_mode},
+    )
     session.commit()
     return {"workspace": _workspace_data(workspace)}
 
@@ -1769,6 +2020,16 @@ def upsert_work_plan(
     for step in existing.values():
         if step.id not in supplied_ids:
             session.delete(step)
+    # 自动批准沿用与人工批准相同的前提：计划至少有一个步骤。
+    # 档位由服务端从工作区与部署上限推导，不接受客户端传入。
+    permission_mode = _effective_permission_mode(context.workspace)
+    auto_approved = bool(request.steps) and permission_mode in {"auto_approve", "full_access"}
+    if auto_approved:
+        plan.status = "approved"
+        plan.approved_by = context.user.id
+        plan.approved_at = now_utc()
+        plan.updated_at = now_utc()
+        session.add(plan)
     write_audit(
         session,
         actor_id=context.user.id,
@@ -1778,6 +2039,32 @@ def upsert_work_plan(
         target_id=plan.id,
         metadata={"task_id": task.id, "step_count": len(request.steps)},
     )
+    if auto_approved:
+        # 自动批准必须留下可追责的记录：谁保存的、当时哪个档位。
+        write_audit(
+            session,
+            actor_id=context.user.id,
+            workspace_id=context.workspace.id,
+            action="work_plan.auto_approved",
+            target_type="work_plan",
+            target_id=plan.id,
+            metadata={
+                "task_id": task.id,
+                "step_count": len(request.steps),
+                "permission_mode": permission_mode,
+            },
+        )
+        for recipient in {task.assignee_id, task.reporter_id} - {None, context.user.id}:
+            push_notification(
+                session,
+                context.workspace.id,
+                recipient,
+                "plan",
+                f"计划已自动批准：{task.title}",
+                body=f"工作区权限档位为 {permission_mode}，可进入工作模式开始执行",
+                link="work",
+                ref_id=task.id,
+            )
     session.commit()
     return {"plan": _plan_data(session, plan)}
 
@@ -2226,6 +2513,7 @@ async def agent_chat(
     if not engine.skill_manager.get_skill(request.skill_name):
         raise HTTPException(status_code=404, detail=f"技能“{request.skill_name}”不存在")
     _validate_mcp_server_selection(engine, request.mcp_servers)
+    _validate_agent_mode(request.mode, request.goal, request.success_criteria)
     effective_role = _authorize_agent_config(context, model_id, request.skill_name, request.mcp_servers)
     _ensure_model_ready(model_id)
     conversation = _create_conversation_for_chat(
@@ -2246,6 +2534,7 @@ async def agent_chat(
     conversation.updated_at = now_utc()
     session.add(conversation)
     session.commit()
+    permission_mode = _effective_permission_mode(context.workspace, request.permission_mode)
     config = {
         "model_id": model_id,
         "skill_name": request.skill_name,
@@ -2253,10 +2542,15 @@ async def agent_chat(
         "workspace_id": context.workspace.id,
         "thread_id": conversation.id,
         "tool_trace": [],
+        "usage_by_message": {},
+        "permission_mode": permission_mode,
+        **_mode_config(request),
     }
+    stream_started = now_utc()
 
     async def stream() -> AsyncGenerator[dict[str, str], None]:
         collected: list[str] = []
+        emitted_iterations = 0
         try:
             yield {
                 "event": "meta",
@@ -2265,11 +2559,27 @@ async def agent_chat(
             async for chunk in engine.run(user_role=effective_role, query=agent_query, config=config):
                 collected.append(chunk)
                 yield {"event": "token", "data": chunk}
+                iteration_events, emitted_iterations = _iteration_events(config, emitted_iterations)
+                for event in iteration_events:
+                    yield event
             assistant_message.content = "".join(collected)
             assistant_message.tool_trace_json = _serialize_tool_trace(config["tool_trace"])
             conversation.updated_at = now_utc()
             session.add(assistant_message)
             session.add(conversation)
+            _persist_usage(
+                session,
+                workspace_id=context.workspace.id,
+                user_id=context.user.id,
+                model_id=model_id,
+                skill_name=request.skill_name,
+                source="chat",
+                source_id=conversation.id,
+                agent_mode=request.mode,
+                config=config,
+                status="succeeded",
+                started_at=stream_started,
+            )
             write_audit(
                 session,
                 actor_id=context.user.id,
@@ -2288,6 +2598,20 @@ async def agent_chat(
             conversation.updated_at = now_utc()
             session.add(assistant_message)
             session.add(conversation)
+            # 已消耗的 token 是真实成本，取消也必须入账。
+            _persist_usage(
+                session,
+                workspace_id=context.workspace.id,
+                user_id=context.user.id,
+                model_id=model_id,
+                skill_name=request.skill_name,
+                source="chat",
+                source_id=conversation.id,
+                agent_mode=request.mode,
+                config=config,
+                status="cancelled",
+                started_at=stream_started,
+            )
             write_audit(
                 session,
                 actor_id=context.user.id,
@@ -2303,6 +2627,19 @@ async def agent_chat(
             assistant_message.content = "".join(collected) or "[Agent request did not complete]"
             assistant_message.tool_trace_json = _serialize_tool_trace(config["tool_trace"])
             session.add(assistant_message)
+            _persist_usage(
+                session,
+                workspace_id=context.workspace.id,
+                user_id=context.user.id,
+                model_id=model_id,
+                skill_name=request.skill_name,
+                source="chat",
+                source_id=conversation.id,
+                agent_mode=request.mode,
+                config=config,
+                status="failed",
+                started_at=stream_started,
+            )
             session.commit()
             yield _sse_error(exc)
 
@@ -2404,16 +2741,112 @@ def _run_cancelled(session: Session, run: AgentRun) -> bool:
     return run.status == "cancelled"
 
 
+def _auto_complete_step(
+    session: Session, plan: WorkPlan, step: WorkPlanStep | None
+) -> bool:
+    """full_access 档位下将成功步骤直接标为完成，跳过人工复核。
+
+    只推进步骤与计划状态，不伪造 ``output_summary``：复核环节可以省，
+    执行证据（run 输出与 tool_trace）仍由原有链路完整保留。
+    返回是否发生了状态变更，供调用方决定审计内容。
+    """
+    if not step or step.status == "done":
+        return False
+    step.status = "done"
+    step.updated_at = now_utc()
+    session.add(step)
+    all_steps = session.exec(
+        select(WorkPlanStep).where(WorkPlanStep.plan_id == plan.id)
+    ).all()
+    if all_steps and all(item.status == "done" for item in all_steps):
+        plan.status = "completed"
+    plan.updated_at = now_utc()
+    session.add(plan)
+    return True
+
+
 def _save_agent_run_progress(
     session: Session,
     run: AgentRun,
     collected: list[str],
     tool_trace: list[Any],
+    iterations: list[Any] | None = None,
 ) -> None:
     """Durably save bounded partial output and tool evidence at every exit."""
     run.output = "".join(collected)[:100_000]
     run.tool_trace_json = _serialize_tool_trace(tool_trace)
+    if iterations is not None:
+        run.iterations_json = _serialize_iterations(iterations)
     session.add(run)
+
+
+def _serialize_iterations(events: list[Any]) -> str:
+    """持久化轮次判定证据，字段与长度均有界。"""
+    bounded: list[dict[str, Any]] = []
+    for event in events[:32]:
+        if not isinstance(event, dict):
+            continue
+        bounded.append(
+            {
+                "iteration": int(event.get("iteration") or 0),
+                "verdict": str(event.get("verdict") or "")[:32],
+                "reason": str(event.get("reason") or "")[:1_000],
+            }
+        )
+    return json.dumps(bounded, ensure_ascii=False)
+
+
+def _usage_by_run(
+    session: Session, workspace_id: str, run_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """按 run 聚合真实用量，包含该 run 派生的子代理。
+
+    未上报用量的 run 不会出现在结果里，调用方据此展示“未上报”，
+    而不是展示一个无法与“真的没消耗”区分的全零值。总量包含子代理，
+    并另用 ``subagents`` 列出明细，便于审阅“多少是子代理花掉的”。
+    """
+    if not run_ids:
+        return {}
+    rows = session.exec(
+        select(UsageRecord).where(
+            UsageRecord.workspace_id == workspace_id,
+            UsageRecord.source.in_(["agent_run", "subagent"]),
+            UsageRecord.source_id.in_(run_ids),
+        )
+    ).all()
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        entry = grouped.setdefault(
+            row.source_id,
+            {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "llm_calls": 0,
+                "tool_calls": 0,
+                "records": 0,
+                "subagent_records": 0,
+                "subagents": [],
+            },
+        )
+        for field in ("input_tokens", "output_tokens", "total_tokens", "llm_calls", "tool_calls"):
+            entry[field] += int(getattr(row, field) or 0)
+        entry["records"] += 1
+        if row.source == "subagent":
+            entry["subagent_records"] += 1
+            entry["subagents"].append(
+                {
+                    "model_id": row.model_id,
+                    "skill_name": row.skill_name,
+                    "input_tokens": int(row.input_tokens or 0),
+                    "output_tokens": int(row.output_tokens or 0),
+                    "total_tokens": int(row.total_tokens or 0),
+                    "llm_calls": int(row.llm_calls or 0),
+                    "tool_calls": int(row.tool_calls or 0),
+                    "duration_ms": int(row.duration_ms or 0),
+                }
+            )
+    return grouped
 
 
 @router.get("/v1/tasks/{task_id}/runs")
@@ -2430,7 +2863,10 @@ def list_task_runs(
         .order_by(AgentRun.started_at.desc())
         .limit(limit)
     ).all()
-    return {"runs": [_agent_run_data(run) for run in runs]}
+    usage = _usage_by_run(session, context.workspace.id, [run.id for run in runs])
+    return {
+        "runs": [{**_agent_run_data(run), "usage": usage.get(run.id)} for run in runs]
+    }
 
 
 def _agent_run_batch_data(batch: AgentRunBatch) -> dict[str, Any]:
@@ -2544,6 +2980,7 @@ async def execute_task_with_agent(
     if not engine.skill_manager.get_skill(request.skill_name):
         raise HTTPException(status_code=404, detail=f"技能“{request.skill_name}”不存在")
     _validate_mcp_server_selection(engine, request.mcp_servers)
+    _validate_agent_mode(request.mode, request.goal, request.success_criteria)
     effective_role = _authorize_agent_config(context, model_id, request.skill_name, request.mcp_servers)
     _ensure_model_ready(model_id)
 
@@ -2589,6 +3026,8 @@ async def execute_task_with_agent(
         skill_name=request.skill_name,
         mcp_servers_json=json.dumps(request.mcp_servers, ensure_ascii=False),
         tool_trace_json="[]",
+        agent_mode=request.mode,
+        iterations_json="[]",
         idempotency_key=request.idempotency_key or None,
         retry_of_id=retry_parent.id if retry_parent else None,
         attempt=(retry_parent.attempt + 1) if retry_parent else 1,
@@ -2613,6 +3052,7 @@ async def execute_task_with_agent(
     )
     session.commit()
     prompt = _task_execution_prompt(session, context.workspace.id, task, plan, step)
+    permission_mode = _effective_permission_mode(context.workspace, request.permission_mode)
     config = {
         "model_id": model_id,
         "skill_name": request.skill_name,
@@ -2621,10 +3061,33 @@ async def execute_task_with_agent(
         # 任务级线程：同一任务的多次执行共享 LangGraph 记忆（Postgres 部署）
         "thread_id": f"governed-task-{task.id}",
         "tool_trace": [],
+        "usage_by_message": {},
+        "permission_mode": permission_mode,
+        # 让工具服务把本次执行触及的文件改动归因到这条 run。
+        "agent_run_id": run.id,
+        **_mode_config(request),
     }
+    stream_started = now_utc()
+
+    def _record_run_usage(status: str) -> None:
+        """每个终止出口都入账，已消耗的 token 不因失败或取消而丢失。"""
+        _persist_usage(
+            session,
+            workspace_id=context.workspace.id,
+            user_id=context.user.id,
+            model_id=model_id,
+            skill_name=request.skill_name,
+            source="agent_run",
+            source_id=run.id,
+            agent_mode=request.mode,
+            config=config,
+            status=status,
+            started_at=stream_started,
+        )
 
     async def stream() -> AsyncGenerator[dict[str, str], None]:
         collected: list[str] = []
+        emitted_iterations = 0
         checkpointer = await get_checkpointer()
         try:
             yield {
@@ -2636,20 +3099,30 @@ async def execute_task_with_agent(
                     user_role=effective_role, query=prompt, config=config, checkpointer=checkpointer
                 ):
                     if _run_cancelled(session, run):
-                        _save_agent_run_progress(session, run, collected, config["tool_trace"])
+                        _save_agent_run_progress(session, run, collected, config["tool_trace"], config.get("iterations"))
+                        _record_run_usage("cancelled")
                         session.commit()
                         yield {"event": "cancelled", "data": json.dumps({"run": _agent_run_data(run)}, default=str)}
                         return
                     collected.append(chunk)
                     yield {"event": "token", "data": chunk}
+                    iteration_events, emitted_iterations = _iteration_events(config, emitted_iterations)
+                    for event in iteration_events:
+                        yield event
             if _run_cancelled(session, run):
-                _save_agent_run_progress(session, run, collected, config["tool_trace"])
+                _save_agent_run_progress(session, run, collected, config["tool_trace"], config.get("iterations"))
+                _record_run_usage("cancelled")
                 session.commit()
                 yield {"event": "cancelled", "data": json.dumps({"run": _agent_run_data(run)}, default=str)}
                 return
             run.status = "succeeded"
-            _save_agent_run_progress(session, run, collected, config["tool_trace"])
+            _save_agent_run_progress(session, run, collected, config["tool_trace"], config.get("iterations"))
+            _record_run_usage("succeeded")
             run.completed_at = now_utc()
+            auto_completed = (
+                permission_mode == "full_access"
+                and _auto_complete_step(session, plan, step)
+            )
             push_notification(
                 session,
                 context.workspace.id,
@@ -2667,7 +3140,7 @@ async def execute_task_with_agent(
                 action="agent_run.completed",
                 target_type="agent_run",
                 target_id=run.id,
-                metadata={"status": run.status, "step_id": run.step_id},
+                metadata={"status": run.status, "step_id": run.step_id, "auto_completed_step": auto_completed},
             )
             session.commit()
             dispatch_to_targets(session, context.workspace.id, f"AI 执行完成：{task.title}", "结果已保存，等待人工审核。")
@@ -2696,18 +3169,21 @@ async def execute_task_with_agent(
                         metadata={"task_id": task.id, "step_id": run.step_id},
                     )
                     record_agent_run("cancelled")
-                _save_agent_run_progress(session, run, collected, config["tool_trace"])
+                _save_agent_run_progress(session, run, collected, config["tool_trace"], config.get("iterations"))
+                _record_run_usage("cancelled")
                 session.commit()
             finally:
                 raise
         except Exception as exc:
             if _run_cancelled(session, run):
-                _save_agent_run_progress(session, run, collected, config["tool_trace"])
+                _save_agent_run_progress(session, run, collected, config["tool_trace"], config.get("iterations"))
+                _record_run_usage("cancelled")
                 session.commit()
                 yield {"event": "cancelled", "data": json.dumps({"run": _agent_run_data(run)}, default=str)}
                 return
             run.status = "failed"
-            _save_agent_run_progress(session, run, collected, config["tool_trace"])
+            _save_agent_run_progress(session, run, collected, config["tool_trace"], config.get("iterations"))
+            _record_run_usage("failed")
             run.error_message = (
                 f"AI 执行超过 {max(1, settings.agent_run_timeout_seconds)} 秒限制，请检查模型路由后重试。"
                 if isinstance(exc, TimeoutError)
@@ -2745,6 +3221,11 @@ class BatchExecuteRequest(RequestModel):
     skill_name: str = Field(default="chatbot", max_length=120)
     mcp_servers: list[str] = Field(default_factory=list, max_length=10)
     step_ids: list[str] | None = Field(default=None, max_length=20, description="缺省时并行执行计划中全部待执行步骤")
+    permission_mode: Literal["default", "auto_approve", "full_access"] | None = None
+    mode: Literal["chat", "plan", "agent", "goal", "loop"] = "agent"
+    goal: str = Field(default="", max_length=2000)
+    success_criteria: str = Field(default="", max_length=2000)
+    max_iterations: int = Field(default=5, ge=1, le=20)
 
 
 class BatchCancelRequest(RequestModel):
@@ -2763,7 +3244,8 @@ async def execute_task_steps_in_parallel(
     - 整个批次占用一个工作区并发槽（批次运行期间单步执行会 429，直至批次结束）。
     - 每个步骤使用独立的 LangGraph 线程，避免并行写同一会话记忆。
     - SSE 事件：meta（批次与 run 清单）→ step-token（逐步骤 token）→
-      step-done / step-error（单步终态）→ done（全部结束）。
+      step-iteration（监督模式轮次判定）→ step-done / step-error（单步终态）
+      → done（全部结束）。
     """
     task = _task_or_404(session, context.workspace.id, task_id)
     plan = session.exec(select(WorkPlan).where(WorkPlan.task_id == task.id)).first()
@@ -2792,6 +3274,7 @@ async def execute_task_steps_in_parallel(
     if not engine.skill_manager.get_skill(request.skill_name):
         raise HTTPException(status_code=404, detail=f"技能“{request.skill_name}”不存在")
     _validate_mcp_server_selection(engine, request.mcp_servers)
+    _validate_agent_mode(request.mode, request.goal, request.success_criteria)
     effective_role = _authorize_agent_config(context, model_id, request.skill_name, request.mcp_servers)
     _ensure_model_ready(model_id)
 
@@ -2822,6 +3305,8 @@ async def execute_task_steps_in_parallel(
             skill_name=request.skill_name,
             mcp_servers_json=json.dumps(request.mcp_servers, ensure_ascii=False),
             tool_trace_json="[]",
+            agent_mode=request.mode,
+            iterations_json="[]",
             batch_id=batch_id,
         )
         if step.status == "pending":
@@ -2859,6 +3344,9 @@ async def execute_task_steps_in_parallel(
     session.commit()
 
     checkpointer = await get_checkpointer()
+    batch_permission_mode = _effective_permission_mode(
+        context.workspace, request.permission_mode
+    )
 
     async def _record_batch_outcome(outcome: str) -> None:
         """单步终态回写批次计数；批次行由编排端点创建。"""
@@ -2872,6 +3360,7 @@ async def execute_task_steps_in_parallel(
 
     async def _worker(run: AgentRun, step: WorkPlanStep, prompt: str, queue: asyncio.Queue) -> None:
         collected: list[str] = []
+        emitted_iterations = 0
         config = {
             "model_id": model_id,
             "skill_name": request.skill_name,
@@ -2880,7 +3369,29 @@ async def execute_task_steps_in_parallel(
             # 并行步骤各自独立线程：并发写同一线程会破坏 LangGraph 状态。
             "thread_id": f"governed-task-{task.id}-step-{step.id}",
             "tool_trace": [],
+            "usage_by_message": {},
+            "permission_mode": batch_permission_mode,
+            "agent_run_id": run.id,
+            **_mode_config(request),
         }
+        worker_started = now_utc()
+
+        def _record_step_usage(status: str) -> None:
+            """并行步骤各自入账，source_id 指向本步的 run。"""
+            _persist_usage(
+                session,
+                workspace_id=context.workspace.id,
+                user_id=context.user.id,
+                model_id=model_id,
+                skill_name=request.skill_name,
+                source="agent_run",
+                source_id=run.id,
+                agent_mode=request.mode,
+                config=config,
+                status=status,
+                started_at=worker_started,
+            )
+
         try:
             async with asyncio.timeout(max(1, settings.agent_run_timeout_seconds)):
                 async for chunk in engine.run(
@@ -2890,16 +3401,28 @@ async def execute_task_steps_in_parallel(
                         break
                     collected.append(chunk)
                     await queue.put(("step-token", json.dumps({"run_id": run.id, "step_id": step.id, "chunk": chunk}, default=str)))
+                    # 监督模式的轮次判定按步分开上报，带上 run 与步骤标识。
+                    iteration_events, emitted_iterations = _iteration_events(config, emitted_iterations)
+                    for event in iteration_events:
+                        detail = json.loads(event["data"])
+                        detail.update({"run_id": run.id, "step_id": step.id})
+                        await queue.put(("step-iteration", json.dumps(detail, ensure_ascii=False, default=str)))
             if _run_cancelled(session, run):
-                _save_agent_run_progress(session, run, collected, config["tool_trace"])
+                _save_agent_run_progress(session, run, collected, config["tool_trace"], config.get("iterations"))
+                _record_step_usage("cancelled")
                 session.commit()
                 await _record_batch_outcome("cancelled")
                 session.commit()
                 await queue.put(("step-cancelled", json.dumps({"run_id": run.id, "step_id": step.id}, default=str)))
                 return
             run.status = "succeeded"
-            _save_agent_run_progress(session, run, collected, config["tool_trace"])
+            _save_agent_run_progress(session, run, collected, config["tool_trace"], config.get("iterations"))
+            _record_step_usage("succeeded")
             run.completed_at = now_utc()
+            auto_completed = (
+                batch_permission_mode == "full_access"
+                and _auto_complete_step(session, plan, step)
+            )
             write_audit(
                 session,
                 actor_id=context.user.id,
@@ -2907,7 +3430,7 @@ async def execute_task_steps_in_parallel(
                 action="agent_run.completed",
                 target_type="agent_run",
                 target_id=run.id,
-                metadata={"status": "succeeded", "step_id": step.id, "batch_id": batch_id},
+                metadata={"status": "succeeded", "step_id": step.id, "batch_id": batch_id, "auto_completed_step": auto_completed},
             )
             session.commit()
             record_agent_run("succeeded")
@@ -2916,14 +3439,16 @@ async def execute_task_steps_in_parallel(
             await queue.put(("step-done", json.dumps({"run_id": run.id, "step_id": step.id}, default=str)))
         except Exception as exc:  # noqa: BLE001 - 单步失败不影响其它并行步骤
             if _run_cancelled(session, run):
-                _save_agent_run_progress(session, run, collected, config["tool_trace"])
+                _save_agent_run_progress(session, run, collected, config["tool_trace"], config.get("iterations"))
+                _record_step_usage("cancelled")
                 session.commit()
                 await _record_batch_outcome("cancelled")
                 session.commit()
                 await queue.put(("step-cancelled", json.dumps({"run_id": run.id, "step_id": step.id}, default=str)))
                 return
             run.status = "failed"
-            _save_agent_run_progress(session, run, collected, config["tool_trace"])
+            _save_agent_run_progress(session, run, collected, config["tool_trace"], config.get("iterations"))
+            _record_step_usage("failed")
             run.error_message = (
                 f"AI 执行超过 {max(1, settings.agent_run_timeout_seconds)} 秒限制，请检查模型路由后重试。"
                 if isinstance(exc, TimeoutError)
@@ -3736,6 +4261,143 @@ def public_settings(user: User = Depends(require_platform_admin)) -> dict[str, A
 
 
 # ---------------------------------------------------------------------------
+# Model usage accounting (real provider-reported tokens only)
+# ---------------------------------------------------------------------------
+
+
+USAGE_RANGE_DAYS = {"7d": 7, "30d": 30, "all": None}
+# 汇总在应用层聚合以保持 SQLite 与 PostgreSQL 行为一致；上限防止
+# 单次请求把全表拉进内存，超出时用 truncated 明确告知结果不完整。
+USAGE_SUMMARY_ROW_LIMIT = 50_000
+
+
+def _usage_summary(
+    session: Session,
+    *,
+    workspace_id: str | None,
+    range_key: str,
+    group_by: str,
+) -> dict[str, Any]:
+    """按维度聚合真实用量。
+
+    成本只在该模型已登记单价时出现；``priced_rows`` 小于 ``runs`` 说明
+    部分消耗无法计价，调用方不得把总额当成完整账单。
+    """
+    statement = select(UsageRecord)
+    if workspace_id:
+        statement = statement.where(UsageRecord.workspace_id == workspace_id)
+    days = USAGE_RANGE_DAYS.get(range_key)
+    if days is not None:
+        statement = statement.where(UsageRecord.created_at >= now_utc() - timedelta(days=days))
+    rows = session.exec(
+        statement.order_by(UsageRecord.created_at.desc()).limit(USAGE_SUMMARY_ROW_LIMIT + 1)
+    ).all()
+    truncated = len(rows) > USAGE_SUMMARY_ROW_LIMIT
+    rows = rows[:USAGE_SUMMARY_ROW_LIMIT]
+
+    buckets: dict[str, dict[str, Any]] = {}
+    totals = {
+        "runs": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "llm_calls": 0,
+        "tool_calls": 0,
+        "duration_ms": 0,
+    }
+    cost_rows: list[dict[str, Any]] = []
+    for row in rows:
+        if group_by == "day":
+            key = row.created_at.date().isoformat() if row.created_at else "unknown"
+        elif group_by == "user":
+            key = row.user_id
+        elif group_by == "skill":
+            key = row.skill_name or "unknown"
+        elif group_by == "mode":
+            key = row.agent_mode or "unknown"
+        else:
+            key = row.model_id
+        bucket = buckets.get(key)
+        if bucket is None:
+            bucket = {
+                "key": key,
+                "label": key,
+                "runs": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "llm_calls": 0,
+                "tool_calls": 0,
+                "duration_ms": 0,
+                "cost": None,
+                "cost_rows": [],
+            }
+            buckets[key] = bucket
+        for field in ("input_tokens", "output_tokens", "total_tokens", "llm_calls", "tool_calls", "duration_ms"):
+            value = int(getattr(row, field) or 0)
+            bucket[field] += value
+            totals[field] += value
+        bucket["runs"] += 1
+        totals["runs"] += 1
+        cost = estimate_cost(row.model_id, row.input_tokens, row.output_tokens)
+        if cost is not None:
+            bucket["cost_rows"].append({"cost": cost})
+            cost_rows.append({"cost": cost})
+
+    for bucket in buckets.values():
+        bucket["cost"], bucket["priced_rows"] = aggregate_cost(bucket.pop("cost_rows"))
+    if group_by == "user" and buckets:
+        names = {
+            user_id: display_name
+            for user_id, display_name in session.exec(
+                select(User.id, User.display_name).where(User.id.in_(list(buckets)))
+            ).all()
+        }
+        for key, bucket in buckets.items():
+            bucket["label"] = names.get(key) or key
+
+    total_cost, priced_rows = aggregate_cost(cost_rows)
+    return {
+        "range": range_key,
+        "group_by": group_by,
+        "truncated": truncated,
+        "totals": {**totals, "cost": total_cost, "priced_rows": priced_rows},
+        "groups": sorted(buckets.values(), key=lambda item: item["total_tokens"], reverse=True),
+        "priced_models": sorted({mid for mid in buckets if is_priced(mid)}) if group_by == "model" else [],
+    }
+
+
+@router.get("/v1/usage/summary")
+def usage_summary(
+    range_key: Literal["7d", "30d", "all"] = Query("30d", alias="range"),
+    group_by: Literal["model", "user", "skill", "day", "mode"] = Query("model"),
+    context: WorkspaceContext = Depends(get_workspace_context),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """当前工作区的模型用量汇总；只读成员也可查看。"""
+    require_workspace_role(context, "owner", "admin", "member", "viewer")
+    return _usage_summary(
+        session,
+        workspace_id=context.workspace.id,
+        range_key=range_key,
+        group_by=group_by,
+    )
+
+
+@router.get("/v1/admin/usage/summary")
+def admin_usage_summary(
+    range_key: Literal["7d", "30d", "all"] = Query("30d", alias="range"),
+    group_by: Literal["model", "user", "skill", "day", "mode"] = Query("model"),
+    user: User = Depends(require_platform_admin),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """平台级用量汇总，仅限平台管理员。"""
+    return _usage_summary(
+        session, workspace_id=None, range_key=range_key, group_by=group_by
+    )
+
+
+# ---------------------------------------------------------------------------
 # Operational dashboards and audit trail (platform administrator only)
 # ---------------------------------------------------------------------------
 
@@ -3756,6 +4418,8 @@ def admin_overview(
             "deliverables": len(session.exec(select(Deliverable.id)).all()),
             "notifications": len(session.exec(select(Notification.id)).all()),
             "automation_jobs": len(session.exec(select(ScheduledJob.id)).all()),
+            "usage_records": len(session.exec(select(UsageRecord.id)).all()),
+            "total_tokens": sum(session.exec(select(UsageRecord.total_tokens)).all()),
             "models": len(ModelHub.list_supported_models()),
             "skills": len(SkillManager().list_skills()),
             "roles": len(AuthManager().get_roles()),

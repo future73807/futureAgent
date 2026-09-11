@@ -35,6 +35,16 @@ ATTACHMENT_UPLOADS = Counter(
     "Completed attachment uploads.",
     ("backend",),
 )
+LLM_TOKENS = Counter(
+    "futureagent_llm_tokens_total",
+    "Model-reported tokens by model and direction.",
+    ("model", "direction"),
+)
+LLM_CALLS = Counter(
+    "futureagent_llm_calls_total",
+    "Agent stream completions by model and terminal outcome.",
+    ("model", "status"),
+)
 
 
 def record_agent_run(status: str) -> None:
@@ -43,6 +53,23 @@ def record_agent_run(status: str) -> None:
 
 def record_attachment_upload(backend: str) -> None:
     ATTACHMENT_UPLOADS.labels(backend=backend).inc()
+
+
+def record_llm_usage(model_id: str, usage: dict[str, int], status: str) -> None:
+    """Export one streamed run's provider-reported token counts.
+
+    ``llm_calls`` is 0 when the provider never reported usage, so an unmeasured
+    model produces no token samples instead of a misleading zero series.
+    """
+    LLM_CALLS.labels(model=model_id, status=status).inc()
+    if not usage.get("llm_calls"):
+        return
+    LLM_TOKENS.labels(model=model_id, direction="input").inc(
+        usage.get("input_tokens") or 0
+    )
+    LLM_TOKENS.labels(model=model_id, direction="output").inc(
+        usage.get("output_tokens") or 0
+    )
 
 
 def metrics_payload() -> tuple[bytes, str]:

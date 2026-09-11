@@ -409,6 +409,11 @@ button, input, textarea { font: inherit; }
 .execution-controls > .ant-select:nth-child(2) { min-width: 170px; flex: 1; }
 .execution-controls > .ant-select:nth-child(3) { min-width: 150px; flex: .8; }
 .execution-controls > .ant-select:nth-child(4) { min-width: 210px; flex: 1.15; }
+/* 模式说明、监督模式参数与轮次判定（对话页与工作模式共用） */
+.execution-mode-hint, .chat-mode-hint { display: block; margin: 6px 0 0; font-size: 12px; }
+.execution-mode-fields, .chat-mode-fields { margin-top: 8px; }
+.execution-iterations, .chat-iterations { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.execution-iterations .ant-alert, .chat-iterations .ant-alert { padding: 6px 10px; }
 .attachment-preview {
   max-height: 360px;
   margin: 0;
@@ -423,6 +428,28 @@ button, input, textarea { font: inherit; }
 }
 .artifact-image-preview { display: block; max-width: 100%; max-height: 480px; object-fit: contain; border: 1px solid var(--border); border-radius: 10px; background: #fafbfe; }
 .artifact-pdf-preview { width: 100%; min-height: 520px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+
+/* 差异视图：沿用 .attachment-preview 的深色底，逐行上色 */
+.diff-unified > div { padding: 0 6px; border-radius: 3px; }
+.diff-add { background: rgba(46, 160, 67, .22); color: #7ee787; }
+.diff-remove { background: rgba(248, 81, 73, .2); color: #ffa198; }
+.diff-hunk { color: #79c0ff; }
+.diff-header { color: #8b949e; font-weight: 600; }
+.diff-side-by-side {
+  max-height: 420px;
+  overflow: auto;
+  border: 1px solid #29364e;
+  border-radius: 10px;
+  background: #111827;
+  font: 12px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.diff-row { display: grid; grid-template-columns: 1fr 1fr; }
+.diff-cell { padding: 0 8px; white-space: pre-wrap; word-break: break-word; color: #e7edf7; }
+.diff-cell:first-child { border-right: 1px solid #29364e; }
+.diff-row.diff-insert .diff-cell:last-child { background: rgba(46, 160, 67, .22); color: #7ee787; }
+.diff-row.diff-delete .diff-cell:first-child { background: rgba(248, 81, 73, .2); color: #ffa198; }
+.diff-row.diff-replace .diff-cell:first-child { background: rgba(248, 81, 73, .2); color: #ffa198; }
+.diff-row.diff-replace .diff-cell:last-child { background: rgba(46, 160, 67, .22); color: #7ee787; }
 
 /* Chat */
 .chat-page { height: calc(100dvh - 64px); min-height: 520px; display: flex; min-width: 0; overflow: hidden; }

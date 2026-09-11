@@ -1,6 +1,6 @@
 import React, { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { App as AntApp, Avatar, Badge, Button, Card, ConfigProvider, Drawer, Dropdown, Form, Grid, Input, Layout, Menu, Select, Space, Spin, Tooltip, Typography, theme } from 'antd'
-import { ApiOutlined, AppstoreOutlined, AuditOutlined, BulbOutlined, CheckCircleFilled, DashboardOutlined, ExportOutlined, GlobalOutlined, LogoutOutlined, MenuOutlined, RobotOutlined, SafetyOutlined, SettingOutlined, TeamOutlined, ToolOutlined, UserOutlined } from '@ant-design/icons'
+import { ApiOutlined, AppstoreOutlined, AuditOutlined, BulbOutlined, CheckCircleFilled, DashboardOutlined, ExportOutlined, FundOutlined, GlobalOutlined, LogoutOutlined, MenuOutlined, RobotOutlined, SafetyOutlined, SettingOutlined, TeamOutlined, ToolOutlined, UserOutlined } from '@ant-design/icons'
 import { apiFetch, applyAuthSession, clearAuthSession, getAccessToken, getWorkspaceId, refreshAccessToken, setWorkspaceId, toUserErrorMessage, userFrontendUrl } from './api.js'
 import { applyLocale, getLocale, t, toggleLocale, antdLocaleOf } from './i18n.js'
 import { applyThemeMode, getThemeMode, toggleThemeMode } from './theme.js'
@@ -14,6 +14,7 @@ const SettingsPage = lazy(() => import('./pages/SettingsPage.jsx'))
 const UsersPage = lazy(() => import('./pages/UsersPage.jsx'))
 const WorkspacesPage = lazy(() => import('./pages/WorkspacesPage.jsx'))
 const AuditPage = lazy(() => import('./pages/AuditPage.jsx'))
+const UsagePage = lazy(() => import('./pages/UsagePage.jsx'))
 
 const { Header, Sider, Content } = Layout
 const { Text, Title } = Typography
@@ -24,6 +25,7 @@ const buildNavItems = () => [
       { key: 'users', icon: <UserOutlined />, label: t('admin.nav.users') },
       { key: 'workspaces', icon: <TeamOutlined />, label: t('admin.nav.workspaces') },
       { key: 'audit', icon: <AuditOutlined />, label: t('admin.nav.audit') },
+      { key: 'usage', icon: <FundOutlined />, label: t('admin.nav.usage') },
     ],
   },
   {
@@ -82,7 +84,7 @@ function AdminShell({ profile, workspaces, onLogout }) {
   useEffect(() => { window.scrollTo(0, 0) }, [selectedKey])
   useEffect(() => { const check = () => apiFetch('/api/v1/health', { workspaceId: '' }).then(() => setOnline(true)).catch(() => setOnline(false)); check(); const timer = setInterval(check, 30_000); return () => clearInterval(timer) }, [])
   const navigate = (key) => { if (!buildPageLabels()[key]) return; setSelectedKey(key); setMobileNav(false); window.history.replaceState(null, '', `#/${key}`) }
-  const pages = useMemo(() => ({ dashboard: <DashboardPage onNavigate={navigate} />, users: <UsersPage />, workspaces: <WorkspacesPage />, audit: <AuditPage />, models: <ModelsPage />, skills: <SkillsPage />, mcp: <McpPage />, policies: <PoliciesPage />, settings: <SettingsPage /> }), [])
+  const pages = useMemo(() => ({ dashboard: <DashboardPage onNavigate={navigate} />, users: <UsersPage />, workspaces: <WorkspacesPage />, audit: <AuditPage />, usage: <UsagePage />, models: <ModelsPage />, skills: <SkillsPage />, mcp: <McpPage />, policies: <PoliciesPage />, settings: <SettingsPage /> }), [])
   const accountMenu = { items: [{ key: 'account', disabled: true, label: <div className="admin-account-summary"><strong>{profile.display_name}</strong><span>{profile.email}</span></div> }, { type: 'divider' }, { key: 'logout', icon: <LogoutOutlined />, label: t('admin.common.logout'), danger: true }], onClick: ({ key }) => key === 'logout' && onLogout() }
   const navigation = (isCollapsed = false) => <div className="admin-navigation">
     <div className="admin-brand"><AppstoreOutlined />{!isCollapsed && <div><strong>futureAgent</strong><span>{t('admin.tagline')}</span></div>}</div>

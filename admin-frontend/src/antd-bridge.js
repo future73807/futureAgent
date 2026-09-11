@@ -1,4 +1,5 @@
 // 管理端按实际使用的组件建立精确入口，避免顶层导出将未使用组件加入首屏资源。
+export { default as Alert } from 'antd/es/alert'
 export { default as App } from 'antd/es/app'
 export { default as Avatar } from 'antd/es/avatar'
 export { default as Badge } from 'antd/es/badge'
@@ -18,6 +19,7 @@ export { default as Menu } from 'antd/es/menu'
 export { default as Modal } from 'antd/es/modal'
 export { default as Popconfirm } from 'antd/es/popconfirm'
 export { default as Row } from 'antd/es/row'
+export { default as Segmented } from 'antd/es/segmented'
 export { default as Select } from 'antd/es/select'
 export { default as Space } from 'antd/es/space'
 export { default as Spin } from 'antd/es/spin'

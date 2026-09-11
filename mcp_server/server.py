@@ -10,6 +10,7 @@ import csv
 import hashlib
 import hmac
 import ipaddress
+import json
 import os
 import socket
 import stat
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlsplit, urlunsplit
@@ -43,6 +45,15 @@ WORKSPACE_SIGNING_KEY = os.getenv(
     "change-this-development-mcp-secret-before-production",
 )
 DNS_FAKE_IP_NETWORK = ipaddress.ip_network("198.18.0.0/15")
+# 版本快照保留策略：每个文件保留最近 N 个可回溯版本，单个文件超过
+# 快照上限时只记录变更事实而不保存副本，整个工作区的快照总量超出预算
+# 时从最旧的开始释放内容。
+FILE_VERSION_RETENTION = max(2, min(int(os.getenv("MCP_FILE_VERSION_RETENTION", "20")), 200))
+FILE_VERSION_MAX_BYTES = max(
+    1_000_000,
+    min(int(os.getenv("MCP_FILE_VERSION_MAX_BYTES", "52428800")), 1_073_741_824),
+)
+FILE_VERSION_MAX_BLOB_BYTES = 2_000_000
 ALLOWED_HOSTS = [
     value.strip()
     for value in os.getenv(
@@ -107,6 +118,22 @@ def _workspace_root_for_context(ctx: Context) -> Path:
     return resolved_scope
 
 
+def _agent_run_id_for_context(ctx: Context) -> str:
+    """取出本次调用所属的 AI 执行标识，仅用于版本清单归因。
+
+    与工作区声明一样，它来自服务端注入的请求头或请求元数据，从不
+    作为工具参数暴露给模型，因此模型无法伪造改动归属。
+    """
+    request = ctx.request_context.request
+    headers = getattr(request, "headers", {}) if request is not None else {}
+    run_id = headers.get("x-futureagent-agent-run", "")
+    if not run_id:
+        meta = ctx.request_context.meta
+        if meta is not None:
+            run_id = getattr(meta, "futureagent_agent_run", "")
+    return str(run_id or "")[:64]
+
+
 def _resolve_path(path: str, workspace_root: Path = WORKSPACE_ROOT) -> Path:
     candidate = Path(path)
     resolved = candidate.resolve() if candidate.is_absolute() else (workspace_root / candidate).resolve()
@@ -126,7 +153,14 @@ def _ensure_readable_file(path: str, workspace_root: Path = WORKSPACE_ROOT) -> P
     return resolved
 
 
-def _write_bytes_atomically(resolved: Path, content: bytes) -> None:
+def _write_bytes_atomically(
+    resolved: Path,
+    content: bytes,
+    *,
+    workspace_root: Path = WORKSPACE_ROOT,
+    change_kind: str = "write",
+    agent_run_id: str = "",
+) -> None:
     """Replace one workspace file without exposing a partially written value."""
     resolved.parent.mkdir(parents=True, exist_ok=True)
     existing_mode = None
@@ -134,6 +168,13 @@ def _write_bytes_atomically(resolved: Path, content: bytes) -> None:
         if not resolved.is_file():
             raise IsADirectoryError(str(resolved))
         existing_mode = stat.S_IMODE(resolved.stat().st_mode)
+        # 覆盖前先快照旧内容，使每一次改动都可回溯、可比对。
+        _snapshot_previous_version(
+            resolved,
+            workspace_root,
+            change_kind=change_kind,
+            agent_run_id=agent_run_id,
+        )
 
     descriptor, temporary_name = tempfile.mkstemp(
         dir=resolved.parent,
@@ -153,6 +194,216 @@ def _write_bytes_atomically(resolved: Path, content: bytes) -> None:
         temporary_path.unlink(missing_ok=True)
 
 
+def _version_scope_root(workspace_root: Path) -> Path:
+    """一个工作区的版本快照根目录，始终位于租户目录之外。
+
+    多租户下租户根形如 ``<base>/.futureagent/workspaces/<scope>``，快照放到
+    同级的 ``<base>/.futureagent/versions/<scope>``；直连部署下工作区根就是
+    根目录本身，快照放到其下的 ``.futureagent/versions/<hash>``，并由
+    ``list_files`` 统一屏蔽 ``.futureagent``。两种情况下以租户根为边界的
+    读写工具都看不到也改不到快照。
+
+    目录从传入的工作区根派生而不依赖全局 ``WORKSPACE_ROOT``，因此隔离
+    测试与直连部署不会把快照写到仓库自带的默认工作区里。
+    """
+    resolved_root = workspace_root.resolve()
+    parent = resolved_root.parent
+    # 租户根形如 <base>/.futureagent/workspaces/<scope>；快照取同级的
+    # <base>/.futureagent/versions/<scope>，因此不在租户目录内。
+    if parent.name == "workspaces" and parent.parent.name == ".futureagent":
+        base = parent.parent / "versions"
+        scope = resolved_root.name
+    else:
+        # 直连部署（非多租户）：工作区根就是根目录本身。
+        base = resolved_root / ".futureagent" / "versions"
+        scope = hashlib.sha256(str(resolved_root).encode("utf-8")).hexdigest()
+    resolved_base = base.resolve()
+    if resolved_base.is_symlink():
+        raise PermissionError("版本目录无效")
+    target = (resolved_base / scope).resolve()
+    try:
+        target.relative_to(resolved_base)
+    except ValueError as exc:
+        raise PermissionError("版本目录无效") from exc
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _version_dir(resolved: Path, workspace_root: Path) -> Path:
+    relative = resolved.relative_to(workspace_root).as_posix()
+    digest = hashlib.sha256(relative.encode("utf-8")).hexdigest()
+    target = _version_scope_root(workspace_root) / digest
+    if target.is_symlink():
+        raise PermissionError("版本目录无效")
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _read_manifest(directory: Path) -> list[dict]:
+    manifest = directory / "manifest.jsonl"
+    if not manifest.is_file():
+        return []
+    entries: list[dict] = []
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            record = json.loads(stripped)
+        except ValueError:
+            # 单行损坏不得让整份变更历史不可读。
+            continue
+        if isinstance(record, dict):
+            entries.append(record)
+    return entries
+
+
+def _write_manifest(directory: Path, entries: list[dict]) -> None:
+    payload = "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in entries)
+    (directory / "manifest.jsonl").write_text(payload, encoding="utf-8")
+
+
+def _delete_blob(directory: Path, entry: dict) -> None:
+    try:
+        (directory / f"{int(entry['version'])}.blob").unlink(missing_ok=True)
+    except (KeyError, TypeError, ValueError, OSError):
+        pass
+
+
+def _prune_versions(directory: Path, entries: list[dict]) -> list[dict]:
+    """保留最近 N 条，被裁剪的版本删除内容副本。
+
+    只释放 blob，不删除清单行：变更发生过这件事本身就是审计价值，
+    丢掉内容后仍要如实告知调用方“这一版没有留副本”。
+    """
+    if len(entries) <= FILE_VERSION_RETENTION:
+        return entries
+    dropped = entries[: len(entries) - FILE_VERSION_RETENTION]
+    for entry in dropped:
+        _delete_blob(directory, entry)
+    return entries[len(entries) - FILE_VERSION_RETENTION :]
+
+
+def _enforce_scope_budget(workspace_root: Path) -> None:
+    """工作区快照总量超预算时，从最旧的可回溯版本开始释放内容。"""
+    scope_dir = _version_scope_root(workspace_root)
+    if not scope_dir.is_dir():
+        return
+    manifests: dict[Path, list[dict]] = {}
+    candidates: list[tuple[float, Path, dict]] = []
+    total = 0
+    for child in scope_dir.iterdir():
+        if not child.is_dir():
+            continue
+        entries = _read_manifest(child)
+        manifests[child] = entries
+        for entry in entries:
+            blob = child / f"{entry.get('version')}.blob"
+            if not entry.get("snapshot") or not blob.is_file():
+                continue
+            size = blob.stat().st_size
+            total += size
+            candidates.append((blob.stat().st_mtime, child, entry))
+    if total <= FILE_VERSION_MAX_BYTES:
+        return
+    changed: set[Path] = set()
+    for _mtime, directory, entry in sorted(candidates, key=lambda item: item[0]):
+        if total <= FILE_VERSION_MAX_BYTES:
+            break
+        blob = directory / f"{entry.get('version')}.blob"
+        try:
+            total -= blob.stat().st_size
+        except OSError:
+            continue
+        _delete_blob(directory, entry)
+        entry["snapshot"] = False
+        changed.add(directory)
+    for directory in changed:
+        _write_manifest(directory, manifests[directory])
+
+
+def _snapshot_previous_version(
+    resolved: Path,
+    workspace_root: Path,
+    *,
+    change_kind: str,
+    agent_run_id: str,
+) -> None:
+    """保存即将被覆盖的内容。
+
+    快照失败绥不得阻断写入：差异分析是辅助能力，而写文件是主路径。
+    任何异常只记录到 stderr，不向上抛。
+    """
+    try:
+        previous = resolved.read_bytes()
+    except OSError:
+        return
+    try:
+        directory = _version_dir(resolved, workspace_root)
+        entries = _read_manifest(directory)
+        # 版本号必须单调递增：用清单行数推算会在保留策略裁剪后
+        # 与现存版本重号，让两个不同内容共用同一个 blob 文件名。
+        version = max(
+            (int(item.get("version") or 0) for item in entries), default=0
+        ) + 1
+        stored = len(previous) <= FILE_VERSION_MAX_BLOB_BYTES
+        if stored:
+            (directory / f"{version}.blob").write_bytes(previous)
+        entries.append(
+            {
+                "path": resolved.relative_to(workspace_root).as_posix(),
+                "version": version,
+                "sha256": hashlib.sha256(previous).hexdigest(),
+                "size": len(previous),
+                "change_kind": change_kind,
+                "agent_run_id": str(agent_run_id or "")[:64],
+                "snapshot": stored,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        _write_manifest(directory, _prune_versions(directory, entries))
+        _enforce_scope_budget(workspace_root)
+    except Exception as exc:  # noqa: BLE001 - 快照不得影响写入主路径
+        print(f"[futureagent-mcp] 版本快照已跳过：{exc}", file=sys.stderr)
+
+
+def list_file_versions(path: str, *, _workspace_root: Path | None = None) -> list[dict]:
+    """列出一个工作区文件的历史版本（不含内容）。"""
+    workspace_root = _workspace_root or WORKSPACE_ROOT
+    resolved = _resolve_path(path, workspace_root)
+    try:
+        directory = _version_dir(resolved, workspace_root)
+    except (ValueError, PermissionError):
+        return []
+    return _read_manifest(directory)
+
+
+def read_file_version(
+    path: str, version: int, *, _workspace_root: Path | None = None
+) -> str:
+    """读取历史版本的 UTF-8 文本内容，供服务端生成差异。"""
+    workspace_root = _workspace_root or WORKSPACE_ROOT
+    resolved = _resolve_path(path, workspace_root)
+    directory = _version_dir(resolved, workspace_root)
+    entry = next(
+        (item for item in _read_manifest(directory) if item.get("version") == version),
+        None,
+    )
+    if entry is None:
+        raise FileNotFoundError(f"版本不存在: {version}")
+    if not entry.get("snapshot"):
+        # 副本已因保留策略或超大而被释放，不能伪造一个空内容充数。
+        raise ValueError("该版本未保留内容副本，无法比对")
+    blob = directory / f"{version}.blob"
+    if not blob.is_file():
+        raise FileNotFoundError(f"版本内容已丢失: {version}")
+    try:
+        return blob.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        # 不做替换解码：把二进制乱码当文本差异展示会误导审阅者。
+        raise ValueError("该版本不是 UTF-8 文本，无法比对") from exc
+
+
 def list_files(
     path: str = ".", *, _workspace_root: Path | None = None
 ) -> list[dict]:
@@ -165,6 +416,10 @@ def list_files(
     for child in sorted(
         directory.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())
     ):
+        # 系统目录不属于工作成果：直连部署下版本快照就在其中，
+        # 列出来会让模型去读写本应不可见的历史副本。
+        if child.name == ".futureagent":
+            continue
         # Do not follow links just to render a directory listing.  Reads and
         # writes resolve the target separately and enforce the workspace root.
         is_link = child.is_symlink()
@@ -194,7 +449,11 @@ def read_file(path: str, *, _workspace_root: Path | None = None) -> str:
 
 
 def write_file(
-    path: str, content: str, *, _workspace_root: Path | None = None
+    path: str,
+    content: str,
+    *,
+    _workspace_root: Path | None = None,
+    _agent_run_id: str = "",
 ) -> str:
     """将 UTF-8 文本写入工作区；内容最大 1 MB。"""
     encoded = content.encode("utf-8")
@@ -202,7 +461,13 @@ def write_file(
         raise ValueError(f"内容超过 {MAX_FILE_SIZE} 字节限制")
     workspace_root = _workspace_root or WORKSPACE_ROOT
     resolved = _resolve_path(path, workspace_root)
-    _write_bytes_atomically(resolved, encoded)
+    _write_bytes_atomically(
+        resolved,
+        encoded,
+        workspace_root=workspace_root,
+        change_kind="write",
+        agent_run_id=_agent_run_id,
+    )
     return f"已写入 {resolved.relative_to(workspace_root).as_posix()} ({len(encoded)} 字节)"
 
 
@@ -213,6 +478,7 @@ def edit_file(
     replace_all: bool = False,
     *,
     _workspace_root: Path | None = None,
+    _agent_run_id: str = "",
 ) -> dict:
     """精确替换 UTF-8 文件内容；默认要求 old_text 在文件中唯一出现。"""
     if not old_text:
@@ -233,7 +499,13 @@ def edit_file(
     encoded = updated.encode("utf-8")
     if len(encoded) > MAX_FILE_SIZE:
         raise ValueError(f"编辑后的文件超过 {MAX_FILE_SIZE} 字节限制；文件未修改")
-    _write_bytes_atomically(resolved, encoded)
+    _write_bytes_atomically(
+        resolved,
+        encoded,
+        workspace_root=workspace_root,
+        change_kind="edit",
+        agent_run_id=_agent_run_id,
+    )
     return {
         "path": resolved.relative_to(workspace_root).as_posix(),
         "replacements": replacements,
@@ -276,6 +548,7 @@ def scoped_write_file(ctx: Context, path: str, content: str) -> str:
         path,
         content,
         _workspace_root=_workspace_root_for_context(ctx),
+        _agent_run_id=_agent_run_id_for_context(ctx),
     )
 
 
@@ -294,6 +567,7 @@ def scoped_edit_file(
         new_text,
         replace_all,
         _workspace_root=_workspace_root_for_context(ctx),
+        _agent_run_id=_agent_run_id_for_context(ctx),
     )
 
 
@@ -327,6 +601,7 @@ def make_xlsx(
     sheet_name: str = "Sheet1",
     *,
     _workspace_root: Path | None = None,
+    _agent_run_id: str = "",
 ) -> str:
     """把二维表格写入 xlsx 文件；rows 是数组的数组，推荐首行为表头。"""
     if not rows or not isinstance(rows, list):
@@ -347,7 +622,13 @@ def make_xlsx(
     sheet.title = str(sheet_name)[:31] or "Sheet1"
     for row in rows:
         sheet.append(list(row)[:256])
-    _write_bytes_atomically(resolved, b"")  # 建立占位并复用原子写目录校验
+    _write_bytes_atomically(
+        resolved,
+        b"",  # 建立占位并复用原子写目录校验与版本快照
+        workspace_root=workspace_root,
+        change_kind="generate",
+        agent_run_id=_agent_run_id,
+    )
     workbook.save(resolved)
     size = _check_generated_file(resolved)
     return f"已生成 {resolved.relative_to(workspace_root).as_posix()}（{len(rows)} 行 × {width} 列，{size} 字节）"
@@ -359,6 +640,7 @@ def make_docx(
     paragraphs: list[str],
     *,
     _workspace_root: Path | None = None,
+    _agent_run_id: str = "",
 ) -> str:
     """把标题与段落写入 docx 文件。"""
     if not title or not title.strip():
@@ -379,7 +661,13 @@ def make_docx(
     document.add_heading(title.strip()[:240], level=0)
     for paragraph in clean_paragraphs:
         document.add_paragraph(paragraph[:8000])
-    _write_bytes_atomically(resolved, b"")
+    _write_bytes_atomically(
+        resolved,
+        b"",
+        workspace_root=workspace_root,
+        change_kind="generate",
+        agent_run_id=_agent_run_id,
+    )
     document.save(resolved)
     size = _check_generated_file(resolved)
     return f"已生成 {resolved.relative_to(workspace_root).as_posix()}（{len(clean_paragraphs)} 段，{size} 字节）"
@@ -393,6 +681,7 @@ def make_chart(
     title: str = "",
     *,
     _workspace_root: Path | None = None,
+    _agent_run_id: str = "",
 ) -> str:
     """用 matplotlib 生成 bar/line/pie 图表 PNG。"""
     if kind not in CHART_KINDS:
@@ -429,7 +718,13 @@ def make_chart(
             if title:
                 axis.set_title(title[:80])
         figure.tight_layout()
-        _write_bytes_atomically(resolved, b"")
+        _write_bytes_atomically(
+            resolved,
+            b"",
+            workspace_root=workspace_root,
+            change_kind="generate",
+            agent_run_id=_agent_run_id,
+        )
         figure.savefig(resolved, format="png")
     finally:
         plt.close(figure)
@@ -459,6 +754,7 @@ def scoped_make_xlsx(ctx: Context, path: str, rows: list[list], sheet_name: str 
         rows,
         sheet_name,
         _workspace_root=_workspace_root_for_context(ctx),
+        _agent_run_id=_agent_run_id_for_context(ctx),
     )
 
 
@@ -470,6 +766,7 @@ def scoped_make_docx(ctx: Context, path: str, title: str, paragraphs: list[str])
         title,
         paragraphs,
         _workspace_root=_workspace_root_for_context(ctx),
+        _agent_run_id=_agent_run_id_for_context(ctx),
     )
 
 
@@ -490,6 +787,7 @@ def scoped_make_chart(
         labels,
         title,
         _workspace_root=_workspace_root_for_context(ctx),
+        _agent_run_id=_agent_run_id_for_context(ctx),
     )
 
 
@@ -497,6 +795,20 @@ def scoped_make_chart(
 def scoped_read_file_base64(ctx: Context, path: str) -> str:
     """读取工作区文件的 base64 内容（上限 2 MB）。"""
     return read_file_base64(path, _workspace_root=_workspace_root_for_context(ctx))
+
+
+@mcp.tool(name="list_file_versions")
+def scoped_list_file_versions(ctx: Context, path: str) -> list[dict]:
+    """列出工作区文件的历史版本清单（不含内容）。"""
+    return list_file_versions(path, _workspace_root=_workspace_root_for_context(ctx))
+
+
+@mcp.tool(name="read_file_version")
+def scoped_read_file_version(ctx: Context, path: str, version: int) -> str:
+    """读取工作区文件某个历史版本的文本内容。"""
+    return read_file_version(
+        path, version, _workspace_root=_workspace_root_for_context(ctx)
+    )
 
 
 def run_python(code: str, timeout_seconds: int = 10) -> dict:

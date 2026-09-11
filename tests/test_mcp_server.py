@@ -95,6 +95,116 @@ class WorkspaceToolTests(unittest.TestCase):
             self.assertEqual(result["rows"], [{"name": "a", "value": "1"}])
 
 
+class FileVersionTests(unittest.TestCase):
+    def test_edit_keeps_previous_content_and_records_attribution(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            server, "WORKSPACE_ROOT", Path(directory).resolve()
+        ):
+            server.write_file("notes.md", "第一版\n")
+            server.edit_file("notes.md", "第一版", "第二版", _agent_run_id="run-a")
+            server.edit_file("notes.md", "第二版", "第三版", _agent_run_id="run-b")
+
+            versions = server.list_file_versions("notes.md")
+            # 两次覆盖产生两个快照，存的是被覆盖前的内容。
+            self.assertEqual([item["version"] for item in versions], [1, 2])
+            self.assertEqual(server.read_file_version("notes.md", 1), "第一版\n")
+            self.assertEqual(server.read_file_version("notes.md", 2), "第二版\n")
+            self.assertEqual(server.read_file("notes.md"), "第三版\n")
+            # 首次写入时文件尚不存在，因此两个快照都来自 edit。
+            self.assertEqual(
+                [item["change_kind"] for item in versions], ["edit", "edit"]
+            )
+            self.assertEqual(
+                [item["agent_run_id"] for item in versions], ["run-a", "run-b"]
+            )
+            self.assertTrue(all(item["snapshot"] for item in versions))
+            with self.assertRaises(FileNotFoundError):
+                server.read_file_version("notes.md", 99)
+
+    def test_versions_are_scoped_per_file_and_hidden_from_listing(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            server, "WORKSPACE_ROOT", Path(directory).resolve()
+        ):
+            server.write_file("a.txt", "a1")
+            server.write_file("b.txt", "b1")
+            server.write_file("a.txt", "a2")
+            server.write_file("b.txt", "b2")
+            self.assertEqual(len(server.list_file_versions("a.txt")), 1)
+            self.assertEqual(len(server.list_file_versions("b.txt")), 1)
+            self.assertEqual(server.read_file_version("a.txt", 1), "a1")
+            self.assertEqual(server.read_file_version("b.txt", 1), "b1")
+            # 系统目录不得出现在给模型看的清单里。
+            self.assertNotIn(
+                ".futureagent", [item["name"] for item in server.list_files(".")]
+            )
+
+    def test_retention_prunes_oldest_snapshots(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(server, "WORKSPACE_ROOT", Path(directory).resolve()),
+            patch.object(server, "FILE_VERSION_RETENTION", 3),
+        ):
+            for index in range(6):
+                server.write_file("log.txt", f"v{index}")
+            versions = server.list_file_versions("log.txt")
+            # 首次写入无快照，因此 6 次写入产生 5 个版本，保留最后 3 个。
+            self.assertEqual([item["version"] for item in versions], [3, 4, 5])
+            with self.assertRaises(FileNotFoundError):
+                server.read_file_version("log.txt", 1)
+            self.assertEqual(server.read_file_version("log.txt", 3), "v2")
+
+    def test_oversized_previous_content_records_change_without_a_copy(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(server, "WORKSPACE_ROOT", Path(directory).resolve()),
+            patch.object(server, "FILE_VERSION_MAX_BLOB_BYTES", 4),
+        ):
+            server.write_file("big.txt", "0123456789")
+            server.write_file("big.txt", "small")
+            versions = server.list_file_versions("big.txt")
+            self.assertEqual(len(versions), 1)
+            # 如实标记“没有副本”，而不是返回一个空字符串充数。
+            self.assertFalse(versions[0]["snapshot"])
+            self.assertEqual(versions[0]["size"], 10)
+            with self.assertRaisesRegex(ValueError, "未保留内容副本"):
+                server.read_file_version("big.txt", 1)
+
+    def test_scope_budget_releases_oldest_blobs_but_keeps_the_change_log(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(server, "WORKSPACE_ROOT", Path(directory).resolve()),
+            patch.object(server, "FILE_VERSION_MAX_BYTES", 8),
+        ):
+            server.write_file("one.txt", "aaaaaa")
+            server.write_file("two.txt", "bbbbbb")
+            server.write_file("one.txt", "a2")
+            server.write_file("two.txt", "b2")
+            snapshots = [
+                (item["path"], item["version"], item["snapshot"])
+                for item in server.list_file_versions("one.txt")
+                + server.list_file_versions("two.txt")
+            ]
+            # 超出预算后至少一个旧版本被释放内容，但变更记录仍在。
+            self.assertTrue(any(not snap[2] for snap in snapshots))
+            self.assertEqual(len(snapshots), 2)
+
+    def test_binary_previous_content_is_not_decoded_as_text(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            server, "WORKSPACE_ROOT", Path(directory).resolve()
+        ):
+            target = Path(directory) / "blob.bin"
+            target.write_bytes(b"\xff\xfe\x00\x01")
+            server.write_file("blob.bin", "text-now")
+            versions = server.list_file_versions("blob.bin")
+            self.assertEqual(len(versions), 1)
+            with self.assertRaisesRegex(ValueError, "不是 UTF-8 文本"):
+                server.read_file_version("blob.bin", 1)
+
+    def test_version_tools_are_registered_for_scoped_calls(self):
+        names = {tool.name for tool in server.mcp._tool_manager.list_tools()}
+        self.assertTrue({"list_file_versions", "read_file_version"}.issubset(names))
+
+
 class WebToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_fetch_rejects_loopback_before_opening_http_client(self):
         with self.assertRaisesRegex(ValueError, "本地或私有"):
@@ -334,8 +444,13 @@ class PythonToolRegistrationTests(unittest.TestCase):
 
 class BundledSkillMappingTests(unittest.TestCase):
     def test_skill_whitelists_only_reference_builtin_or_optional_tools(self):
+        from core.agent_engine import SUBAGENT_TOOL_NAME
+
         tool_names = {tool.name for tool in server.mcp._tool_manager.list_tools()}
         tool_names.add("run_python")  # optional, registered only when enabled
+        # dispatch_subagent 由 AgentEngine 本地注入而非 MCP 提供，但同样是
+        # 合法的白名单条目（技能据此显式开启子代理能力）。
+        tool_names.add(SUBAGENT_TOOL_NAME)
         manager = SkillManager(Path(__file__).parents[1] / "skills")
         for skill_name in ("chatbot", "coder", "data_analyst"):
             skill = manager.get_skill(skill_name)

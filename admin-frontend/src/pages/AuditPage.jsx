@@ -13,6 +13,7 @@ const actionLabels = {
   'workspace.created': '创建工作区',
   'workspace.updated': '更新工作区',
   'workspace.owner_transferred': '转移工作区所有权',
+  'workspace.permission_mode_updated': '调整工作区权限档位',
   'member.added': '添加工作区成员',
   'member.role_updated': '更新成员角色',
   'member.removed': '移除工作区成员',
@@ -22,6 +23,7 @@ const actionLabels = {
   'task.updated': '更新任务',
   'work_plan.saved': '保存工作计划',
   'work_plan.approved': '批准工作计划',
+  'work_plan.auto_approved': '权限档位自动批准计划',
   'work_plan.step_updated': '更新计划步骤',
   'conversation.created': '创建对话',
   'conversation.updated': '更新对话',
@@ -122,6 +124,9 @@ const metadataLabels = {
   week_start_date: '周起始日',
   week_end_date: '周结束日',
   reason: '原因',
+  permission_mode: '权限档位',
+  previous_mode: '调整前档位',
+  auto_completed_step: '步骤自动完成',
 }
 
 const roleLabels = { owner: '所有者', admin: '管理员', member: '成员', viewer: '只读成员', readonly: '只读成员' }
@@ -139,6 +144,7 @@ const statusLabels = {
   timed_out: '已超时',
 }
 const sourceLabels = { self_service_registration: '自主注册' }
+const permissionModeLabels = { default: '默认权限', auto_approve: '自动审批', full_access: '完全访问' }
 
 function actionColor(action) {
   if (action?.endsWith('.failed')) return 'error'
@@ -167,6 +173,7 @@ function metadataValue(key, value) {
   if (key === 'role') return roleLabels[value] || String(value)
   if (key === 'status') return statusLabels[value] || String(value)
   if (key === 'source') return sourceLabels[value] || String(value)
+  if (key === 'permission_mode' || key === 'previous_mode') return permissionModeLabels[value] || String(value)
   if (key === 'size_bytes') return formatSize(Number(value))
   if (typeof value === 'boolean') return value ? '是' : '否'
   if (typeof value === 'object') return JSON.stringify(value)
