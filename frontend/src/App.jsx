@@ -607,7 +607,12 @@ function WorkspaceChangesPanel() {
       <Button size="small" type="primary" loading={diffLoading} disabled={!path || fromVersion === null || fromVersion === toVersion} onClick={compare}>比对</Button>
       <Button size="small" icon={<ReloadOutlined />} onClick={loadFiles} loading={filesLoading}>刷新文件</Button>
     </Flex>
-    {versionsLoading ? <Spin /> : <DiffView diff={diff} />}
+    {versionsLoading ? <Spin /> : (path && !versions.length) ? (
+      // 只给一次性 toast 不够：控件会停在禁用态而无任何解释，
+      // 使用者无法区分“没版本”与“功能坏了”。
+      <Alert type="warning" showIcon message="该文件还没有历史版本"
+        description="版本快照只在文件被覆盖前生成。这个文件新建后还没被改写过，所以没有可对比的历史版本；让 AI 再改一次它，就会出现版本并可比对。" />
+    ) : <DiffView diff={diff} />}
   </Space>
 }
 
@@ -1098,7 +1103,10 @@ function WorkModePage({ tasks, members, models, skills, mcpServers, workspaceRol
       const data = await apiFetch(`/api/v1/tasks/${requestedTaskId}/plan`, { method: 'PUT', body: JSON.stringify(values) })
       if (currentTaskIdRef.current !== requestedTaskId) return
       setPlan(data.plan)
-      message.success('工作计划已保存为草稿')
+      // 自动审批档位下保存即批准，写死的“已保存为草稿”会与实际状态矛盾。
+      message.success(data.plan?.status === 'approved'
+        ? '工作计划已保存，并按当前权限档位自动批准'
+        : '工作计划已保存为草稿')
       onRefresh()
     } catch (error) { message.error(readableError(error)) }
   }
@@ -1227,7 +1235,7 @@ function WorkspaceUsageCard() {
   )
 }
 
-function WorkspaceSettingsPage({ workspace, members, workspaceRole, onRefresh }) {
+function WorkspaceSettingsPage({ workspace, members, workspaceRole, onRefresh, onWorkspaceUpdated }) {
   const { message, modal } = AntApp.useApp()
   const isOwner = workspaceRole === 'owner'
   const isManager = ['owner', 'admin'].includes(workspaceRole)
@@ -1338,7 +1346,10 @@ function WorkspaceSettingsPage({ workspace, members, workspaceRole, onRefresh })
     const apply = async () => {
       setSavingMode(true)
       try {
-        await apiFetch(`/api/v1/workspaces/${workspace.id}/permission-mode`, { method: 'PUT', body: JSON.stringify({ permission_mode: mode }) })
+        const data = await apiFetch(`/api/v1/workspaces/${workspace.id}/permission-mode`, { method: 'PUT', body: JSON.stringify({ permission_mode: mode }) })
+        // 直接用响应里的权威值更新，而不是等 onRefresh 往返；
+        // 否则 toast 已提示成功而选择器还停在旧档位，看起来像没生效。
+        onWorkspaceUpdated?.(data.workspace)
         message.success(`权限档位已切换为${permissionModeLabels[mode]}`)
         onRefresh()
       } catch (error) { message.error(readableError(error)) } finally { setSavingMode(false) }
@@ -1511,7 +1522,7 @@ function WorkspaceApp({ session, onLogout }) {
     } else if (quiet) setRefreshing(true)
     setWorkspaceError('')
     try {
-      const [memberData, projectData, taskData, conversationData, modelData, skillData, mcpData] = await Promise.all([
+      const [memberData, projectData, taskData, conversationData, modelData, skillData, mcpData, workspaceListData] = await Promise.all([
         apiFetch(`/api/v1/workspaces/${requestedWorkspaceId}/members`, { workspaceId: requestedWorkspaceId }),
         apiFetch('/api/v1/projects', { workspaceId: requestedWorkspaceId }),
         apiFetch('/api/v1/tasks', { workspaceId: requestedWorkspaceId }),
@@ -1521,8 +1532,12 @@ function WorkspaceApp({ session, onLogout }) {
         apiFetch(`/api/v1/mcp/servers${canProbeMcp ? '?probe=true' : ''}`, { workspaceId: requestedWorkspaceId })
           .catch(() => canProbeMcp ? apiFetch('/api/v1/mcp/servers', { workspaceId: requestedWorkspaceId }) : { servers: [] })
           .catch(() => ({ servers: [] })),
+        // 工作区自身的字段（名称、权限档位）以前只在登录时取一次，
+        // 改完不重新拉取会让界面一直停在旧值。失败不拖垮其余数据。
+        apiFetch('/api/v1/workspaces', { workspaceId: requestedWorkspaceId }).catch(() => null),
       ])
       if (requestId !== workspaceRequestIdRef.current || currentWorkspaceIdRef.current !== requestedWorkspaceId) return false
+      if (workspaceListData?.workspaces) setWorkspaces(workspaceListData.workspaces)
       setMembers(memberData.members || [])
       setProjects(projectData.projects || [])
       setTasks(taskData.tasks || [])
@@ -1633,6 +1648,12 @@ function WorkspaceApp({ session, onLogout }) {
     setActiveWorkspaceId(nextWorkspaceId)
   }
   const refreshWorkspace = () => loadWorkspace({ quiet: true })
+  // 工作区自身字段（名称、权限档位）的即时更新入口：接口响应就是
+  // 权威值，直接合并比等下一次全量刷新更及时。
+  const patchWorkspace = useCallback((updated) => {
+    if (!updated?.id) return
+    setWorkspaces((current) => current.map((item) => item.id === updated.id ? { ...item, ...updated } : item))
+  }, [])
   const searchTypeLabels = { task: '任务', project: '项目', conversation: '对话', message: '消息', attachment: '附件', knowledge_base: '知识库' }
   const searchOptions = useMemo(() => searchResults.map((item) => ({
     value: `${item.type}:${item.id}`,
@@ -1677,7 +1698,7 @@ function WorkspaceApp({ session, onLogout }) {
   else if (nav === 'board') content = <BoardPage projects={projects} tasks={tasks} members={members} onRefresh={refreshWorkspace} openTask={(task) => setTaskDrawer(task)} workspaceRole={workspace?.role} />
   else if (nav === 'work') content = <WorkModePage tasks={tasks} members={members} models={models} skills={skills} mcpServers={mcpServers} workspaceRole={workspace?.role} profile={profile} onRefresh={refreshWorkspace} onOpenBoard={() => setNav('board')} />
   else if (nav === 'team') content = <TeamPage workspace={workspace} members={members} workspaceRole={workspace?.role} onRefresh={refreshWorkspace} />
-  else if (nav === 'settings') content = <WorkspaceSettingsPage workspace={workspace} members={members} workspaceRole={workspace?.role} onRefresh={refreshWorkspace} />
+  else if (nav === 'settings') content = <WorkspaceSettingsPage workspace={workspace} members={members} workspaceRole={workspace?.role} onRefresh={refreshWorkspace} onWorkspaceUpdated={patchWorkspace} />
 
   const workspaceContent = loading ? (
     <div className="workspace-loading"><Space direction="vertical" align="center"><Spin size="large" /><Text type="secondary">正在加载工作区</Text></Space></div>

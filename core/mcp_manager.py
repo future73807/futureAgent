@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import hmac
 import ipaddress
+import json
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import AsyncGenerator
 from urllib.parse import urlparse, urlsplit, urlunsplit
@@ -210,12 +211,36 @@ class MCPManager:
     async def call_tool(
         self, session: ClientSession, tool_name: str, arguments: dict
     ):
-        """调用 MCP Server 上的工具"""
+        """调用 MCP Server 上的工具，完整还原它的返回值。
+
+        FastMCP 把列表返回值逐元素序列化为多个 TextContent 块，只取
+        ``content[0]`` 会静默丢掉除第一项之外的全部数据（例如 list_files
+        只看到一个文件）。优先用 ``structuredContent``，它保留了原始结构；
+        没有时再按块还原。
+        """
         response = await session.call_tool(tool_name, arguments=arguments)
+        structured = getattr(response, "structuredContent", None)
+        if isinstance(structured, dict) and "result" in structured:
+            return structured["result"]
         if not response.content:
             return ""
-        first = response.content[0]
-        return getattr(first, "text", str(first))
+        texts = [
+            text
+            for text in (getattr(block, "text", None) for block in response.content)
+            if text is not None
+        ]
+        if not texts:
+            return str(response.content[0])
+        if len(texts) == 1:
+            return texts[0]
+        parsed: list = []
+        for text in texts:
+            try:
+                parsed.append(json.loads(text))
+            except ValueError:
+                # 不是 JSON 就按纯文本拼接，不伪造结构。
+                return "".join(texts)
+        return parsed
 
     async def list_servers(self, probe: bool = False) -> list[dict]:
         """列出已配置服务；可选地连接探测状态和工具。"""

@@ -55,6 +55,7 @@ USAGE_MESSAGE_LIMIT = 512
 # 只有 goal/loop 会多挂一个监督节点。
 AGENT_MODES = ("chat", "plan", "agent", "goal", "loop")
 SUPERVISED_MODES = frozenset({"goal", "loop"})
+SUPERVISOR_NODE_NAME = "supervisor"
 # plan 模式的产物是计划而不是改动，因此只给只读工具。
 PLAN_MODE_TOOL_NAMES = frozenset(
     {
@@ -176,15 +177,15 @@ class AgentEngine:
             graph_builder.add_node("tools", ToolNode(tools))
 
         if supervisor_node is not None:
-            graph_builder.add_node("supervisor", supervisor_node)
-            destinations = ["tools", "supervisor"] if tools else ["supervisor"]
+            graph_builder.add_node(SUPERVISOR_NODE_NAME, supervisor_node)
+            destinations = ["tools", SUPERVISOR_NODE_NAME] if tools else [SUPERVISOR_NODE_NAME]
             graph_builder.add_conditional_edges(
                 name, self._agent_router(supervised=True), destinations
             )
             if tools:
                 graph_builder.add_edge("tools", name)
             graph_builder.add_conditional_edges(
-                "supervisor", self._supervisor_router(name), [name, END]
+                SUPERVISOR_NODE_NAME, self._supervisor_router(name), [name, END]
             )
         elif tools:
             graph_builder.add_conditional_edges(name, tools_condition)
@@ -640,13 +641,19 @@ class AgentEngine:
                 "recursion_limit": recursion_limit,
             }
 
-            async for message, _metadata in graph.astream(
+            async for message, metadata in graph.astream(
                 initial_state,
                 graph_config,
                 stream_mode="messages",
             ):
                 if isinstance(message, AIMessageChunk):
+                    # 监督判定同样消耗 token，无论是否展示都必须计量。
                     self._record_usage(config, message)
+                    # 但监督节点是内部控制流：它输出的判定 JSON 不是给
+                    # 用户看的回复，stream_mode=messages 会把它一并流出来，
+                    # 必须按节点名过滤掉，否则原始 JSON 会泄到对话里。
+                    if (metadata or {}).get("langgraph_node") == SUPERVISOR_NODE_NAME:
+                        continue
                     text = self._content_to_text(message.content)
                     if text:
                         yield text

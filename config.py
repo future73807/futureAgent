@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     longcat_api_key: str = ""
     longcat_api_base: str = "https://api.longcat.chat/openai"
+    # 额外的 OpenAI 兼容模型 id（逗号分隔），经 OPENAI_BASE_URL / OPENAI_API_KEY
+    # 路由。用于接入中转站或自建网关等未内置前缀规则的模型，
+    # 避免每接一个供应商就要改 ModelHub 代码。
+    extra_model_ids_csv: str = ""
 
     # ===== LiteLLM Proxy =====
     litellm_proxy_url: str = ""
@@ -148,6 +152,15 @@ class Settings(BaseSettings):
             if self.max_permission_mode in PERMISSION_MODES
             else "default"
         )
+
+    @computed_field
+    @property
+    def extra_model_ids(self) -> list[str]:
+        return [
+            value.strip()
+            for value in self.extra_model_ids_csv.split(",")
+            if value.strip()
+        ]
 
     @computed_field
     @property

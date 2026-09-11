@@ -16,8 +16,10 @@ from core import model_hub
 from core.model_hub import ModelHub
 from core.skill_manager import Skill, SkillManager
 from config import Settings, settings
+from langchain_core.language_models.chat_models import SimpleChatModel
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessageChunk, ToolMessage
+from langchain_core.outputs import ChatGenerationChunk
 from langchain_core.tools import StructuredTool
 from unittest.mock import patch
 
@@ -158,6 +160,80 @@ class AgentHelpersTests(unittest.TestCase):
 
 
 class ModelReadinessTests(unittest.TestCase):
+    def test_extra_model_ids_are_routed_as_openai_compatible(self):
+        with (
+            patch.object(settings, "extra_model_ids_csv", "glm-5.3-flash, other-model"),
+            patch.object(settings, "openai_base_url", "https://relay.example.test/v1"),
+            patch.object(settings, "openai_api_key", "sk-real-relay-key"),
+        ):
+            self.assertEqual(settings.extra_model_ids, ["glm-5.3-flash", "other-model"])
+            self.assertIn("glm-5.3-flash", ModelHub.list_supported_models())
+            self.assertTrue(ModelHub.is_direct_provider_configured("glm-5.3-flash"))
+            # 无供应商前缀的模型必须显式加 openai/，否则 LiteLLM 认不出路由。
+            self.assertEqual(
+                ModelHub._litellm_model_name("glm-5.3-flash"), "openai/glm-5.3-flash"
+            )
+            self.assertEqual(
+                ModelHub._provider_kwargs("glm-5.3-flash"),
+                {
+                    "api_base": "https://relay.example.test/v1",
+                    "api_key": "sk-real-relay-key",
+                },
+            )
+
+    def test_extra_model_without_base_url_is_not_advertised_as_configured(self):
+        # 缺地址时如果仍声称已配置，请求会默认发往 api.openai.com 并带上密钥。
+        with (
+            patch.object(settings, "extra_model_ids_csv", "glm-5.3-flash"),
+            patch.object(settings, "openai_api_key", "sk-real-relay-key"),
+            patch.object(settings, "openai_base_url", ""),
+        ):
+            self.assertFalse(ModelHub.is_direct_provider_configured("glm-5.3-flash"))
+
+    def test_chat_model_survives_missing_chatlitellm_on_openai_compatible_routes(self):
+        """ChatLiteLLM 已从 langchain-community 0.4 移除，不得因此全面报错。
+
+        这条链路以前没有任何测试覆盖（测试一律用 FakeModelHub），
+        导致 ImportError 把整个 AI 对话能力静默打穿。
+        """
+        from langchain_openai import ChatOpenAI
+
+        with (
+            patch.object(settings, "litellm_proxy_url", ""),
+            patch.object(settings, "extra_model_ids_csv", "glm-5.3-flash"),
+            patch.object(settings, "openai_api_key", "sk-real-relay-key"),
+            patch.object(settings, "openai_base_url", "https://relay.example.test/v1"),
+            patch.object(ModelHub, "_litellm_chat_model_class", return_value=None),
+        ):
+            llm = ModelHub().get_chat_model(model_id="glm-5.3-flash")
+        self.assertIsInstance(llm, ChatOpenAI)
+        self.assertEqual(llm.model_name, "glm-5.3-flash")
+        self.assertEqual(str(llm.openai_api_base), "https://relay.example.test/v1")
+
+    def test_chat_model_refuses_to_guess_an_endpoint_for_other_providers(self):
+        """没有 ChatLiteLLM 时，非 OpenAI 协议模型必须显式失败。
+
+        否则会把 Anthropic/Gemini 的请求默认发往 api.openai.com，
+        既失败得莫名其妙，又白送一次密钥泄露。
+        """
+        with (
+            patch.object(settings, "litellm_proxy_url", ""),
+            patch.object(settings, "openai_api_key", "sk-real-relay-key"),
+            patch.object(settings, "openai_base_url", "https://relay.example.test/v1"),
+            patch.object(ModelHub, "_litellm_chat_model_class", return_value=None),
+        ):
+            with self.assertRaisesRegex(ValueError, "OpenAI 兼容"):
+                ModelHub().get_chat_model(model_id="claude-3-5-sonnet-20241022")
+            with self.assertRaisesRegex(ValueError, "OpenAI 兼容"):
+                ModelHub().get_chat_model(model_id="gemini/gemini-1.5-pro")
+
+    def test_ollama_route_uses_the_openai_compatible_subpath(self):
+        with patch.object(settings, "ollama_base_url", "http://localhost:11434"):
+            self.assertEqual(
+                ModelHub._openai_compatible_credentials("ollama/qwen2.5"),
+                ("http://localhost:11434/v1", "ollama"),
+            )
+
     def test_placeholder_provider_key_is_not_a_ready_direct_route(self):
         with (
             patch.object(settings, "litellm_proxy_url", ""),
@@ -423,6 +499,53 @@ class ToolAvailabilityTests(unittest.TestCase):
         self.assertEqual([tool.name for tool in filtered], ["read_file"])
 
 
+class _RoleAwareFakeModel(SimpleChatModel):
+    """根据系统提示词区分“代理回复”与“监督判定”。
+
+    真实的监督节点与代理节点共用同一个模型，但两者输出用途完全不同：
+    前者是内部控制流，后者才是给用户看的回复。
+    """
+
+    judge_reply: str = '{"met": true, "reason": "已满足达成标准"}'
+    agent_reply: str = "这是给用户看的口号"
+
+    @property
+    def _llm_type(self) -> str:
+        return "role-aware-fake"
+
+    def _call(self, messages, stop=None, run_manager=None, **kwargs):
+        return self._reply_for(messages)
+
+    def _reply_for(self, messages) -> str:
+        system = "".join(
+            str(getattr(item, "content", ""))
+            for item in messages
+            if getattr(item, "type", "") == "system"
+        )
+        return self.judge_reply if "执行质量监督者" in system else self.agent_reply
+
+    def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+        """必须真流式：AgentEngine 只消费 AIMessageChunk。
+
+        非流式模型会产出 AIMessage，它不是 AIMessageChunk 的子类，
+        会被引擎直接忽略——用错的替身会把测试变成假阳性。
+        两次调用给不同 id，否则用量去重会把它们归为同一次。
+        """
+        text = self._reply_for(messages)
+        role = "judge" if text == self.judge_reply else "agent"
+        yield ChatGenerationChunk(
+            message=AIMessageChunk(
+                content=text,
+                id=f"{role}-call",
+                usage_metadata={
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "total_tokens": 15,
+                },
+            )
+        )
+
+
 class AgentModeTests(unittest.TestCase):
     """五档运行模式的工具面、提示词与监督循环。"""
 
@@ -646,6 +769,55 @@ class AgentModeTests(unittest.TestCase):
 
             asyncio.run(drive())
         return captured
+
+    def test_supervisor_judgement_never_leaks_into_the_user_visible_stream(self):
+        """监督节点的判定 JSON 是内部控制流，不得当成助手回复流给用户。
+
+        ``stream_mode=messages`` 会把图内所有 LLM 调用都流出来，不按节点
+        过滤就会把原始 JSON 直接显示在对话里。
+        """
+
+        class JudgeModelHub:
+            def get_chat_model(self, **_kwargs):
+                return _RoleAwareFakeModel()
+
+        with tempfile.TemporaryDirectory() as directory:
+            engine = AgentEngine(
+                model_hub=JudgeModelHub(),
+                mcp_manager=MCPManager({}),
+                skill_manager=SkillManager(directory),
+                auth_manager=AuthManager(),
+            )
+            config = {
+                "model_id": "fake-model",
+                "skill_name": "default",
+                "mcp_servers": [],
+                "mode": "goal",
+                "goal": "产出一句口号",
+                "success_criteria": "包含关键字",
+                "max_iterations": 2,
+                "tool_trace": [],
+                "usage_by_message": {},
+                "iterations": [],
+            }
+
+            async def drive():
+                chunks = []
+                async for chunk in engine.run("developer", "写一句口号", config):
+                    chunks.append(chunk)
+                return "".join(chunks)
+
+            text = asyncio.run(drive())
+
+        self.assertIn("这是给用户看的口号", text)
+        # 判定原文与它的 JSON 字段都不得出现在用户可见输出里。
+        self.assertNotIn("met", text)
+        self.assertNotIn("{", text)
+        self.assertNotIn("已满足达成标准", text)
+        # 但判定本身必须被记录到侧信道，且它的 token 仍要计量。
+        self.assertEqual(config["iterations"][0]["verdict"], "met")
+        self.assertEqual(config["iterations"][0]["reason"], "已满足达成标准")
+        self.assertEqual(AgentEngine.summarize_usage(config)["llm_calls"], 2)
 
     def test_unknown_mode_is_rejected_rather_than_silently_downgraded(self):
         class FakeModelHub:

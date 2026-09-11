@@ -862,6 +862,58 @@ class ProductApiTests(unittest.TestCase):
         workspace.permission_mode = "legacy-unknown"
         self.assertEqual(_effective_permission_mode(workspace), "default")
 
+    def test_multiple_tasks_can_share_a_project_and_status_column(self):
+        """同一看板列必须能放多个任务。
+
+        单列聚合在 SQLModel 的 exec() 下返回标量而不是 Row；按 Row 取
+        下标会让“列里已有任务”时的创建抛 TypeError→500，而空列时
+        max 为 NULL 反而正常——只建一个任务的测试永远发现不了。
+        """
+        headers = self.auth_headers(self.owner_token, self.owner_workspace)
+        project = self.client.post(
+            "/api/v1/projects",
+            headers=headers,
+            json={"name": "Multi task column", "description": "d", "color": "#5B5BD6"},
+        )
+        self.assertEqual(project.status_code, 201, project.text)
+        project_id = project.json()["project"]["id"]
+
+        sort_orders = []
+        for index in range(3):
+            created = self.client.post(
+                "/api/v1/tasks",
+                headers=headers,
+                json={
+                    "project_id": project_id,
+                    "title": f"同列任务 {index}",
+                    "description": "验证同状态列可重复创建",
+                    "priority": "medium",
+                    "status": "todo",
+                    "labels": [],
+                },
+            )
+            self.assertEqual(created.status_code, 201, created.text)
+            sort_orders.append(created.json()["task"]["sort_order"])
+
+        # 新任务排到列尾， sort_order 递增且不重复。
+        self.assertEqual(sort_orders, sorted(set(sort_orders)))
+        self.assertEqual(sort_orders, [10, 20, 30])
+
+        listed = self.client.get(
+            "/api/v1/tasks", headers=headers, params={"project_id": project_id}
+        )
+        self.assertEqual(listed.status_code, 200, listed.text)
+        self.assertEqual(len(listed.json()["tasks"]), 3)
+
+        # 不同状态列各自从头计数，互不干扰。
+        other_column = self.client.post(
+            "/api/v1/tasks",
+            headers=headers,
+            json={"project_id": project_id, "title": "进行中列首个", "status": "in_progress"},
+        )
+        self.assertEqual(other_column.status_code, 201, other_column.text)
+        self.assertEqual(other_column.json()["task"]["sort_order"], 10)
+
     def test_supervised_modes_require_their_termination_criterion(self):
         owner_headers = self.auth_headers(self.owner_token, self.owner_workspace)
         # goal 靠目标判定达成，缺了它监督者只能一直迭代到烧完预算。
@@ -929,11 +981,12 @@ class ProductApiTests(unittest.TestCase):
                 return None
 
             async def run(self, **kwargs):
-                # 侧信道写入一轮判定，验证路由会落库并回传。
+                yield "goal mode output"
+                # 真实的监督节点在最后一个 token 之后才写判定。顺序写反了
+                # 就会错过“循环结束后再冲一次”的路径，末轮事件丢失也不会被发现。
                 kwargs["config"]["iterations"].append(
                     {"iteration": 1, "verdict": "met", "reason": "已达成"}
                 )
-                yield "goal mode output"
 
         with (
             patch("api.routes.get_agent_engine", return_value=FakeEngine()),

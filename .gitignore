@@ -33,6 +33,11 @@ futureagent.db
 futureagent.db-journal
 *.db-shm
 *.db-wal
+# 本地联调与单测临时生成的数据库（DATABASE_URL 指向它们时会产生）
+futureagent_test.db
+futureagent_test.db-journal
+futureagent_unittest.db
+futureagent_unittest.db-journal
 .mimosa/
 
 # Runtime uploads can contain user-provided files. Keep only the empty

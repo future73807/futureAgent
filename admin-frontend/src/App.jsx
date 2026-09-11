@@ -95,7 +95,7 @@ function AdminShell({ profile, workspaces, onLogout }) {
     {screens.lg ? <Sider collapsible collapsed={collapsed} collapsedWidth={72} onCollapse={setCollapsed} width={248} theme="dark">{navigation(collapsed)}</Sider> : <Drawer placement="left" width="min(86vw, 288px)" open={mobileNav} onClose={() => setMobileNav(false)} closable={false} rootClassName="admin-mobile-drawer" styles={{ body: { padding: 0 } }}>{navigation(false)}</Drawer>}
     <Layout>
       <Header className="admin-header">
-        <div className="admin-header-title">{!screens.lg && <Button type="text" icon={<MenuOutlined />} onClick={() => setMobileNav(true)} aria-label="打开管理导航" />}<Text strong>{pageLabels[selectedKey]}</Text><Badge status={online ? 'success' : 'error'} text={online ? 'API 正常' : 'API 异常'} /></div>
+        <div className="admin-header-title">{!screens.lg && <Button type="text" icon={<MenuOutlined />} onClick={() => setMobileNav(true)} aria-label="打开管理导航" />}<Text strong>{buildPageLabels()[selectedKey]}</Text><Badge status={online ? 'success' : 'error'} text={online ? 'API 正常' : 'API 异常'} /></div>
         <Space className="admin-header-actions" size={10}>
           <Tooltip title={getThemeMode() === 'dark' ? '切换到浅色' : '切换到深色'}>
             <Button type="text" icon={<BulbOutlined />} onClick={() => toggleThemeMode()} aria-label="切换深浅色主题" />

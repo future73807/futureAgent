@@ -133,25 +133,72 @@ class ModelHub:
             )
         provider_kwargs = self._provider_kwargs(model)
         provider_kwargs.update(kwargs)
-        if LITELLM_AVAILABLE:
-            from langchain_community.chat_models import ChatLiteLLM
-            return ChatLiteLLM(
+        chat_litellm = self._litellm_chat_model_class()
+        if LITELLM_AVAILABLE and chat_litellm is not None:
+            return chat_litellm(
                 model=self._litellm_model_name(model),
                 temperature=temperature,
                 streaming=streaming,
                 **provider_kwargs,
             )
-        else:
-            # 后备方案: 使用 langchain-openai
-            from langchain_openai import ChatOpenAI
-            return ChatOpenAI(
-                model=model,
-                temperature=temperature,
-                streaming=streaming,
-                api_key=provider_kwargs.get("api_key", settings.openai_api_key),
-                base_url=provider_kwargs.pop("api_base", settings.openai_base_url),
-                **provider_kwargs,
+        # ChatLiteLLM 已从新版 langchain-community 移除（该包已进入退役）。
+        # 此时只能走 OpenAI 兼容端点；对无法用 OpenAI 协议访问的供应商
+        # 必须显式报错，而不是把请求默认发往 api.openai.com 并附上错误密钥。
+        credentials = self._openai_compatible_credentials(model)
+        if credentials is None:
+            raise ValueError(
+                f"当前依赖环境不支持通过 LiteLLM 路由模型“{model}”。"
+                "请安装 langchain-community<0.4（提供 ChatLiteLLM），"
+                "或改用 OpenAI 兼容端点并通过 EXTRA_MODEL_IDS_CSV 接入该模型。"
             )
+        from langchain_openai import ChatOpenAI
+
+        base_url, api_key = credentials
+        provider_kwargs.pop("api_base", None)
+        provider_kwargs.pop("api_key", None)
+        return ChatOpenAI(
+            model=model,
+            temperature=temperature,
+            streaming=streaming,
+            api_key=api_key,
+            base_url=base_url,
+            **provider_kwargs,
+        )
+
+    @staticmethod
+    def _litellm_chat_model_class():
+        """返回 ChatLiteLLM；已从 langchain-community 移除时返回 None。
+
+        不在模块导入期做这件事：否则一个可选依赖的版本变化会让整个
+        模块无法导入，而不是只在真正需要该路由时失败。
+        """
+        try:
+            from langchain_community.chat_models import ChatLiteLLM
+        except ImportError:
+            return None
+        return ChatLiteLLM
+
+    @classmethod
+    def _openai_compatible_credentials(cls, model_id: str) -> tuple[str, str] | None:
+        """给出可用 OpenAI 协议访问的 (base_url, api_key)；不适用时返回 None。"""
+        model_lower = model_id.lower()
+        if model_lower.startswith("ollama/"):
+            base = settings.ollama_base_url.strip().rstrip("/")
+            if not base:
+                return None
+            # Ollama 的 OpenAI 兼容层在 /v1；本地服务不校验密钥，
+            # 但客户端仍必须传非空值。
+            base = base if base.endswith("/v1") else f"{base}/v1"
+            return base, "ollama"
+        if model_lower.startswith("longcat") and cls._is_usable_credential(
+            settings.longcat_api_key
+        ):
+            return settings.longcat_api_base, settings.longcat_api_key
+        if cls._is_extra_model(model_id) or model_lower.startswith(("gpt-", "openai/")):
+            if not cls._is_usable_credential(settings.openai_api_key):
+                return None
+            return settings.openai_base_url, settings.openai_api_key
+        return None
 
     @staticmethod
     def _proxy_base_url() -> str:
@@ -159,7 +206,17 @@ class ModelHub:
         return base_url if base_url.endswith("/v1") else f"{base_url}/v1"
 
     @staticmethod
-    def _provider_kwargs(model_id: str) -> dict:
+    def _is_extra_model(model_id: str) -> bool:
+        """是否属于配置式接入的 OpenAI 兼容模型。
+
+        这类模型没有可识别的供应商前缀，因此必须显式给 LiteLLM
+        加上 ``openai/``，否则 LiteLLM 会在请求到达配置的 api_base 之前
+        就因认不出供应商而直接失败。
+        """
+        return model_id in settings.extra_model_ids
+
+    @classmethod
+    def _provider_kwargs(cls, model_id: str) -> dict:
         model_lower = model_id.lower()
         if model_lower.startswith("ollama/"):
             return {"api_base": settings.ollama_base_url}
@@ -167,17 +224,22 @@ class ModelHub:
             return {"api_base": settings.openai_base_url}
         if model_lower.startswith("longcat") and settings.longcat_api_key:
             return {"api_base": settings.longcat_api_base, "api_key": settings.longcat_api_key}
+        if cls._is_extra_model(model_id):
+            return {
+                "api_base": settings.openai_base_url,
+                "api_key": settings.openai_api_key,
+            }
         return {}
 
-    @staticmethod
-    def _litellm_model_name(model_id: str) -> str:
+    @classmethod
+    def _litellm_model_name(cls, model_id: str) -> str:
         """Route OpenAI-compatible providers through LiteLLM explicitly.
 
         LongCat exposes an OpenAI-compatible API, but its public model name
         does not identify a provider to LiteLLM.  Without the prefix LiteLLM
         rejects the request before it reaches the configured API base.
         """
-        if model_id.lower().startswith("longcat"):
+        if model_id.lower().startswith("longcat") or cls._is_extra_model(model_id):
             return f"openai/{model_id}"
         return model_id
 
@@ -219,6 +281,12 @@ class ModelHub:
             return bool(settings.ollama_base_url.strip())
         if model_lower.startswith("longcat"):
             return cls._is_usable_credential(settings.longcat_api_key)
+        if cls._is_extra_model(model_id):
+            # 配置式模型走 OpenAI 兼容端点：密钥与地址缺一不可，
+            # 否则会把请求默认发到 api.openai.com 并泄露密钥。
+            return cls._is_usable_credential(
+                settings.openai_api_key
+            ) and bool(settings.openai_base_url.strip())
         return False
 
     @classmethod
@@ -318,8 +386,8 @@ class ModelHub:
 
     @staticmethod
     def list_supported_models() -> list[str]:
-        """列出常用支持的模型"""
-        return [
+        """列出内置模型与配置式接入的额外模型。"""
+        builtin = [
             "gpt-4o",
             "gpt-4o-mini",
             "gpt-3.5-turbo",
@@ -331,3 +399,5 @@ class ModelHub:
             "gemini/gemini-1.5-flash",
             "LongCat-2.0",
         ]
+        # 去重但保留顺序：配置里重复列出内置模型时不应出现两次。
+        return builtin + [m for m in settings.extra_model_ids if m not in builtin]

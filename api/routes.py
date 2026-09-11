@@ -330,6 +330,10 @@ def _provider_name(model_id: str) -> str:
         return "Google"
     if model_id.lower().startswith("longcat"):
         return "LongCat"
+    if model_id in settings.extra_model_ids:
+        # 配置式接入的模型没有可识别前缀；拿模型 id 充当供应商名
+        # 会让管理端“供应商”列看上去像数据错位。
+        return "OpenAI 兼容"
     return model_id.split("/", 1)[0]
 
 
@@ -1731,8 +1735,13 @@ def create_task(
             Task.project_id == request.project_id,
             Task.status == request.status,
         )
-    ).one()
-    next_sort_order = (column_max[0] if column_max and column_max[0] is not None else 0) + 10
+    ).first()
+    # SQLModel 的 exec() 对单列聚合返回标量而不是 Row。按 Row 取下标会在
+    # 该列已有任务时抛 TypeError（空列时 max 为 NULL 反而正常），结果同一
+    # 项目同一状态列的第二个任务必然 500，看板每列永远只能有一个任务。
+    # 这里两种返回形状都兼容，不依赖具体 ORM 版本的拆包行为。
+    raw_max = column_max[0] if isinstance(column_max, (tuple, list)) else column_max
+    next_sort_order = (raw_max if raw_max is not None else 0) + 10
     task = Task(
         workspace_id=context.workspace.id,
         project_id=request.project_id,
@@ -2562,6 +2571,11 @@ async def agent_chat(
                 iteration_events, emitted_iterations = _iteration_events(config, emitted_iterations)
                 for event in iteration_events:
                     yield event
+            # 监督节点在最后一个 token 之后才做判定，循环结束后必须再冲一次，
+            # 否则末轮（往往正是“已达成”那一轮）永远发不到前端。
+            iteration_events, emitted_iterations = _iteration_events(config, emitted_iterations)
+            for event in iteration_events:
+                yield event
             assistant_message.content = "".join(collected)
             assistant_message.tool_trace_json = _serialize_tool_trace(config["tool_trace"])
             conversation.updated_at = now_utc()
@@ -3109,6 +3123,10 @@ async def execute_task_with_agent(
                     iteration_events, emitted_iterations = _iteration_events(config, emitted_iterations)
                     for event in iteration_events:
                         yield event
+            # 同上：末轮判定发生在最后一个 token 之后，需再冲一次。
+            iteration_events, emitted_iterations = _iteration_events(config, emitted_iterations)
+            for event in iteration_events:
+                yield event
             if _run_cancelled(session, run):
                 _save_agent_run_progress(session, run, collected, config["tool_trace"], config.get("iterations"))
                 _record_run_usage("cancelled")
@@ -3376,6 +3394,17 @@ async def execute_task_steps_in_parallel(
         }
         worker_started = now_utc()
 
+        async def emit_iterations() -> None:
+            """把新产生的轮次判定按步上报，带上 run 与步骤标识。"""
+            nonlocal emitted_iterations
+            events, emitted_iterations = _iteration_events(config, emitted_iterations)
+            for event in events:
+                detail = json.loads(event["data"])
+                detail.update({"run_id": run.id, "step_id": step.id})
+                await queue.put(
+                    ("step-iteration", json.dumps(detail, ensure_ascii=False, default=str))
+                )
+
         def _record_step_usage(status: str) -> None:
             """并行步骤各自入账，source_id 指向本步的 run。"""
             _persist_usage(
@@ -3401,12 +3430,9 @@ async def execute_task_steps_in_parallel(
                         break
                     collected.append(chunk)
                     await queue.put(("step-token", json.dumps({"run_id": run.id, "step_id": step.id, "chunk": chunk}, default=str)))
-                    # 监督模式的轮次判定按步分开上报，带上 run 与步骤标识。
-                    iteration_events, emitted_iterations = _iteration_events(config, emitted_iterations)
-                    for event in iteration_events:
-                        detail = json.loads(event["data"])
-                        detail.update({"run_id": run.id, "step_id": step.id})
-                        await queue.put(("step-iteration", json.dumps(detail, ensure_ascii=False, default=str)))
+                    await emit_iterations()
+            # 末轮判定发生在最后一个 token 之后，需再冲一次。
+            await emit_iterations()
             if _run_cancelled(session, run):
                 _save_agent_run_progress(session, run, collected, config["tool_trace"], config.get("iterations"))
                 _record_step_usage("cancelled")

@@ -170,7 +170,13 @@ export async function streamSSE(path, body, handlers = {}, retried = false) {
     const data = []
     block.split(/\r?\n/).forEach((line) => {
       if (line.startsWith('event:')) event = line.slice(6).trim()
-      if (line.startsWith('data:')) data.push(line.slice(5).trimStart())
+      if (line.startsWith('data:')) {
+        // SSE 规范只要求去掉冒号后的一个前导空格。用 trimStart 会把
+        // 以空格开头的 token 一并吃掉——英文分词极常见（" is"、" empty"），
+        // 结果流式正文会变成 Workspaceisempty 这样的连写。
+        const value = line.slice(5)
+        data.push(value.startsWith(' ') ? value.slice(1) : value)
+      }
     })
     handlers.onEvent?.(event, data.join('\n'))
   }
