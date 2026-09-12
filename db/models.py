@@ -154,6 +154,11 @@ class ChatMessage(SQLModel, table=True):
     role: str = Field(max_length=24)
     content: str = Field(default="", max_length=100_000)
     tool_trace_json: str = Field(default="[]", max_length=200_000)
+    # 对话即工作台：助手消息需要携带自己的执行上下文，才能在前端
+    # 就地渲染模式标记、真实用量与 goal/loop 轮次判定，而不是只留一段文本。
+    agent_mode: str = Field(default="agent", max_length=16)
+    usage_json: str | None = Field(default=None, max_length=4000)
+    iterations_json: str | None = Field(default=None, max_length=40_000)
     created_at: datetime = Field(default_factory=now_utc)
 
 

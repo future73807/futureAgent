@@ -41,7 +41,7 @@ export default function ModelsPage() {
     { title: '模型 ID', dataIndex: 'id', render: (value) => <span className="code-text">{value}</span> },
     { title: '提供商', dataIndex: 'provider', render: (value) => <Tag color="blue">{value}</Tag> },
     { title: '调用路由', key: 'status', width: 250, render: (_, model) => routeStatus(model) },
-    { title: '真实验证', key: 'probe', render: (_, model) => <Button size="small" loading={probing === model.id} disabled={!model.ready || Boolean(probing)} title={!model.ready ? '当前模型尚未配置调用路由' : '向当前路由发起一次真实请求'} onClick={() => probe(model)}>发起真实探测</Button> },
+    { title: '真实验证', key: 'probe', render: (_, model) => <Button size="small" loading={probing === model.id} disabled={!model.ready || Boolean(probing)} title={model.ready ? '向当前路由发起一次真实请求' : (model.readiness_error || '当前模型尚未就绪')} onClick={() => probe(model)}>发起真实探测</Button> },
   ]
 
   return (

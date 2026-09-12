@@ -7,11 +7,31 @@ export { default as BarChartOutlined } from '@ant-design/icons/es/icons/BarChart
 export { default as BellOutlined } from '@ant-design/icons/es/icons/BellOutlined'
 export { default as BulbOutlined } from '@ant-design/icons/es/icons/BulbOutlined'
 export { default as CheckCircleFilled } from '@ant-design/icons/es/icons/CheckCircleFilled'
+// 以下 Filled 图标是 @ant-design/x 的 Attachments/FileList 硬依赖（文件类型角标
+// 与失败态）。侧边栏合并后 Conversations 与 Attachments 被提前加载，这些图标
+// 必须同步暴露，否则构建会报 MISSING_EXPORT。升级 @ant-design/x 后需要重新核对：
+//   Get-ChildItem node_modules/@ant-design/x/es -Recurse -Filter *.js |
+//     Select-String "from '@ant-design/icons'"
+export { default as CloseCircleFilled } from '@ant-design/icons/es/icons/CloseCircleFilled'
+// 消息内联卡片：工具轨迹状态、计划卡动作与变更入口。
+export { default as CloseCircleOutlined } from '@ant-design/icons/es/icons/CloseCircleOutlined'
+export { default as CopyOutlined } from '@ant-design/icons/es/icons/CopyOutlined'
+export { default as DiffOutlined } from '@ant-design/icons/es/icons/DiffOutlined'
+export { default as SaveOutlined } from '@ant-design/icons/es/icons/SaveOutlined'
+export { default as FileExcelFilled } from '@ant-design/icons/es/icons/FileExcelFilled'
+export { default as FileImageFilled } from '@ant-design/icons/es/icons/FileImageFilled'
+export { default as FileMarkdownFilled } from '@ant-design/icons/es/icons/FileMarkdownFilled'
+export { default as FilePdfFilled } from '@ant-design/icons/es/icons/FilePdfFilled'
+export { default as FilePptFilled } from '@ant-design/icons/es/icons/FilePptFilled'
+export { default as FileTextFilled } from '@ant-design/icons/es/icons/FileTextFilled'
+export { default as FileWordFilled } from '@ant-design/icons/es/icons/FileWordFilled'
+export { default as FileZipFilled } from '@ant-design/icons/es/icons/FileZipFilled'
 export { default as CheckCircleOutlined } from '@ant-design/icons/es/icons/CheckCircleOutlined'
 export { default as ClearOutlined } from '@ant-design/icons/es/icons/ClearOutlined'
 export { default as ClockCircleOutlined } from '@ant-design/icons/es/icons/ClockCircleOutlined'
 export { default as CloseOutlined } from '@ant-design/icons/es/icons/CloseOutlined'
 export { default as DeleteOutlined } from '@ant-design/icons/es/icons/DeleteOutlined'
+export { default as DownOutlined } from '@ant-design/icons/es/icons/DownOutlined'
 export { default as DownloadOutlined } from '@ant-design/icons/es/icons/DownloadOutlined'
 export { default as EditOutlined } from '@ant-design/icons/es/icons/EditOutlined'
 export { default as EllipsisOutlined } from '@ant-design/icons/es/icons/EllipsisOutlined'
@@ -22,6 +42,9 @@ export { default as FileWordOutlined } from '@ant-design/icons/es/icons/FileWord
 export { default as FolderOutlined } from '@ant-design/icons/es/icons/FolderOutlined'
 export { default as GlobalOutlined } from '@ant-design/icons/es/icons/GlobalOutlined'
 export { default as FolderOpenOutlined } from '@ant-design/icons/es/icons/FolderOpenOutlined'
+// Cascader / Conversations 的分页与展开箭头依赖这两个图标。
+export { default as LeftOutlined } from '@ant-design/icons/es/icons/LeftOutlined'
+export { default as RightOutlined } from '@ant-design/icons/es/icons/RightOutlined'
 export { default as LogoutOutlined } from '@ant-design/icons/es/icons/LogoutOutlined'
 export { default as MenuOutlined } from '@ant-design/icons/es/icons/MenuOutlined'
 export { default as MessageOutlined } from '@ant-design/icons/es/icons/MessageOutlined'

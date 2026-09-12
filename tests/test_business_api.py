@@ -7,7 +7,7 @@ import unittest
 from contextlib import nullcontext
 from datetime import date
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 # 密码不在源码里保存字面量：每个测试进程随机生成，只要求单次运行内自洽。
@@ -184,11 +184,15 @@ class BusinessAgentApiTests(unittest.TestCase):
         self.assertEqual({item["assistant_type"] for item in assistants}, {"boss_private", "personal_private", "company_public"})
         boss = next(item for item in assistants if item["assistant_type"] == "boss_private")
 
-        chat = self.client.post(
-            f"/api/v1/business/assistants/{boss['id']}/chat",
-            headers=self.headers(self.owner_token, self.owner_workspace),
-            json={"message": "今天有哪些经营异常？"},
-        )
+        # 断言前提是测试环境没有可用的外部模型；本机 .env 可能为真实联调
+        # 配了凭据，必须显式隔离，验证的仍是同一件事：模型不可用时降级为
+        # 确定性摘要，智能体可用性不依赖外部供应商。
+        with patch("api.business_routes.generate_answer_sync", return_value=None):
+            chat = self.client.post(
+                f"/api/v1/business/assistants/{boss['id']}/chat",
+                headers=self.headers(self.owner_token, self.owner_workspace),
+                json={"message": "今天有哪些经营异常？"},
+            )
         self.assertEqual(chat.status_code, 200, chat.text)
         self.assertFalse(chat.json()["external_model_called"])
         self.assertEqual(chat.json()["engine"], "deterministic_authorized_data")
@@ -505,11 +509,12 @@ class BusinessAgentApiTests(unittest.TestCase):
         self.assertEqual(weekly.status_code, 200, weekly.text)
         self.assertEqual(weekly.json()["weekly_report"]["title"], "验收周报")
 
-        chat = self.client.post(
-            "/api/v1/report/chat",
-            headers=owner_headers,
-            json={"message": "汇总今天的生产与知识库信息"},
-        )
+        with patch("api.report_routes.generate_answer_sync", return_value=None):
+            chat = self.client.post(
+                "/api/v1/report/chat",
+                headers=owner_headers,
+                json={"message": "汇总今天的生产与知识库信息"},
+            )
         self.assertEqual(chat.status_code, 200, chat.text)
         self.assertFalse(chat.json()["external_model_called"])
         self.assertEqual(chat.json()["engine"], "deterministic_authorized_data")

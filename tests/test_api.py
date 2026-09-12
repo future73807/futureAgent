@@ -430,11 +430,18 @@ class ProductApiTests(unittest.TestCase):
         )
 
     def test_model_unavailability_is_reported_before_sse_starts(self):
-        response = self.client.post(
-            "/api/v1/chat/completions",
-            headers=self.auth_headers(self.owner_token, self.owner_workspace),
-            json={"query": "Verify the preflight", "model_id": "gpt-4o-mini"},
-        )
+        # 断言前提是 gpt-4o-mini 没有任何可用凭据；开发者本机 .env 可能为
+        # 真实联调填了 key，不隔离的话结果会随 .env 漂移。显式清空凭据后，
+        # 验证的仍是同一件事：没有可用路由时必须在 SSE 开流前拒绝。
+        with (
+            patch.object(settings, "openai_api_key", ""),
+            patch.object(settings, "litellm_proxy_url", ""),
+        ):
+            response = self.client.post(
+                "/api/v1/chat/completions",
+                headers=self.auth_headers(self.owner_token, self.owner_workspace),
+                json={"query": "Verify the preflight", "model_id": "gpt-4o-mini"},
+            )
         self.assertEqual(response.status_code, 503, response.text)
 
     def test_chat_provider_failure_is_sanitized_in_stream_history_and_logs(self):
@@ -1015,6 +1022,73 @@ class ProductApiTests(unittest.TestCase):
         self.assertEqual(run["iterations"][0]["verdict"], "met")
         self.assertEqual(run["iterations"][0]["reason"], "已达成")
 
+    def test_plan_step_exposes_latest_run_status_for_pending_review(self):
+        """步骤被人工复核前，前端要靠“最近一次执行成功”把进度算作半步。"""
+        owner_headers = self.auth_headers(self.owner_token, self.owner_workspace)
+        project = self.client.post(
+            "/api/v1/projects",
+            headers=owner_headers,
+            json={"name": "Pending review", "description": "Track executed steps", "color": "#5B5BD6"},
+        )
+        self.assertEqual(project.status_code, 201, project.text)
+        task = self.client.post(
+            "/api/v1/tasks",
+            headers=owner_headers,
+            json={"project_id": project.json()["project"]["id"], "title": "Two-step task"},
+        )
+        task_id = task.json()["task"]["id"]
+        plan = self.client.put(
+            f"/api/v1/tasks/{task_id}/plan",
+            headers=owner_headers,
+            json={
+                "objective": "验证执行状态回传",
+                "steps": [
+                    {"title": "已执行步骤", "instructions": "会被 AI 跑一次"},
+                    {"title": "未执行步骤", "instructions": "保持待执行"},
+                ],
+            },
+        )
+        self.assertEqual(plan.status_code, 200, plan.text)
+        self.assertIsNone(plan.json()["plan"]["steps"][0]["latest_run_status"])
+        approved = self.client.post(f"/api/v1/tasks/{task_id}/plan/approve", headers=owner_headers)
+        self.assertEqual(approved.status_code, 200, approved.text)
+        executed_step_id = approved.json()["plan"]["steps"][0]["id"]
+
+        class FakeSkillManager:
+            @staticmethod
+            def get_skill(name):
+                return object() if name == "default" else None
+
+        class FakeMcpManager:
+            servers: dict = {}
+
+        class FakeEngine:
+            skill_manager = FakeSkillManager()
+            mcp_manager = FakeMcpManager()
+
+            @staticmethod
+            def validate_permissions(*_args, **_kwargs):
+                return None
+
+            async def run(self, **kwargs):
+                yield "done"
+
+        with (
+            patch("api.routes.get_agent_engine", return_value=FakeEngine()),
+            patch("api.routes._ensure_model_ready"),
+        ):
+            response = self.client.post(
+                f"/api/v1/tasks/{task_id}/execute",
+                headers=owner_headers,
+                json={"model_id": "gpt-4o-mini", "skill_name": "default", "step_id": executed_step_id, "mode": "agent"},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        refreshed = self.client.get(f"/api/v1/tasks/{task_id}/plan", headers=owner_headers)
+        steps = refreshed.json()["plan"]["steps"]
+        self.assertEqual(steps[0]["latest_run_status"], "succeeded")
+        self.assertIsNone(steps[1]["latest_run_status"])
+
     def test_subagent_usage_is_persisted_against_the_parent_run(self):
         owner_headers = self.auth_headers(self.owner_token, self.owner_workspace)
         project = self.client.post(
@@ -1110,6 +1184,79 @@ class ProductApiTests(unittest.TestCase):
         self.assertEqual(usage["total_tokens"], 60 + 35 + 8)
         self.assertEqual(usage["subagent_records"], 2)
         self.assertEqual(len(usage["subagents"]), 2)
+
+    def test_assistant_message_carries_agent_mode_usage_and_iterations(self):
+        """对话即工作台：消息自身要携带执行上下文，前端才能就地渲染卡片。"""
+        headers = self.auth_headers(self.owner_token, self.owner_workspace)
+        conversation = self.client.post(
+            "/api/v1/conversations",
+            headers=headers,
+            json={"title": "Message context", "model_id": "gpt-4o-mini"},
+        )
+        self.assertEqual(conversation.status_code, 201, conversation.text)
+        conversation_id = conversation.json()["conversation"]["id"]
+
+        class FakeSkillManager:
+            @staticmethod
+            def get_skill(name):
+                return object() if name == "default" else None
+
+        class FakeMcpManager:
+            servers: dict = {}
+
+        class FakeEngine:
+            skill_manager = FakeSkillManager()
+            mcp_manager = FakeMcpManager()
+
+            @staticmethod
+            def validate_permissions(*_args, **_kwargs):
+                return None
+
+            async def run(self, **kwargs):
+                config = kwargs["config"]
+                config["usage_by_message"]["call-1"] = {
+                    "input_tokens": 11, "output_tokens": 7, "total_tokens": 18,
+                }
+                yield "第一段"
+                # 真实监督节点在最后一个 token 之后才写判定。
+                config["iterations"].append(
+                    {"iteration": 1, "verdict": "not_met", "reason": "还差一步"}
+                )
+
+        with (
+            patch("api.routes.get_agent_engine", return_value=FakeEngine()),
+            patch("api.routes._ensure_model_ready"),
+        ):
+            response = self.client.post(
+                "/api/v1/chat/agent",
+                headers=headers,
+                json={
+                    "query": "推进目标",
+                    "model_id": "gpt-4o-mini",
+                    "skill_name": "default",
+                    "conversation_id": conversation_id,
+                    "mode": "goal",
+                    "goal": "完成报告",
+                    "success_criteria": "包含三章",
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        messages = self.client.get(
+            f"/api/v1/conversations/{conversation_id}/messages", headers=headers
+        ).json()["messages"]
+        assistant = next(m for m in reversed(messages) if m["role"] == "assistant")
+        self.assertEqual(assistant["agent_mode"], "goal")
+        self.assertEqual(assistant["usage"]["total_tokens"], 18)
+        self.assertEqual(assistant["usage"]["llm_calls"], 1)
+        self.assertEqual(assistant["iterations"][0]["verdict"], "not_met")
+        self.assertEqual(assistant["iterations"][0]["reason"], "还差一步")
+
+        # 用户消息不携带执行上下文，但字段必须存在且为安全默认值。
+        user_message = next(m for m in messages if m["role"] == "user")
+        self.assertEqual(user_message["agent_mode"], "agent")
+        self.assertIsNone(user_message["usage"])
+        self.assertEqual(user_message["iterations"], [])
 
     def test_task_execution_persists_a_reviewable_run_and_activity(self):
         owner_headers = self.auth_headers(self.owner_token, self.owner_workspace)

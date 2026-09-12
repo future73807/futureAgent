@@ -75,6 +75,24 @@ const iterationVerdictLabels = {
   judge_unavailable: '监督判定不可用，已停止',
 }
 
+// 权限三档。侧边栏、工作区设置页与执行入口共用同一套文案，
+// 避免同一个档位在两处叫法不一致。
+export const permissionModes = ['default', 'auto_approve', 'full_access']
+
+export function permissionModeName(mode) {
+  const labels = { default: '默认权限', auto_approve: '自动审批', full_access: '完全访问' }
+  return labels[mode] || '默认权限'
+}
+
+export function permissionModeHint(mode) {
+  const hints = {
+    default: '写盘、外呼与子代理需要人工批准后才执行。',
+    auto_approve: '命中风险策略仍会拦截，其余工具调用自动批准并完整留痕。',
+    full_access: '高风险操作也直接执行，不可逆；仅在隔离环境使用。',
+  }
+  return hints[mode] || hints.default
+}
+
 export function iterationVerdictLabel(verdict) {
   return iterationVerdictLabels[verdict] || verdict || ''
 }

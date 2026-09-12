@@ -2,7 +2,7 @@ import React, { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { App as AntApp, Avatar, Badge, Button, Card, ConfigProvider, Drawer, Dropdown, Form, Grid, Input, Layout, Menu, Select, Space, Spin, Tooltip, Typography, theme } from 'antd'
 import { ApiOutlined, AppstoreOutlined, AuditOutlined, BulbOutlined, CheckCircleFilled, DashboardOutlined, ExportOutlined, FundOutlined, GlobalOutlined, LogoutOutlined, MenuOutlined, RobotOutlined, SafetyOutlined, SettingOutlined, TeamOutlined, ToolOutlined, UserOutlined } from '@ant-design/icons'
 import { apiFetch, applyAuthSession, clearAuthSession, getAccessToken, getWorkspaceId, refreshAccessToken, setWorkspaceId, toUserErrorMessage, userFrontendUrl } from './api.js'
-import { applyLocale, getLocale, t, toggleLocale, antdLocaleOf } from './i18n.js'
+import { t, antdLocaleOf } from './i18n.js'
 import { applyThemeMode, getThemeMode, toggleThemeMode } from './theme.js'
 
 const DashboardPage = lazy(() => import('./pages/DashboardPage.jsx'))
@@ -49,9 +49,9 @@ function Login({ onLogin }) {
       <section className="admin-auth-intro" aria-label="平台能力简介">
         <div className="admin-auth-brand"><span className="admin-auth-logo"><AppstoreOutlined /></span><span>futureAgent</span></div>
         <div>
-          <Text className="admin-auth-eyebrow">AI WORKSPACE CONTROL</Text>
+          <Text className="admin-auth-eyebrow">{t('admin.tagline')}</Text>
           <Title>让模型、工具和权限<br />保持清晰可控</Title>
-          <Text className="admin-auth-copy">统一管理团队工作区、模型路由、Skills 与 MCP 服务，在一个可靠边界内完成运营与审计。</Text>
+          <Text className="admin-auth-copy">统一管理团队工作区、模型路由、技能与 MCP 服务，在一个可靠边界内完成运营与审计。</Text>
         </div>
         <Space direction="vertical" size={10} className="admin-auth-points">
           <Text><CheckCircleFilled /> 工作区级权限隔离</Text>
@@ -62,14 +62,14 @@ function Login({ onLogin }) {
       <Card className="admin-auth-card" variant="borderless">
         <Space direction="vertical" className="admin-auth-heading">
           <Avatar size={48} icon={<SafetyOutlined />} />
-          <div><Title level={2}>欢迎回来</Title><Text type="secondary">{t('admin.auth.subtitle')}</Text></div>
+          <div><Title level={2}>{t('admin.auth.title')}</Title><Text type="secondary">{t('admin.auth.subtitle')}</Text></div>
         </Space>
         <Form layout="vertical" onFinish={submit} requiredMark={false} size="large" validateMessages={{ required: '${label}不能为空', types: { email: '${label}格式不正确' } }}>
-          <Form.Item name="email" label="管理员邮箱" rules={[{ required: true, type: 'email' }]}><Input autoComplete="email" autoFocus placeholder="name@company.com" /></Form.Item>
-          <Form.Item name="password" label="密码" rules={[{ required: true }]}><Input.Password autoComplete="current-password" placeholder="请输入登录密码" /></Form.Item>
-          <Button type="primary" htmlType="submit" size="large" block loading={loading}>进入管理后台</Button>
+          <Form.Item name="email" label={t('admin.auth.email')} rules={[{ required: true, type: 'email' }]} validateTrigger="onBlur"><Input autoComplete="email" autoFocus placeholder="name@company.com" /></Form.Item>
+          <Form.Item name="password" label={t('admin.auth.password')} rules={[{ required: true }]}><Input.Password autoComplete="current-password" placeholder="请输入登录密码" /></Form.Item>
+          <Button type="primary" htmlType="submit" size="large" block loading={loading}>{t('admin.auth.submit')}</Button>
         </Form>
-        <Text type="secondary" className="admin-auth-note">仅限已授权的平台管理员访问</Text>
+        <Text type="secondary" className="admin-auth-note">{t('admin.auth.note')}</Text>
       </Card>
     </div>
   </main>
@@ -95,13 +95,13 @@ function AdminShell({ profile, workspaces, onLogout }) {
     {screens.lg ? <Sider collapsible collapsed={collapsed} collapsedWidth={72} onCollapse={setCollapsed} width={248} theme="dark">{navigation(collapsed)}</Sider> : <Drawer placement="left" width="min(86vw, 288px)" open={mobileNav} onClose={() => setMobileNav(false)} closable={false} rootClassName="admin-mobile-drawer" styles={{ body: { padding: 0 } }}>{navigation(false)}</Drawer>}
     <Layout>
       <Header className="admin-header">
-        <div className="admin-header-title">{!screens.lg && <Button type="text" icon={<MenuOutlined />} onClick={() => setMobileNav(true)} aria-label="打开管理导航" />}<Text strong>{buildPageLabels()[selectedKey]}</Text><Badge status={online ? 'success' : 'error'} text={online ? 'API 正常' : 'API 异常'} /></div>
+        <div className="admin-header-title">{!screens.lg && <Button type="text" icon={<MenuOutlined />} onClick={() => setMobileNav(true)} aria-label="打开管理导航" />}<Text strong>{buildPageLabels()[selectedKey]}</Text><Badge status={online ? 'success' : 'error'} text={online ? t('admin.header.apiOk') : t('admin.header.apiError')} /></div>
         <Space className="admin-header-actions" size={10}>
           <Tooltip title={getThemeMode() === 'dark' ? '切换到浅色' : '切换到深色'}>
             <Button type="text" icon={<BulbOutlined />} onClick={() => toggleThemeMode()} aria-label="切换深浅色主题" />
           </Tooltip>
-          <div className="admin-workspace-switch"><Text type="secondary">当前工作区</Text><Select aria-label="切换当前工作区" value={workspaceId || undefined} onChange={setCurrentWorkspace} placeholder="选择工作区" notFoundContent="暂无可切换的工作区" options={workspaces.map((item) => ({ value: item.id, label: item.name }))} /></div>
-          <Button icon={<ExportOutlined />} href={userAppUrl} target="_blank" rel="noreferrer" aria-label="打开用户端"><span className="admin-action-label">用户端</span></Button>
+          <div className="admin-workspace-switch"><Text type="secondary">{t('admin.header.currentWorkspace')}</Text><Select aria-label="切换当前工作区" value={workspaceId || undefined} onChange={setCurrentWorkspace} placeholder="选择工作区" notFoundContent="暂无可切换的工作区" options={workspaces.map((item) => ({ value: item.id, label: item.name }))} /></div>
+          <Button icon={<ExportOutlined />} href={userAppUrl} target="_blank" rel="noreferrer" aria-label="打开用户端"><span className="admin-action-label">{t('admin.header.userFrontend')}</span></Button>
           <Dropdown menu={accountMenu} placement="bottomRight" trigger={['click']}><Button type="text" className="admin-account-button" aria-label={`账号菜单：${profile.display_name}`}><Avatar size={30}>{profile.display_name?.slice(0, 1)}</Avatar><span className="admin-account-name">{profile.display_name}</span></Button></Dropdown>
         </Space>
       </Header>
@@ -121,20 +121,16 @@ function AdminApp() {
 
 export default function App() {
   const [themeMode, setThemeMode] = useState(getThemeMode)
-  const [locale, setLocale] = useState(getLocale)
   useEffect(() => {
     applyThemeMode(getThemeMode())
     const themeListener = (event) => setThemeMode(event.detail || getThemeMode())
     window.addEventListener('futureagent-admin-theme', themeListener)
-    const localeListener = (event) => setLocale(event.detail || getLocale())
-    window.addEventListener('futureagent-admin-locale', localeListener)
     return () => {
       window.removeEventListener('futureagent-admin-theme', themeListener)
-      window.removeEventListener('futureagent-admin-locale', localeListener)
     }
   }, [])
   const isDark = themeMode === 'dark'
-  return <ConfigProvider locale={antdLocaleOf(locale)} theme={{
+  return <ConfigProvider locale={antdLocaleOf()} theme={{
     algorithm: isDark ? theme.darkAlgorithm : theme.defaultAlgorithm,
     token: {
       colorPrimary: '#4f5fd5',

@@ -337,11 +337,15 @@ def _provider_name(model_id: str) -> str:
     return model_id.split("/", 1)[0]
 
 
-def _safe_json_list(value: str) -> list[Any]:
+def _safe_json_list(value: str | None) -> list[Any]:
+    # 可空列（如 chat_messages.iterations_json）会传入 None；json.loads(None)
+    # 抛的是 TypeError 而不是 JSONDecodeError，只捕获后者会直接 500。
+    if not value:
+        return []
     try:
         parsed = json.loads(value)
         return parsed if isinstance(parsed, list) else []
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError):
         return []
 
 
@@ -515,14 +519,30 @@ def _conversation_data(conversation: Conversation) -> dict[str, Any]:
 
 
 def _message_data(message: ChatMessage) -> dict[str, Any]:
+    usage = _safe_json_object(message.usage_json)
     return {
         "id": message.id,
         "conversation_id": message.conversation_id,
         "role": message.role,
         "content": message.content,
         "tool_trace": _safe_json_list(message.tool_trace_json),
+        "agent_mode": message.agent_mode,
+        # 未上报用量时为 None，前端据此不渲染用量行，而不是显示 0。
+        "usage": usage or None,
+        "iterations": _safe_json_list(message.iterations_json),
         "created_at": message.created_at,
     }
+
+
+def _safe_json_object(value: str | None) -> dict[str, Any]:
+    """解析对象型 JSON 列；损坏或类型不符时返回空字典。"""
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _agent_run_data(run: AgentRun) -> dict[str, Any]:
@@ -682,6 +702,20 @@ def _plan_data(session: Session, plan: WorkPlan | None) -> dict[str, Any] | None
         .where(WorkPlanStep.plan_id == plan.id)
         .order_by(WorkPlanStep.position)
     ).all()
+    # 前端需要区分“真的没被 AI 执行过”与“执行成功但还没人工复核”，
+    # 才能把进度算作半步。一次 IN 查询取全部步骤的最新 run，避免逐步骤查询。
+    latest_run_status: dict[str, str] = {}
+    if steps:
+        runs = session.exec(
+            select(AgentRun)
+            .where(
+                AgentRun.workspace_id == plan.workspace_id,
+                AgentRun.step_id.in_([step.id for step in steps]),
+            )
+            .order_by(AgentRun.started_at)
+        ).all()
+        for run in runs:
+            latest_run_status[run.step_id] = run.status
     return {
         "id": plan.id,
         "task_id": plan.task_id,
@@ -701,6 +735,7 @@ def _plan_data(session: Session, plan: WorkPlan | None) -> dict[str, Any] | None
                 "status": step.status,
                 "assignee_id": step.assignee_id,
                 "output_summary": step.output_summary,
+                "latest_run_status": latest_run_status.get(step.id),
                 "updated_at": step.updated_at,
             }
             for step in steps
@@ -2578,6 +2613,7 @@ async def agent_chat(
                 yield event
             assistant_message.content = "".join(collected)
             assistant_message.tool_trace_json = _serialize_tool_trace(config["tool_trace"])
+            _stamp_message_agent_context(assistant_message, config, request.mode)
             conversation.updated_at = now_utc()
             session.add(assistant_message)
             session.add(conversation)
@@ -2609,6 +2645,7 @@ async def agent_chat(
         except asyncio.CancelledError:
             assistant_message.content = "".join(collected)
             assistant_message.tool_trace_json = _serialize_tool_trace(config["tool_trace"])
+            _stamp_message_agent_context(assistant_message, config, request.mode)
             conversation.updated_at = now_utc()
             session.add(assistant_message)
             session.add(conversation)
@@ -2640,6 +2677,7 @@ async def agent_chat(
         except Exception as exc:
             assistant_message.content = "".join(collected) or "[Agent request did not complete]"
             assistant_message.tool_trace_json = _serialize_tool_trace(config["tool_trace"])
+            _stamp_message_agent_context(assistant_message, config, request.mode)
             session.add(assistant_message)
             _persist_usage(
                 session,
@@ -2808,6 +2846,29 @@ def _serialize_iterations(events: list[Any]) -> str:
             }
         )
     return json.dumps(bounded, ensure_ascii=False)
+
+
+def _stamp_message_agent_context(
+    message: ChatMessage, config: dict[str, Any], mode: str
+) -> None:
+    """把本次对话的执行上下文写到助手消息上。
+
+    对话即工作台要求消息自身携带足够信息就地渲染卡片，而不是只能
+    展示一段文本。未上报用量时留空（None）而不写全零，否则前端无法
+    区分“没计量”与“真的零消耗”。取消与失败路径同样写入：已消耗的
+    token 与已完成的轮次都是事实，不该因为未正常结束而丢失。
+    """
+    message.agent_mode = mode
+    usage = AgentEngine.summarize_usage(config)
+    message.usage_json = (
+        json.dumps(usage, ensure_ascii=False) if usage["llm_calls"] else None
+    )
+    iterations = config.get("iterations")
+    message.iterations_json = (
+        _serialize_iterations(iterations)
+        if isinstance(iterations, list) and iterations
+        else None
+    )
 
 
 def _usage_by_run(

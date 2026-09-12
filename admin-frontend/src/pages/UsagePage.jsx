@@ -64,9 +64,8 @@ export default function UsagePage() {
   const partialPricing = (totals.priced_rows || 0) < (totals.runs || 0)
   const columns = [
     { title: groupColumnTitle[groupBy] || '维度', dataIndex: 'label', render: (value, row) => <span className="code-text">{groupBy === 'mode' ? (modeLabels[value || row.key] || value || row.key) : (value || row.key)}</span> },
-    { title: '记录数', dataIndex: 'runs', width: 96 },
-    { title: '模型调用', dataIndex: 'llm_calls', width: 104 },
-    { title: '工具调用', dataIndex: 'tool_calls', width: 104 },
+    // 记录数/模型调用/工具调用合并为一列，把宽度让给窄视口下的其余列。
+    { title: '调用（记录/模型/工具）', key: 'calls', width: 170, render: (_, row) => <span className="code-text">{formatNumber(row.runs)} / {formatNumber(row.llm_calls)} / {formatNumber(row.tool_calls)}</span> },
     { title: '输入 token', dataIndex: 'input_tokens', width: 124, align: 'right', render: formatNumber },
     { title: '输出 token', dataIndex: 'output_tokens', width: 124, align: 'right', render: formatNumber },
     { title: '总 token', dataIndex: 'total_tokens', width: 124, align: 'right', render: (value) => <Text strong>{formatNumber(value)}</Text> },
@@ -98,7 +97,7 @@ export default function UsagePage() {
         <Segmented options={rangeOptions} value={range} onChange={(value) => { setRange(value); load({ range: value }) }} />
         <Select options={groupOptions} value={groupBy} onChange={(value) => { setGroupBy(value); load({ groupBy: value }) }} style={{ width: 130 }} />
       </Space>
-      <Table rowKey="key" columns={columns} dataSource={groups} loading={loading} scroll={{ x: 1180 }} pagination={{ pageSize: 25 }} locale={{ emptyText: '所选范围内暂无用量记录' }} />
+      <Table rowKey="key" columns={columns} dataSource={groups} loading={loading} scroll={{ x: 1050 }} pagination={{ pageSize: 25 }} locale={{ emptyText: '所选范围内暂无用量记录' }} />
     </Card>
   </div>
 }

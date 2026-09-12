@@ -19,7 +19,6 @@ import Input from 'antd/es/input'
 import InputNumber from 'antd/es/input-number'
 import Layout from 'antd/es/layout'
 import List from 'antd/es/list'
-import Menu from 'antd/es/menu'
 import Modal from 'antd/es/modal'
 import Popconfirm from 'antd/es/popconfirm'
 import Progress from 'antd/es/progress'
@@ -46,10 +45,10 @@ import {
   ClockCircleOutlined,
   SearchOutlined,
   DeleteOutlined,
+  EditOutlined,
   FileAddOutlined,
   FileTextOutlined,
   FolderOpenOutlined,
-  GlobalOutlined,
   LogoutOutlined,
   MenuOutlined,
   MessageOutlined,
@@ -66,6 +65,13 @@ import {
   UserOutlined,
 } from '@ant-design/icons'
 import ErrorBoundary from './ErrorBoundary.jsx'
+// 侧边栏常驻，不参与按需分包：对话列表是工作台主入口，不应等到进对话页才加载。
+import SidebarConversations from './components/SidebarConversations.jsx'
+import PermissionModeChip from './components/PermissionModeChip.jsx'
+import ComposerToolbar from './components/ComposerToolbar.jsx'
+import MessageBlocks from './components/MessageBlocks.jsx'
+import WorkspaceChangesPanel from './components/WorkspaceChangesPanel.jsx'
+import { loadComposerPrefs, reconcileComposerPrefs, saveComposerPrefs } from './composer-prefs.js'
 import {
   apiFetch,
   applyAuthSession,
@@ -82,7 +88,8 @@ import {
 } from './api.js'
 import { agentModeDisplayName, agentModeHint, agentModeRequirement, agentModes, iterationVerdictLabel, mcpOptionLabel, mcpServerUnavailable, skillDisplayName } from './ui-labels.js'
 import { applyThemeMode, getThemeMode, toggleThemeMode } from './theme.js'
-import { applyLocale, getLocale, t, toggleLocale, antdLocaleOf } from './i18n.js'
+import { renderMarkdown } from './markdown.js'
+import { applyLocale, t, antdLocaleOf } from './i18n.js'
 import { validateUpload } from './upload-guard.js'
 
 const { Header, Sider, Content } = Layout
@@ -123,7 +130,10 @@ const historicRunErrorLabels = {
   'The AI execution was cancelled by an authorised workspace member.': 'AI 执行已被有权限的工作区成员取消。',
 }
 
-const navigationKeys = ['chat', 'business', 'report', 'board', 'work', 'team', 'settings']
+// 顺序即侧边栏导航的展示顺序：看板与工作模式是主作业面，排在两个
+// 助手之前。chat 仍保留在首位作为默认页与面包屑文案的参考项，但不在
+// 导航里列项——对话列表本身就是它的入口。
+const navigationKeys = ['chat', 'board', 'work', 'business', 'report', 'team', 'settings']
 const navigationIcons = {
   chat: <MessageOutlined />,
   business: <BarChartOutlined />,
@@ -139,7 +149,7 @@ const buildNavigationItems = () => navigationKeys.map((key) => ({
   label: t(`nav.${key}`),
 }))
 
-const navigationLabels = (locale) => Object.fromEntries(
+const navigationLabels = () => Object.fromEntries(
   navigationKeys.map((key) => [key, t(`nav.${key}`)]),
 )
 
@@ -160,14 +170,6 @@ function readableRunError(message) {
 
 function readableStatus(status) {
   return taskStatusLabels[status] || planStatusLabels[status] || stepStatusLabels[status] || runStatusLabels[status] || chineseMessage(status, '状态已更新')
-}
-
-// 用量缺失时明确标注“未上报”，不用 0 冒充——未计量与零消耗是两件事。
-function formatRunUsage(usage) {
-  if (!usage || !usage.records) return '用量未上报'
-  const base = `${usage.total_tokens} token（入 ${usage.input_tokens} / 出 ${usage.output_tokens}）· 模型调用 ${usage.llm_calls} 次 · 工具调用 ${usage.tool_calls} 次`
-  // 总量已包含子代理，这里只标注占比来源，避免重复相加。
-  return usage.subagent_records ? `${base} · 含 ${usage.subagent_records} 个子代理` : base
 }
 
 function formatDateTime(value) {
@@ -449,7 +451,7 @@ function BoardPage({ projects, tasks, members, onRefresh, openTask, workspaceRol
   return (
     <div className="page-shell">
       <Flex justify="space-between" align="center" wrap="wrap" gap={12} className="page-heading">
-        <div><Title level={2}>项目看板</Title><Text type="secondary">把目标变成可见、可负责的工作；每一次变更都会写入工作区审计记录。</Text></div>
+        <div><Title level={2}>{t('nav.board')}</Title><Text type="secondary">把目标变成可见、可负责的工作；每一次变更都会写入工作区审计记录。</Text></div>
         <Space>
           <Button icon={<FileAddOutlined />} onClick={async () => { try { await downloadCsv(`/api/v1/tasks/export${projectId ? `?project_id=${projectId}` : ''}`, 'tasks.csv'); message.success('任务清单已导出') } catch (error) { message.error(readableError(error)) } }}>导出任务</Button>
           {canWrite && <Button icon={<FolderOpenOutlined />} onClick={() => setProjectOpen(true)}>新建项目</Button>}
@@ -499,122 +501,6 @@ function BoardPage({ projects, tasks, members, onRefresh, openTask, workspaceRol
 }
 
 // 差异行的语义完全由前缀决定；表头行必须先判，否则会被当成增删。
-function diffLineClass(line) {
-  if (line.startsWith('+++') || line.startsWith('---')) return 'diff-header'
-  if (line.startsWith('@@')) return 'diff-hunk'
-  if (line.startsWith('+')) return 'diff-add'
-  if (line.startsWith('-')) return 'diff-remove'
-  return ''
-}
-
-function DiffView({ diff }) {
-  if (!diff) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="选择文件与两个版本后点“比对”" />
-  if (!diff.diff_available) return <Alert type="info" showIcon message="该文件不提供文本差异" description={diff.reason || '二进制格式可分别下载各版本后自行比对。'} />
-  if (diff.format === 'side-by-side') {
-    return <>
-      <div className="diff-side-by-side">{diff.rows.map((row, index) => (
-        <div key={index} className={`diff-row diff-${row.kind}`}>
-          <span className="diff-cell">{row.left || ' '}</span>
-          <span className="diff-cell">{row.right || ' '}</span>
-        </div>
-      ))}</div>
-      {diff.truncated && <Text type="secondary">差异过长，已截断展示。</Text>}
-    </>
-  }
-  if (!diff.changed) return <Alert type="success" showIcon message="两个版本内容完全相同" />
-  return <>
-    <pre className="attachment-preview diff-unified">{diff.lines.map((line, index) => (
-      <div key={index} className={diffLineClass(line)}>{line || ' '}</div>
-    ))}</pre>
-    {diff.truncated && <Text type="secondary">差异过长，已截断展示。</Text>}
-  </>
-}
-
-function WorkspaceChangesPanel() {
-  const { message } = AntApp.useApp()
-  const [files, setFiles] = useState([])
-  const [filesLoading, setFilesLoading] = useState(false)
-  const [path, setPath] = useState('')
-  const [versions, setVersions] = useState([])
-  const [versionsLoading, setVersionsLoading] = useState(false)
-  const [fromVersion, setFromVersion] = useState(null)
-  const [toVersion, setToVersion] = useState(0)
-  const [format, setFormat] = useState('unified')
-  const [diff, setDiff] = useState(null)
-  const [diffLoading, setDiffLoading] = useState(false)
-
-  const loadFiles = useCallback(async () => {
-    setFilesLoading(true)
-    try {
-      const data = await apiFetch('/api/v1/workspace/files')
-      setFiles(data.files || [])
-    } catch (error) { message.error(readableError(error)) } finally { setFilesLoading(false) }
-  }, [])
-  useEffect(() => { loadFiles() }, [loadFiles])
-
-  const selectFile = async (nextPath) => {
-    setPath(nextPath)
-    setDiff(null)
-    setVersions([])
-    setFromVersion(null)
-    if (!nextPath) return
-    setVersionsLoading(true)
-    try {
-      const data = await apiFetch(`/api/v1/workspace/files/versions?path=${encodeURIComponent(nextPath)}`)
-      const items = data.versions || []
-      setVersions(items)
-      // 默认拿最新快照与当前文件比，这就是“AI 刚刚改了什么”。
-      setFromVersion(items.length ? items[items.length - 1].version : null)
-      if (!items.length) message.info('该文件还没有历史版本：只有被覆盖过的文件才会留下快照。')
-    } catch (error) { message.error(readableError(error)) } finally { setVersionsLoading(false) }
-  }
-
-  const compare = async () => {
-    if (!path || fromVersion === null || fromVersion === toVersion) return
-    setDiffLoading(true)
-    try {
-      const params = new URLSearchParams({ path, from: String(fromVersion), to: String(toVersion), format })
-      setDiff(await apiFetch(`/api/v1/workspace/files/diff?${params.toString()}`))
-    } catch (error) { message.error(readableError(error)); setDiff(null) } finally { setDiffLoading(false) }
-  }
-
-  const versionOptions = versions.map((item) => ({
-    value: item.version,
-    label: `v${item.version} · ${item.change_kind === 'generate' ? '生成' : item.change_kind === 'edit' ? '编辑' : '覆写'}${item.snapshot ? '' : '（无副本）'}`,
-    disabled: !item.snapshot,
-  }))
-  const targetOptions = [
-    { value: 0, label: '当前文件' },
-    ...versionOptions,
-  ]
-
-  return <Space direction="vertical" size="small" style={{ width: '100%' }}>
-    <Alert type="info" showIcon message="版本快照在文件被覆盖前自动保存" description="快照存放在租户目录之外，模型无法读写；清单只保留最近若干个版本，更早的改动已被清理。" />
-    <Flex gap={8} wrap="wrap" align="center">
-      <Select
-        showSearch
-        style={{ width: 260, maxWidth: '100%' }}
-        placeholder="选择工作区文件"
-        value={path || undefined}
-        onChange={selectFile}
-        loading={filesLoading}
-        notFoundContent="工作区暂无文件"
-        options={files.map((file) => ({ value: file.path, label: file.path }))}
-      />
-      <Select style={{ width: 190 }} placeholder="起始版本" value={fromVersion ?? undefined} onChange={setFromVersion} options={versionOptions} disabled={!versionOptions.length} notFoundContent="暂无历史版本" />
-      <Select style={{ width: 150 }} placeholder="对比到" value={toVersion} onChange={setToVersion} options={targetOptions} disabled={!versions.length} />
-      <Segmented size="small" value={format} onChange={setFormat} options={[{ label: '统一差异', value: 'unified' }, { label: '左右对照', value: 'side-by-side' }]} />
-      <Button size="small" type="primary" loading={diffLoading} disabled={!path || fromVersion === null || fromVersion === toVersion} onClick={compare}>比对</Button>
-      <Button size="small" icon={<ReloadOutlined />} onClick={loadFiles} loading={filesLoading}>刷新文件</Button>
-    </Flex>
-    {versionsLoading ? <Spin /> : (path && !versions.length) ? (
-      // 只给一次性 toast 不够：控件会停在禁用态而无任何解释，
-      // 使用者无法区分“没版本”与“功能坏了”。
-      <Alert type="warning" showIcon message="该文件还没有历史版本"
-        description="版本快照只在文件被覆盖前生成。这个文件新建后还没被改写过，所以没有可对比的历史版本；让 AI 再改一次它，就会出现版本并可比对。" />
-    ) : <DiffView diff={diff} />}
-  </Space>
-}
 
 function TaskResultsPanel({ taskId, canWrite, members, refreshKey }) {
   const { message } = AntApp.useApp()
@@ -625,6 +511,8 @@ function TaskResultsPanel({ taskId, canWrite, members, refreshKey }) {
   const [workspaceFilesLoading, setWorkspaceFilesLoading] = useState(false)
   const [registerOpen, setRegisterOpen] = useState(false)
   const [preview, setPreview] = useState(null)
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const [activeTab, setActiveTab] = useState('outputs')
   const [loading, setLoading] = useState(false)
   const previewUrlRef = useRef('')
   const resultsRequestIdRef = useRef(0)
@@ -670,6 +558,7 @@ function TaskResultsPanel({ taskId, canWrite, members, refreshKey }) {
     if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current)
     previewUrlRef.current = ''
     setPreview(null)
+    setPreviewOpen(false)
     loadResults()
   }, [loadResults, refreshKey])
   useEffect(() => () => { if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current) }, [])
@@ -683,6 +572,14 @@ function TaskResultsPanel({ taskId, canWrite, members, refreshKey }) {
       message.success('文件已添加到此工作项')
       onSuccess?.('ok')
     } catch (error) { message.error(readableError(error)); onError?.(error) }
+  }
+  // 关闭抽屉时立即释放 blob URL，不能等到下次刷新——长会话里会积压内存。
+  const closePreview = () => {
+    previewRequestIdRef.current += 1
+    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current)
+    previewUrlRef.current = ''
+    setPreviewOpen(false)
+    setPreview(null)
   }
   const showPreview = async (attachment) => {
     const requestedTaskId = taskId
@@ -700,6 +597,7 @@ function TaskResultsPanel({ taskId, canWrite, members, refreshKey }) {
       if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current)
       previewUrlRef.current = objectUrl
       setPreview({ ...data, objectUrl })
+      setPreviewOpen(true)
     } catch (error) {
       if (objectUrl) URL.revokeObjectURL(objectUrl)
       if (requestId === previewRequestIdRef.current && currentTaskIdRef.current === requestedTaskId) message.error(readableError(error))
@@ -734,16 +632,42 @@ function TaskResultsPanel({ taskId, canWrite, members, refreshKey }) {
   const downloadDeliverable = async (deliverable) => {
     try { await downloadAttachment({ ...deliverable, original_name: deliverable.name }); message.success('已开始下载') } catch (error) { message.error(readableError(error)) }
   }
-  const files = <List loading={loading} size="small" locale={{ emptyText: '暂无任务文件' }} dataSource={attachments} renderItem={(attachment) => <List.Item actions={[attachment.preview_available ? <Button key="preview" type="link" size="small" onClick={() => showPreview(attachment)}>预览</Button> : null, <Button key="download" type="link" size="small" onClick={() => download(attachment)}>下载</Button>].filter(Boolean)}><List.Item.Meta title={attachment.original_name} description={`${Math.ceil(attachment.size_bytes / 1024)} KB · ${formatDateTime(attachment.created_at)}`} /></List.Item>} />
-  const deliverableList = <List loading={loading} size="small" locale={{ emptyText: '尚无交付物；AI 执行或登记工作区文件后会出现在这里' }} dataSource={deliverables} renderItem={(deliverable) => <List.Item actions={[<Button key="download" type="link" size="small" onClick={() => downloadDeliverable(deliverable)}>下载</Button>]}><List.Item.Meta title={<Space size={6}><Tag color={deliverable.kind === 'image' ? 'blue' : deliverable.kind === 'file' ? 'default' : 'purple'}>{deliverable.kind}</Tag>{deliverable.name}</Space>} description={`${Math.ceil(deliverable.size_bytes / 1024)} KB · 来源 ${deliverable.source_path || '工作区'} · ${formatDateTime(deliverable.created_at)}`} /></List.Item>} />
+  const files = <List loading={loading} size="small" locale={{ emptyText: '暂无任务文件' }} dataSource={attachments} renderItem={(attachment) => <List.Item actions={[attachment.preview_available ? <Button key="preview" type="link" size="small" onClick={() => showPreview(attachment)}>预览</Button> : null, <Button key="download" type="link" size="small" onClick={() => download(attachment)}>下载</Button>, <Button key="changes" type="link" size="small" onClick={() => setActiveTab('changes')}>查看变更</Button>].filter(Boolean)}><List.Item.Meta title={attachment.original_name} description={`${Math.ceil(attachment.size_bytes / 1024)} KB · ${formatDateTime(attachment.created_at)}`} /></List.Item>} />
+  const deliverableList = <List loading={loading} size="small" locale={{ emptyText: '尚无交付物；AI 执行或登记工作区文件后会出现在这里' }} dataSource={deliverables} renderItem={(deliverable) => <List.Item actions={[<Button key="download" type="link" size="small" onClick={() => downloadDeliverable(deliverable)}>下载</Button>, <Button key="changes" type="link" size="small" onClick={() => setActiveTab('changes')}>查看变更</Button>]}><List.Item.Meta title={<Space size={6}><Tag color={deliverable.kind === 'image' ? 'blue' : deliverable.kind === 'file' ? 'default' : 'purple'}>{deliverable.kind}</Tag>{deliverable.name}</Space>} description={`${Math.ceil(deliverable.size_bytes / 1024)} KB · 来源 ${deliverable.source_path || '工作区'} · ${formatDateTime(deliverable.created_at)}`} /></List.Item>} />
   const activity = <List loading={loading} size="small" locale={{ emptyText: '暂无任务动态' }} dataSource={events} renderItem={(event) => {
     const actor = members.find((member) => member.user.id === event.actor_id)?.user.display_name || '工作区成员'
     const status = event.metadata?.status ? ` · ${readableStatus(event.metadata.status)}` : ''
     return <List.Item><List.Item.Meta title={activityLabels[event.action] || '工作区记录已更新'} description={`${actor} · ${formatDateTime(event.created_at)}${status}`} /></List.Item>
   }} />
   const previewContent = !preview ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请选择任务文件进行预览" /> : <Space direction="vertical" size="small" style={{ width: '100%' }}><Text strong>{preview.attachment.original_name}</Text>{preview.preview_kind === 'image' ? <img className="artifact-image-preview" src={preview.objectUrl} alt={preview.attachment.original_name} /> : preview.preview_kind === 'pdf' ? <iframe className="artifact-pdf-preview" title={preview.attachment.original_name} src={preview.objectUrl} /> : preview.preview_available ? <pre className="attachment-preview">{preview.text}</pre> : <Text type="secondary">{chineseMessage(preview.message, '此文件暂不支持在线预览。')}</Text>}</Space>
+  // 产出段合并原“交付物 / 文件 / 预览”三个 Tab：两个列表 + 逐项动作，
+  // 预览就地打开抽屉，不占 Tab 位，用户不再需要在三层入口之间找文件。
+  const outputs = (
+    <Space direction="vertical" size={10} style={{ width: '100%' }}>
+      <div>
+        <Text strong>交付物（{deliverables.length}）</Text>
+        {deliverableList}
+      </div>
+      <div>
+        <Text strong>任务文件（{attachments.length}）</Text>
+        {files}
+      </div>
+    </Space>
+  )
   return <Card className="work-results" title={t('work.card.results')} extra={canWrite && <Space><Button size="small" icon={<FileAddOutlined />} onClick={() => { setRegisterOpen(true); loadWorkspaceFiles() }}>{t('work.btn.registerDeliverable')}</Button><Upload showUploadList={false} customRequest={attach} beforeUpload={(file) => { const invalid = validateUpload(file); if (invalid) { message.error(invalid); return Upload.LIST_IGNORE } return true }}><Button size="small" icon={<PaperClipOutlined />}>{t('work.btn.addContext')}</Button></Upload></Space>}>
-    <Tabs size="small" items={[{ key: 'deliverables', label: `${t('work.tab.deliverables')}（${deliverables.length}）`, children: deliverableList }, { key: 'files', label: `${t('work.tab.files')}（${attachments.length}）`, children: files }, { key: 'preview', label: t('work.tab.preview'), children: previewContent }, { key: 'changes', label: t('work.tab.changes'), children: <WorkspaceChangesPanel /> }, { key: 'activity', label: `${t('work.tab.activity')}（${events.length}）`, children: activity }]} />
+    <Tabs
+      size="small"
+      activeKey={activeTab}
+      onChange={setActiveTab}
+      items={[
+        { key: 'outputs', label: `${t('work.tab.outputs')}（${deliverables.length + attachments.length}）`, children: outputs },
+        { key: 'changes', label: t('work.tab.changes'), children: <WorkspaceChangesPanel /> },
+        { key: 'activity', label: `${t('work.tab.activity')}（${events.length}）`, children: activity },
+      ]}
+    />
+    <Drawer title={preview?.attachment?.original_name || '文件预览'} width={720} open={previewOpen} onClose={closePreview} destroyOnHidden>
+      {previewContent}
+    </Drawer>
     <Modal title="从工作区登记交付物" open={registerOpen} onCancel={() => setRegisterOpen(false)} footer={null} destroyOnHidden>
       <Alert type="info" showIcon message="这里列出 AI 执行期间在工作区生成的文件" description="登记后会复制到交付物库，可随时下载，并随任务留痕。" style={{ marginBottom: 12 }} />
       {workspaceFilesLoading ? <div style={{ textAlign: 'center', padding: 24 }}><Spin /></div> : workspaceFiles.length ? (
@@ -909,7 +833,7 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
   const runItems = runs.map((run) => {
     const hasRecordedMcpConfig = recordedRunMcpServers(run) !== null
     const retryButton = <Button size="small" onClick={() => execute(run)} disabled={running || batchRunning}>{hasRecordedMcpConfig ? '使用原配置重试' : '复用原模型与技能重试'}</Button>
-    return { key: run.id, label: <Space size={6}>{run.batch_id && <Tag color="geekblue">并行批次</Tag>}{run.agent_mode && run.agent_mode !== 'agent' && <Tag color="cyan">{agentModeDisplayName(run.agent_mode)}</Tag>}{readableStatus(run.status)} · {formatDateTime(run.started_at)}</Space>, children: <Space direction="vertical" size="small" style={{ width: '100%' }}><Text type="secondary">{run.model_id} · {skillDisplayName(run.skill_name)} · 第 {run.attempt || 1} 次尝试 · {formatRunUsage(run.usage)}</Text>{(run.usage?.subagents || []).length > 0 && <Space size={[4, 4]} wrap>{run.usage.subagents.map((item, index) => <Tag key={index} color="purple">子代理 · {skillDisplayName(item.skill_name)} · {item.model_id} · {item.total_tokens} token</Tag>)}</Space>}{(run.iterations || []).length > 0 && <div className="execution-iterations">{run.iterations.map((item, index) => <Alert key={index} type={item.verdict === 'met' ? 'success' : item.verdict === 'not_met' ? 'info' : 'warning'} showIcon message={`第 ${item.iteration} 轮 · ${iterationVerdictLabel(item.verdict)}`} description={item.reason} />)}</div>}{run.output ? <pre className="attachment-preview">{run.output}</pre> : <Text type="secondary">{readableRunError(run.error_message)}</Text>}<Space>{['failed', 'cancelled'].includes(run.status) && canWrite && (hasRecordedMcpConfig ? retryButton : <Tooltip title="历史记录未包含 MCP 配置，重试时会使用当前工具选择。">{retryButton}</Tooltip>)}{run.status === 'running' && canWrite && <Button size="small" danger onClick={() => cancelRun(run.id)} disabled={running && activeRunId && activeRunId !== run.id}>取消执行</Button>}</Space></Space> }
+    return { key: run.id, label: <Space size={6}>{run.batch_id && <Tag color="geekblue">并行批次</Tag>}{run.agent_mode && run.agent_mode !== 'agent' && <Tag color="cyan">{agentModeDisplayName(run.agent_mode)}</Tag>}{readableStatus(run.status)} · {formatDateTime(run.started_at)}</Space>, children: <Space direction="vertical" size="small" style={{ width: '100%' }}><Text type="secondary">{run.model_id} · {skillDisplayName(run.skill_name)} · 第 {run.attempt || 1} 次尝试{run.usage?.records ? '' : ' · 用量未上报'}</Text>{/* 用量、子代理与轮次时间线统一由 MessageBlocks 渲染，与对话页共用一套样式。 */}<MessageBlocks message={run} canWrite={canWrite} />{run.output ? <div className="markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(run.output) }} /> : <Text type="secondary">{readableRunError(run.error_message)}</Text>}<Space>{['failed', 'cancelled'].includes(run.status) && canWrite && (hasRecordedMcpConfig ? retryButton : <Tooltip title="历史记录未包含 MCP 配置，重试时会使用当前工具选择。">{retryButton}</Tooltip>)}{run.status === 'running' && canWrite && <Button size="small" danger onClick={() => cancelRun(run.id)} disabled={running && activeRunId && activeRunId !== run.id}>取消执行</Button>}</Space></Space> }
   })
   const executable = Boolean(plan && ['approved', 'in_progress'].includes(plan.status) && canWrite && models.some((item) => item.id === modelId && item.ready) && skillName && stepId)
   const pendingSteps = (plan?.steps || []).filter((step) => step.status === 'pending')
@@ -1022,12 +946,15 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
   </Card>
 }
 
-function WorkModePage({ tasks, members, models, skills, mcpServers, workspaceRole, profile, onRefresh, onOpenBoard }) {
+function WorkModePage({ tasks, members, models, skills, mcpServers, workspaceRole, profile, workspace, onRefresh, onOpenBoard }) {
   const { message } = AntApp.useApp()
   const [taskId, setTaskId] = useState(tasks[0]?.id || '')
   const [plan, setPlan] = useState(null)
   const [loading, setLoading] = useState(false)
   const [executionRunning, setExecutionRunning] = useState(false)
+  // 已批准计划的修订态：进入后复用草稿编辑器，保存前用 Modal 说明状态回退。
+  const [revising, setRevising] = useState(false)
+  const [reviseConfirm, setReviseConfirm] = useState(null)
   const [evidenceStep, setEvidenceStep] = useState(null)
   const [form] = Form.useForm()
   const [evidenceForm] = Form.useForm()
@@ -1037,6 +964,8 @@ function WorkModePage({ tasks, members, models, skills, mcpServers, workspaceRol
   const selectedTask = tasks.find((item) => item.id === taskId)
   const canWrite = workspaceRole !== 'viewer'
   const canApprove = ['owner', 'admin'].includes(workspaceRole)
+  // 保存按钮文案与修订说明随档位变化：自动批准档位下保存即批准。
+  const autoApproves = ['auto_approve', 'full_access'].includes(workspace?.permission_mode || 'default')
   const planTemplates = [
     {
       value: 'delivery',
@@ -1076,6 +1005,7 @@ function WorkModePage({ tasks, members, models, skills, mcpServers, workspaceRol
     currentTaskIdRef.current = nextTaskId
     setPlan(null)
     setEvidenceStep(null)
+    setRevising(false)
     setTaskId(nextTaskId)
   }
   useEffect(() => { if (!executionRunning && !tasks.some((item) => item.id === taskId)) selectTask(tasks[0]?.id || '') }, [executionRunning, tasks, taskId])
@@ -1087,7 +1017,12 @@ function WorkModePage({ tasks, members, models, skills, mcpServers, workspaceRol
       const data = await apiFetch(`/api/v1/tasks/${requestedTaskId}/plan`)
       if (requestId !== planRequestIdRef.current || currentTaskIdRef.current !== requestedTaskId) return false
       setPlan(data.plan)
-      form.setFieldsValue({ objective: data.plan?.objective || '', steps: data.plan?.steps?.length ? data.plan.steps : [{ title: '', instructions: '', assignee_id: undefined }] })
+      // 表单只回填写入契约允许的字段：完整 step 还带 status/latest_run_status 等
+      // 只读字段，原样提交会被后端 extra=forbid 拒绝（422）。
+      const formSteps = data.plan?.steps?.length
+        ? data.plan.steps.map((step) => ({ id: step.id, title: step.title, instructions: step.instructions, assignee_id: step.assignee_id }))
+        : [{ title: '', instructions: '', assignee_id: undefined }]
+      form.setFieldsValue({ objective: data.plan?.objective || '', steps: formSteps })
       return true
     } catch (error) {
       if (requestId === planRequestIdRef.current && currentTaskIdRef.current === requestedTaskId) message.error(readableError(error))
@@ -1100,15 +1035,36 @@ function WorkModePage({ tasks, members, models, skills, mcpServers, workspaceRol
   const savePlan = async (values) => {
     const requestedTaskId = taskId
     try {
-      const data = await apiFetch(`/api/v1/tasks/${requestedTaskId}/plan`, { method: 'PUT', body: JSON.stringify(values) })
+      // 提交前再裁剪一次：防御未来表单新增字段时重新引入只读字段。
+      const payload = {
+        objective: values.objective,
+        steps: (values.steps || []).map((step) => ({
+          ...(step?.id ? { id: step.id } : {}),
+          title: step?.title,
+          instructions: step?.instructions || '',
+          assignee_id: step?.assignee_id ?? null,
+        })),
+      }
+      const data = await apiFetch(`/api/v1/tasks/${requestedTaskId}/plan`, { method: 'PUT', body: JSON.stringify(payload) })
       if (currentTaskIdRef.current !== requestedTaskId) return
       setPlan(data.plan)
+      setRevising(false)
       // 自动审批档位下保存即批准，写死的“已保存为草稿”会与实际状态矛盾。
       message.success(data.plan?.status === 'approved'
         ? '工作计划已保存，并按当前权限档位自动批准'
         : '工作计划已保存为草稿')
       onRefresh()
     } catch (error) { message.error(readableError(error)) }
+  }
+  // 修订已批准计划要先确认状态回退；草稿直接保存。
+  const submitPlan = (values) => {
+    if (plan && plan.status !== 'draft') { setReviseConfirm(values); return }
+    savePlan(values)
+  }
+  const confirmRevise = () => {
+    const values = reviseConfirm
+    setReviseConfirm(null)
+    savePlan(values)
   }
   const approve = async () => {
     const requestedTaskId = taskId
@@ -1146,7 +1102,11 @@ function WorkModePage({ tasks, members, models, skills, mcpServers, workspaceRol
       message.success('步骤证据已保存到工作区审计轨迹')
     }
   }
-  const progress = plan?.steps?.length ? Math.round((plan.steps.filter((item) => item.status === 'done').length / plan.steps.length) * 100) : 0
+  const planSteps = plan?.steps || []
+  const doneCount = planSteps.filter((item) => item.status === 'done').length
+  // AI 执行成功但还没人工复核的步骤按半步计入进度，消除“AI 跑完了进度还是 0%”的误解。
+  const executedCount = planSteps.filter((item) => item.status !== 'done' && item.latest_run_status === 'succeeded').length
+  const progress = planSteps.length ? Math.round(((doneCount + executedCount * 0.5) / planSteps.length) * 100) : 0
   return (
     <div className="page-shell work-mode">
       <Flex justify="space-between" align="center" wrap="wrap" gap={12} className="page-heading"><div><Title level={2}>{t('work.title')}</Title><Text type="secondary">{t('work.subtitle')}</Text></div><Badge status={plan?.status === 'approved' || plan?.status === 'in_progress' ? 'processing' : plan?.status === 'completed' ? 'success' : 'default'} text={plan ? (planStatusLabels[plan.status] || plan.status) : '尚未创建计划'} /></Flex>
@@ -1154,19 +1114,20 @@ function WorkModePage({ tasks, members, models, skills, mcpServers, workspaceRol
         <Select value={taskId} onChange={selectTask} disabled={executionRunning} title={executionRunning ? 'AI 执行期间不可切换任务' : undefined} className="project-selector" options={tasks.map((task) => ({ value: task.id, label: task.title }))} />
         <Card className="work-context" size="small"><Descriptions size="small" column={{ xs: 1, md: 3 }}><Descriptions.Item label="任务">{selectedTask?.title}</Descriptions.Item><Descriptions.Item label="发起人">{members.find((item) => item.user.id === selectedTask?.reporter_id)?.user.display_name || '-'}</Descriptions.Item><Descriptions.Item label="状态"><Tag>{taskStatusLabels[selectedTask?.status] || selectedTask?.status}</Tag></Descriptions.Item></Descriptions></Card>
         <Spin spinning={loading}>
-          {(plan?.status === 'approved' || plan?.status === 'in_progress' || plan?.status === 'completed') ? (
-            <Card className="plan-execution" title={t('work.card.approved')} extra={<Tag color={plan.status === 'completed' ? 'success' : 'processing'}>{planStatusLabels[plan.status] || plan.status}</Tag>}>
+          {((plan?.status === 'approved' || plan?.status === 'in_progress' || plan?.status === 'completed') && !revising) ? (
+            <Card className="plan-execution" title={t('work.card.approved')} extra={<Space size={6}><Tag color={plan.status === 'completed' ? 'success' : 'processing'}>{planStatusLabels[plan.status] || plan.status}</Tag>{canApprove && <Button size="small" icon={<EditOutlined />} disabled={executionRunning} title={executionRunning ? 'AI 执行期间不可修订计划' : undefined} onClick={() => setRevising(true)}>{t('work.btn.revisePlan')}</Button>}</Space>}>
               <Paragraph>{plan.objective || '尚未记录目标。'}</Paragraph>
               <Progress percent={progress} status={progress === 100 ? 'success' : 'active'} />
+              {executedCount > 0 && <Text type="secondary" className="plan-executed-hint">{executedCount} 步已执行待复核</Text>}
               <Steps direction="vertical" size="small" current={Math.min(plan.steps.findIndex((step) => step.status !== 'done'), Math.max(plan.steps.length - 1, 0))} items={plan.steps.map((step) => ({ title: <Flex justify="space-between" gap={8}><span>{step.title}</span><Select value={step.status} size="small" style={{ width: 124 }} disabled={!canUpdateStep(step)} onChange={(value) => updateStep(step, { status: value })} options={['pending', 'running', 'blocked', 'done'].map((value) => ({ value, label: stepStatusLabels[value] }))} /></Flex>, description: <Space direction="vertical" size={2}><Text type="secondary">{step.instructions || '暂无补充说明。'}</Text><Text type="secondary">负责人：{members.find((item) => item.user.id === step.assignee_id)?.user.display_name || '未分配'}</Text>{step.output_summary && <Text>执行证据：{step.output_summary}</Text>}{canUpdateStep(step) && <Button type="link" size="small" style={{ paddingInline: 0, width: 'fit-content' }} onClick={() => openEvidence(step)}>记录结果或证据</Button>}</Space>, status: step.status === 'done' ? 'finish' : step.status === 'blocked' ? 'error' : step.status === 'running' ? 'process' : 'wait' }))} />
             </Card>
           ) : (
-            <Card title={t('work.card.plan')} extra={plan && <Tag color="gold">草稿</Tag>}>
-              <Form form={form} layout="vertical" onFinish={savePlan}>
+            <Card title={t('work.card.plan')} extra={plan && <Tag color={plan.status === 'draft' ? 'gold' : 'processing'}>{planStatusLabels[plan.status] || plan.status}</Tag>}>
+              <Form form={form} layout="vertical" onFinish={submitPlan}>
                 <Form.Item label="选择可复用流程"><Select placeholder="选择交付、调研或故障响应流程" onChange={applyTemplate} disabled={!canWrite} options={planTemplates.map((item) => ({ value: item.value, label: item.label }))} /></Form.Item>
                 <Form.Item name="objective" label="目标" rules={[{ required: true, min: 4 }]}><Input.TextArea rows={3} placeholder="这项工作要交付什么结果？" disabled={!canWrite} /></Form.Item>
                 <Form.List name="steps">{(fields, { add, remove }) => <div className="plan-form-list"><Flex justify="space-between" align="center"><Text strong>执行步骤</Text>{canWrite && <Button size="small" icon={<PlusOutlined />} onClick={() => add({ title: '', instructions: '' })}>添加步骤</Button>}</Flex>{fields.map((field, index) => <Card size="small" key={field.key} className="plan-step-editor"><Flex gap={10} align="start"><Tag>{index + 1}</Tag><div className="plan-step-fields"><Form.Item name={[field.name, 'id']} hidden><Input /></Form.Item><Form.Item name={[field.name, 'title']} rules={[{ required: true, min: 2 }]}><Input placeholder="步骤标题" disabled={!canWrite} /></Form.Item><Form.Item name={[field.name, 'instructions']}><Input.TextArea rows={2} placeholder="预期工作、输入和验收证据" disabled={!canWrite} /></Form.Item><Form.Item name={[field.name, 'assignee_id']}><Select allowClear placeholder="负责人" disabled={!canWrite} options={members.map((item) => ({ value: item.user.id, label: item.user.display_name }))} /></Form.Item></div>{canWrite && <Button type="text" danger icon={<DeleteOutlined />} onClick={() => remove(field.name)} />}</Flex></Card>)}</div>}</Form.List>
-                <Flex justify="end" gap={8}><Button htmlType="submit" disabled={!canWrite}>{t('work.btn.saveDraft')}</Button>{canApprove && plan && <Button type="primary" icon={<CheckCircleOutlined />} onClick={approve}>{t('work.btn.approve')}</Button>}</Flex>
+                <Flex justify="end" gap={8}>{revising && <Button onClick={() => setRevising(false)}>取消修订</Button>}<Button htmlType="submit" disabled={!canWrite}>{autoApproves ? t('work.btn.saveAndApprove') : t('work.btn.saveDraft')}</Button>{canApprove && plan && !revising && <Button type="primary" icon={<CheckCircleOutlined />} onClick={approve}>{t('work.btn.approve')}</Button>}</Flex>
               </Form>
             </Card>
           )}
@@ -1174,6 +1135,21 @@ function WorkModePage({ tasks, members, models, skills, mcpServers, workspaceRol
         <TaskExecutionPanel taskId={taskId} plan={plan} models={models} skills={skills} mcpServers={mcpServers} canWrite={canWrite} onPlanRefresh={loadPlan} onRunningChange={setExecutionRunning} />
         <TaskResultsPanel taskId={taskId} canWrite={canWrite} members={members} refreshKey={plan?.updated_at || ''} />
       </>}
+      <Modal
+        title="修订已批准计划"
+        open={Boolean(reviseConfirm)}
+        onCancel={() => setReviseConfirm(null)}
+        onOk={confirmRevise}
+        okText="确认修订"
+        cancelText="取消"
+        destroyOnHidden
+      >
+        <Text>
+          {autoApproves
+            ? `当前档位为“${permissionModeLabels[workspace?.permission_mode] || '自动审批'}”，保存后计划会自动重新批准，直接回到可执行状态。`
+            : '保存后计划会回到草稿状态，需要重新批准才能执行；已完成的步骤记录会保留。'}
+        </Text>
+      </Modal>
       <Modal title="记录步骤结果" open={Boolean(evidenceStep)} onCancel={() => setEvidenceStep(null)} onOk={() => evidenceForm.submit()} okText="确认" cancelText="取消" destroyOnHidden>
         <Form form={evidenceForm} layout="vertical" onFinish={saveEvidence}><Form.Item name="output_summary" label="证据、决策或交接信息" rules={[{ required: true, min: 2 }]}><Input.TextArea rows={5} placeholder="完成了什么、哪些证据支持结果、下一步应做什么？" /></Form.Item></Form>
       </Modal>
@@ -1192,7 +1168,7 @@ function TeamPage({ workspace, members, workspaceRole, onRefresh }) {
   const removeMember = async (member) => {
     try { await apiFetch(`/api/v1/workspaces/${workspace.id}/members/${member.id}`, { method: 'DELETE' }); message.success('成员已移除'); onRefresh() } catch (error) { message.error(readableError(error)) }
   }
-  return <div className="page-shell"><Flex justify="space-between" align="center" wrap="wrap" gap={12} className="page-heading"><div><Title level={2}>团队成员</Title><Text type="secondary">成员归属工作区管理；管理员可添加已注册用户，并按最小权限原则分配角色。</Text></div>{manager && <Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>添加成员</Button>}</Flex><Card><List dataSource={members} renderItem={(member) => <List.Item actions={manager && member.role !== 'owner' ? [<Popconfirm key="remove" title="确认移除此成员？" onConfirm={() => removeMember(member)} okText="确认" cancelText="取消"><Button danger type="link">移除</Button></Popconfirm>] : []}><List.Item.Meta avatar={<Avatar icon={<UserOutlined />} />} title={<Space><Text strong>{member.user.display_name}</Text>{member.user.is_platform_admin && <Tag color="purple">平台管理员</Tag>}</Space>} description={member.user.email} /><Tag color={member.role === 'owner' ? 'gold' : member.role === 'admin' ? 'blue' : 'default'}>{roleLabels[member.role] || member.role}</Tag></List.Item>} /></Card><Modal title="添加已注册成员" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} okText="确认" cancelText="取消" destroyOnHidden><Form form={form} layout="vertical" onFinish={addMember} initialValues={{ role: 'member' }}><Form.Item name="email" label="邮箱" rules={[{ required: true, type: 'email' }]}><Input placeholder="对方需要先完成注册" /></Form.Item><Form.Item name="role" label="角色"><Select options={['admin', 'member', 'viewer'].map((value) => ({ value, label: roleLabels[value] }))} /></Form.Item></Form></Modal></div>
+  return <div className="page-shell"><Flex justify="space-between" align="center" wrap="wrap" gap={12} className="page-heading"><div><Title level={2}>{t('nav.team')}</Title><Text type="secondary">成员归属工作区管理；管理员可添加已注册用户，并按最小权限原则分配角色。</Text></div>{manager && <Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>添加成员</Button>}</Flex><Card><List dataSource={members} renderItem={(member) => <List.Item actions={manager && member.role !== 'owner' ? [<Popconfirm key="remove" title="确认移除此成员？" onConfirm={() => removeMember(member)} okText="确认" cancelText="取消"><Button danger type="link">移除</Button></Popconfirm>] : []}><List.Item.Meta avatar={<Avatar icon={<UserOutlined />} />} title={<Space><Text strong>{member.user.display_name}</Text>{member.user.is_platform_admin && <Tag color="purple">平台管理员</Tag>}</Space>} description={member.user.email} /><Tag color={member.role === 'owner' ? 'gold' : member.role === 'admin' ? 'blue' : 'default'}>{roleLabels[member.role] || member.role}</Tag></List.Item>} /></Card><Modal title="添加已注册成员" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} okText="确认" cancelText="取消" destroyOnHidden><Form form={form} layout="vertical" onFinish={addMember} initialValues={{ role: 'member' }}><Form.Item name="email" label="邮箱" rules={[{ required: true, type: 'email' }]}><Input placeholder="对方需要先完成注册" /></Form.Item><Form.Item name="role" label="角色"><Select options={['admin', 'member', 'viewer'].map((value) => ({ value, label: roleLabels[value] }))} /></Form.Item></Form></Modal></div>
 }
 
 function WorkspaceUsageCard() {
@@ -1444,7 +1420,8 @@ function WorkspaceSettingsPage({ workspace, members, workspaceRole, onRefresh, o
 }
 
 function WorkspaceApp({ session, onLogout }) {
-  const { message } = AntApp.useApp()
+  // 侧边栏的会话列表需要 modal 做归档/删除确认，不能只取 message。
+  const { message, modal } = AntApp.useApp()
   const screens = Grid.useBreakpoint()
   const [profile, setProfile] = useState(session?.user || null)
   const [workspaces, setWorkspaces] = useState(session?.workspaces || [])
@@ -1491,6 +1468,9 @@ function WorkspaceApp({ session, onLogout }) {
   currentConversationIdRef.current = activeConversationId
   const workspace = workspaces.find((item) => item.id === workspaceId) || workspaces[0]
   const activeConversation = conversations.find((item) => item.id === activeConversationId)
+  // 写权限判定提到这一层：侧边栏的“新建对话”与权限档位都需要它。
+  // 各页面原先各自算一遍，口径一致但容易遗漏（只读成员不能发起 AI 工作）。
+  const canWrite = workspace?.role !== 'viewer'
   const canProbeMcp = ['owner', 'admin'].includes(workspace?.role)
 
   const clearWorkspaceData = useCallback(() => {
@@ -1682,21 +1662,59 @@ function WorkspaceApp({ session, onLogout }) {
     setGlobalQuery('')
     setSearchResults([])
   }
-  const sideMenu = <Menu theme="dark" mode="inline" selectedKeys={[nav]} onClick={({ key }) => { setNav(key); setMobileNav(false) }} items={buildNavigationItems()} />
+  // 导航不再用 Menu：它与对话列表共享一条侧边栏，需要更紧凑的行高
+  // 与非选中态的弱化样式。“AI 对话”不单独列项——对话列表本身就是入口。
+  const sidebarNav = (
+    <nav className="sidebar-nav" aria-label="工作区视图">
+      {buildNavigationItems().filter((item) => item.key !== 'chat').map((item) => (
+        <button
+          key={item.key}
+          type="button"
+          className={`sidebar-nav-item${nav === item.key ? ' is-active' : ''}`}
+          onClick={() => { setNav(item.key); setMobileNav(false) }}
+          aria-current={nav === item.key ? 'page' : undefined}
+        >
+          <span className="sidebar-nav-icon">{item.icon}</span>
+          <span className="sidebar-nav-label">{item.label}</span>
+        </button>
+      ))}
+    </nav>
+  )
   const layoutSider = <>
-    <div className="workspace-brand"><Avatar icon={<RobotOutlined />} className="brand-avatar" /><div><strong>futureAgent</strong><span>团队 AI 工作空间</span></div></div>
-    <Text className="workspace-switcher-label">当前工作区</Text>
-    <Select value={workspaceId || undefined} onChange={selectWorkspace} className="workspace-select" placeholder="选择工作区" options={workspaces.map((item) => ({ value: item.id, label: item.name }))} />
-    {sideMenu}
-    <div className="sider-bottom"><span className="sider-status-dot" /><Text>{workspace?.name || '尚未选择工作区'}</Text><Tag color={workspace?.role === 'owner' ? 'gold' : 'blue'}>{roleLabels[workspace?.role] || '成员'}</Tag></div>
+    <button type="button" className="workspace-brand" onClick={() => { setNav('chat'); setMobileNav(false) }} title="回到对话工作台">
+      <Avatar icon={<RobotOutlined />} className="brand-avatar" />
+      <span className="workspace-brand-copy"><strong>futureAgent</strong><small>{t('app.tagline')}</small></span>
+    </button>
+    <SidebarConversations
+      conversations={conversations}
+      activeConversationId={activeConversation?.id}
+      canWrite={canWrite}
+      isCurrentView={nav === 'chat'}
+      messageApi={message}
+      modal={modal}
+      onRefresh={refreshWorkspace}
+      onCreate={() => { setNav('chat'); setMobileNav(false); newConversation() }}
+      onSelect={(conversationId) => { setNav('chat'); setMobileNav(false); selectConversation(conversationId) }}
+    />
+    {sidebarNav}
+    <div className="sidebar-footer">
+      <Select value={workspaceId || undefined} onChange={selectWorkspace} className="sidebar-workspace-select" size="small" placeholder="选择工作区" aria-label="切换工作区" options={workspaces.map((item) => ({ value: item.id, label: item.name }))} />
+      <PermissionModeChip workspace={workspace} canWrite={canWrite} onUpdated={patchWorkspace} messageApi={message} />
+      <Flex align="center" justify="space-between" gap={8} className="sidebar-account-row">
+        <Tag color={workspace?.role === 'owner' ? 'gold' : 'blue'}>{roleLabels[workspace?.role] || '成员'}</Tag>
+        <Dropdown menu={{ items: [{ key: 'profile', label: profile?.email, disabled: true }, { type: 'divider' }, { key: 'logout', icon: <LogoutOutlined />, label: '退出登录', onClick: onLogout }] }}>
+          <Button type="text" size="small" className="sidebar-account" aria-label={'账号菜单：' + (profile?.display_name || '当前用户')}><Avatar size={20} icon={<UserOutlined />} /><span>{profile?.display_name}</span></Button>
+        </Dropdown>
+      </Flex>
+    </div>
   </>
 
   let content
-  if (nav === 'chat') content = <ChatPage conversations={conversations} activeConversation={activeConversation} messages={messages} models={models} skills={skills} mcpServers={mcpServers} hasMoreMessages={hasMoreMessages} onLoadMoreMessages={loadOlderMessages} onNewConversation={newConversation} onSelectConversation={selectConversation} onRefresh={refreshWorkspace} onRefreshMessages={loadConversationMessages} workspaceRole={workspace?.role} />
+  if (nav === 'chat') content = <ChatPage activeConversation={activeConversation} messages={messages} models={models} skills={skills} mcpServers={mcpServers} hasMoreMessages={hasMoreMessages} onLoadMoreMessages={loadOlderMessages} onRefreshMessages={loadConversationMessages} workspaceRole={workspace?.role} />
   else if (nav === 'business') content = <BusinessAssistantsPage workspaceRole={workspace?.role} members={members} currentUserId={profile?.id} />
   else if (nav === 'report') content = <ReportAssistantsPage workspaceRole={workspace?.role} members={members} currentUserId={profile?.id} />
   else if (nav === 'board') content = <BoardPage projects={projects} tasks={tasks} members={members} onRefresh={refreshWorkspace} openTask={(task) => setTaskDrawer(task)} workspaceRole={workspace?.role} />
-  else if (nav === 'work') content = <WorkModePage tasks={tasks} members={members} models={models} skills={skills} mcpServers={mcpServers} workspaceRole={workspace?.role} profile={profile} onRefresh={refreshWorkspace} onOpenBoard={() => setNav('board')} />
+  else if (nav === 'work') content = <WorkModePage tasks={tasks} members={members} models={models} skills={skills} mcpServers={mcpServers} workspaceRole={workspace?.role} profile={profile} workspace={workspace} onRefresh={refreshWorkspace} onOpenBoard={() => setNav('board')} />
   else if (nav === 'team') content = <TeamPage workspace={workspace} members={members} workspaceRole={workspace?.role} onRefresh={refreshWorkspace} />
   else if (nav === 'settings') content = <WorkspaceSettingsPage workspace={workspace} members={members} workspaceRole={workspace?.role} onRefresh={refreshWorkspace} onWorkspaceUpdated={patchWorkspace} />
 
@@ -1729,7 +1747,7 @@ function WorkspaceApp({ session, onLogout }) {
   return (
     <Layout className="workspace-layout">
       {screens.lg ? (
-        <Sider width={248} theme="dark" className="workspace-sider">{layoutSider}</Sider>
+        <Sider width={272} theme="dark" className="workspace-sider">{layoutSider}</Sider>
       ) : (
         <Drawer placement="left" open={mobileNav} onClose={() => setMobileNav(false)} width={280} rootClassName="mobile-workspace-drawer" styles={{ body: { padding: 0, background: '#111827' } }}>{layoutSider}</Drawer>
       )}
@@ -1737,14 +1755,19 @@ function WorkspaceApp({ session, onLogout }) {
         <Header className="workspace-header">
           <Flex align="center" gap={10} style={{ minWidth: 0 }}>
             {!screens.lg && <Button type="text" icon={<MenuOutlined />} onClick={() => setMobileNav(true)} aria-label="打开主导航" />}
-            <div className="header-context"><Text strong>{navigationLabels()[nav] || navigationLabels().chat}</Text><Text type="secondary">{workspace?.name || '团队工作区'}</Text></div>
+            {/* 顶栏只做上下文展示，不再承载任何业务选择器。 */}
+            <div className="header-context">
+              <Text type="secondary">{workspace?.name || '团队工作区'}</Text>
+              <span className="header-context-sep" aria-hidden="true">/</span>
+              <Text strong>
+                {nav === 'chat'
+                  ? (activeConversation?.title || '新对话')
+                  : (navigationLabels()[nav] || navigationLabels().chat)}
+              </Text>
+            </div>
           </Flex>
           <Space size={6}>
-            <Tooltip title="通知中心">
-              <Badge count={unreadCount} size="small" offset={[-3, 3]}>
-                <Button type="text" icon={<BellOutlined />} onClick={() => { setNotificationOpen(true); loadNotifications() }} aria-label="通知中心" />
-              </Badge>
-            </Tooltip>
+            {/* 宽元素靠左、紧凑图标动作靠右，避开面包屑与按钮交错。 */}
             <AutoComplete
               className="global-search"
               value={globalQuery}
@@ -1756,14 +1779,13 @@ function WorkspaceApp({ session, onLogout }) {
             >
               <Input allowClear prefix={<SearchOutlined />} placeholder="搜索任务、对话、消息或文件" />
             </AutoComplete>
-            <Badge className="workspace-health" status={refreshing ? 'processing' : 'success'} text={refreshing ? t('common.syncing') : t('common.connected')} />
-            <Tooltip title={getLocale() === 'en' ? '切换到中文' : 'Switch to English'}>
-              <Button
-                type="text"
-                icon={<GlobalOutlined />}
-                onClick={() => { toggleLocale(); setThemeTick((tick) => tick + 1) }}
-                aria-label="切换语言 / Switch language"
-              />
+            <Tooltip title="通知中心">
+              <Badge count={unreadCount} size="small" offset={[-3, 3]}>
+                <Button type="text" icon={<BellOutlined />} onClick={() => { setNotificationOpen(true); loadNotifications() }} aria-label="通知中心" />
+              </Badge>
+            </Tooltip>
+            <Tooltip title={refreshing ? t('common.syncing') : t('common.connected')}>
+              <Button type="text" icon={<ReloadOutlined spin={refreshing} />} onClick={refreshWorkspace} disabled={refreshing || loading} aria-label={t('common.refresh')} />
             </Tooltip>
             <Tooltip title={getThemeMode() === 'dark' ? '切换到浅色' : '切换到深色'}>
               <Button
@@ -1773,10 +1795,6 @@ function WorkspaceApp({ session, onLogout }) {
                 aria-label="切换深浅色主题"
               />
             </Tooltip>
-            <Tooltip title="刷新工作区"><Button type="text" icon={<ReloadOutlined spin={refreshing} />} onClick={refreshWorkspace} disabled={refreshing || loading} aria-label="刷新工作区" /></Tooltip>
-            <Dropdown menu={{ items: [{ key: 'profile', label: profile?.email, disabled: true }, { type: 'divider' }, { key: 'logout', icon: <LogoutOutlined />, label: '退出登录', onClick: onLogout }] }}>
-              <Button type="text" className="profile-button" aria-label={`账号菜单：${profile?.display_name || '当前用户'}`}><Avatar size="small" icon={<UserOutlined />} /><span>{profile?.display_name}</span></Button>
-            </Dropdown>
           </Space>
         </Header>
         <Content className="workspace-content">{workspaceContent}</Content>
@@ -1836,21 +1854,17 @@ export default function App() {
 
 export function Root() {
   const [themeMode, setThemeMode] = useState(getThemeMode)
-  const [locale, setLocale] = useState(getLocale)
   useEffect(() => {
     applyThemeMode(getThemeMode())
+    // 语言已锁定中文：顺手清掉旧版本可能存下的 en，免得残留状态
+    // 让后来的人误以为语言切换仍然生效。
+    applyLocale()
     const themeListener = (event) => setThemeMode(event.detail || getThemeMode())
     window.addEventListener('futureagent-theme', themeListener)
-    const localeListener = (event) => setLocale(event.detail || getLocale())
-    window.addEventListener('futureagent-locale', localeListener)
-    return () => {
-      window.removeEventListener('futureagent-theme', themeListener)
-      window.removeEventListener('futureagent-locale', localeListener)
-    }
+    return () => window.removeEventListener('futureagent-theme', themeListener)
   }, [])
   const isDark = themeMode === 'dark'
-  const isEn = locale === 'en'
-  return <ConfigProvider locale={antdLocaleOf(locale)} theme={{
+  return <ConfigProvider locale={antdLocaleOf()} theme={{
     algorithm: isDark ? theme.darkAlgorithm : theme.defaultAlgorithm,
     token: {
       colorPrimary: '#4f5fd5',
@@ -1871,7 +1885,6 @@ export function Root() {
     components: {
       Button: { primaryShadow: '0 6px 16px rgba(79, 95, 213, .22)', fontWeight: 500 },
       Card: { headerFontSize: 15 },
-      Menu: { darkItemBg: '#101624', darkItemSelectedBg: '#4f5fd5' },
     },
   }}><AntApp><App /></AntApp></ConfigProvider>
 }
