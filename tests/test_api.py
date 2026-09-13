@@ -88,7 +88,7 @@ class ProductApiTests(unittest.TestCase):
         forged = self.client.post(
             "/api/v1/chat/completions",
             headers=self.auth_headers(self.owner_token, self.owner_workspace),
-            json={"query": "hello", "model_id": "gpt-4o", "user_role": "admin"},
+            json={"query": "hello", "model_id": "glm-5.3-flash", "user_role": "admin"},
         )
         self.assertEqual(forged.status_code, 422)
 
@@ -116,7 +116,7 @@ class ProductApiTests(unittest.TestCase):
         conversation = self.client.post(
             "/api/v1/conversations",
             headers=headers,
-            json={"title": "Tool trace", "model_id": "gpt-4o-mini"},
+            json={"title": "Tool trace", "model_id": "glm-5.3-flash"},
         )
         conversation_id = conversation.json()["conversation"]["id"]
 
@@ -156,7 +156,7 @@ class ProductApiTests(unittest.TestCase):
                 headers=headers,
                 json={
                     "query": "Search and answer",
-                    "model_id": "gpt-4o-mini",
+                    "model_id": "glm-5.3-flash",
                     "skill_name": "default",
                     "conversation_id": conversation_id,
                     "mcp_servers": ["web_tools"],
@@ -293,7 +293,7 @@ class ProductApiTests(unittest.TestCase):
         conversation = self.client.post(
             "/api/v1/conversations",
             headers=headers,
-            json={"title": "Launch research", "model_id": "gpt-4o-mini"},
+            json={"title": "Launch research", "model_id": "glm-5.3-flash"},
         )
         self.assertEqual(conversation.status_code, 201, conversation.text)
         conversation_id = conversation.json()["conversation"]["id"]
@@ -394,7 +394,7 @@ class ProductApiTests(unittest.TestCase):
         conversation = self.client.post(
             "/api/v1/conversations",
             headers=owner_headers,
-            json={"title": "Owner-only research", "model_id": "gpt-4o-mini"},
+            json={"title": "Owner-only research", "model_id": "glm-5.3-flash"},
         )
         conversation_id = conversation.json()["conversation"]["id"]
         uploaded = self.client.post(
@@ -430,7 +430,7 @@ class ProductApiTests(unittest.TestCase):
         )
 
     def test_model_unavailability_is_reported_before_sse_starts(self):
-        # 断言前提是 gpt-4o-mini 没有任何可用凭据；开发者本机 .env 可能为
+        # 断言前提是 glm-5.3-flash 没有任何可用凭据；开发者本机 .env 可能为
         # 真实联调填了 key，不隔离的话结果会随 .env 漂移。显式清空凭据后，
         # 验证的仍是同一件事：没有可用路由时必须在 SSE 开流前拒绝。
         with (
@@ -440,7 +440,7 @@ class ProductApiTests(unittest.TestCase):
             response = self.client.post(
                 "/api/v1/chat/completions",
                 headers=self.auth_headers(self.owner_token, self.owner_workspace),
-                json={"query": "Verify the preflight", "model_id": "gpt-4o-mini"},
+                json={"query": "Verify the preflight", "model_id": "glm-5.3-flash"},
             )
         self.assertEqual(response.status_code, 503, response.text)
 
@@ -449,7 +449,7 @@ class ProductApiTests(unittest.TestCase):
         conversation = self.client.post(
             "/api/v1/conversations",
             headers=owner_headers,
-            json={"title": "Sanitized provider failure", "model_id": "gpt-4o-mini"},
+            json={"title": "Sanitized provider failure", "model_id": "glm-5.3-flash"},
         )
         self.assertEqual(conversation.status_code, 201, conversation.text)
         conversation_id = conversation.json()["conversation"]["id"]
@@ -468,7 +468,7 @@ class ProductApiTests(unittest.TestCase):
                 headers=owner_headers,
                 json={
                     "query": "Trigger a sanitized provider failure",
-                    "model_id": "gpt-4o-mini",
+                    "model_id": "glm-5.3-flash",
                     "conversation_id": conversation_id,
                 },
             )
@@ -514,6 +514,35 @@ class ProductApiTests(unittest.TestCase):
         self.assertFalse(detail["ready"])
         self.assertEqual(chat.status_code, 503, chat.text)
         self.assertIn("不可达", chat.json()["detail"])
+
+    def test_models_payload_exposes_profile_capabilities_and_default(self):
+        """模型选择器要显示能力徽标，数据必须来自服务端而不是前端猜。"""
+        headers = self.auth_headers(self.owner_token, self.owner_workspace)
+        profiles = (
+            '[{"id":"glm-5.3-flash","name":"glm-5.3-flash","url":"https://relay.example.test/v1",'
+            '"toolCalling":true,"vision":true,"maxInputTokens":1000000,"maxOutputTokens":128000}]'
+        )
+        with (
+            patch.object(settings, "model_profiles_json", profiles),
+            patch.object(settings, "extra_model_ids_csv", "glm-5.3-flash"),
+            patch.object(settings, "openai_api_key", "sk-real-relay-key"),
+            patch.object(settings, "openai_base_url", "https://relay.example.test/v1"),
+        ):
+            response = self.client.get("/api/v1/models", headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["default_model"], settings.default_model)
+        detail = next(item for item in body["details"] if item["id"] == "glm-5.3-flash")
+        self.assertTrue(detail["tool_calling"])
+        self.assertTrue(detail["vision"])
+        self.assertEqual(detail["max_input_tokens"], 1_000_000)
+        self.assertEqual(detail["max_output_tokens"], 128_000)
+        self.assertEqual(detail["base_url"], "https://relay.example.test/v1")
+        # 未登记档案的模型给出保守默认值：不谎报视觉能力与上下文长度。
+        other = next(item for item in body["details"] if item["id"] == "ollama/llama3")
+        self.assertFalse(other["vision"])
+        self.assertEqual(other["max_input_tokens"], 0)
+        self.assertTrue(other["tool_calling"])
 
     def test_settings_separate_provider_configuration_from_runtime_availability(self):
         from core.model_hub import ModelHub
@@ -572,7 +601,7 @@ class ProductApiTests(unittest.TestCase):
             patch("api.routes.ModelHub.generate", fake_generate),
         ):
             result = self.client.post(
-                "/api/v1/models/gpt-4o-mini/probe",
+                "/api/v1/models/glm-5.3-flash/probe",
                 headers=self.auth_headers(self.owner_token, self.owner_workspace),
             )
         self.assertEqual(result.status_code, 200, result.text)
@@ -927,7 +956,7 @@ class ProductApiTests(unittest.TestCase):
         goal_missing = self.client.post(
             "/api/v1/chat/agent",
             headers=owner_headers,
-            json={"query": "x", "model_id": "gpt-4o-mini", "skill_name": "default", "mode": "goal"},
+            json={"query": "x", "model_id": "glm-5.3-flash", "skill_name": "default", "mode": "goal"},
         )
         self.assertEqual(goal_missing.status_code, 422, goal_missing.text)
         self.assertIn("目标", goal_missing.json()["detail"])
@@ -935,7 +964,7 @@ class ProductApiTests(unittest.TestCase):
         loop_missing = self.client.post(
             "/api/v1/chat/agent",
             headers=owner_headers,
-            json={"query": "x", "model_id": "gpt-4o-mini", "skill_name": "default", "mode": "loop"},
+            json={"query": "x", "model_id": "glm-5.3-flash", "skill_name": "default", "mode": "loop"},
         )
         self.assertEqual(loop_missing.status_code, 422, loop_missing.text)
         self.assertIn("停止条件", loop_missing.json()["detail"])
@@ -943,7 +972,7 @@ class ProductApiTests(unittest.TestCase):
         unknown_mode = self.client.post(
             "/api/v1/chat/agent",
             headers=owner_headers,
-            json={"query": "x", "model_id": "gpt-4o-mini", "skill_name": "default", "mode": "turbo"},
+            json={"query": "x", "model_id": "glm-5.3-flash", "skill_name": "default", "mode": "turbo"},
         )
         self.assertEqual(unknown_mode.status_code, 422, unknown_mode.text)
 
@@ -1003,7 +1032,7 @@ class ProductApiTests(unittest.TestCase):
                 f"/api/v1/tasks/{task_id}/execute",
                 headers=owner_headers,
                 json={
-                    "model_id": "gpt-4o-mini",
+                    "model_id": "glm-5.3-flash",
                     "skill_name": "default",
                     "step_id": step_id,
                     "mode": "goal",
@@ -1080,7 +1109,7 @@ class ProductApiTests(unittest.TestCase):
             response = self.client.post(
                 f"/api/v1/tasks/{task_id}/execute",
                 headers=owner_headers,
-                json={"model_id": "gpt-4o-mini", "skill_name": "default", "step_id": executed_step_id, "mode": "agent"},
+                json={"model_id": "glm-5.3-flash", "skill_name": "default", "step_id": executed_step_id, "mode": "agent"},
             )
         self.assertEqual(response.status_code, 200, response.text)
 
@@ -1153,7 +1182,7 @@ class ProductApiTests(unittest.TestCase):
             response = self.client.post(
                 f"/api/v1/tasks/{task_id}/execute",
                 headers=owner_headers,
-                json={"model_id": "gpt-4o-mini", "skill_name": "default", "step_id": step_id},
+                json={"model_id": "glm-5.3-flash", "skill_name": "default", "step_id": step_id},
             )
         self.assertEqual(response.status_code, 200, response.text)
 
@@ -1191,7 +1220,7 @@ class ProductApiTests(unittest.TestCase):
         conversation = self.client.post(
             "/api/v1/conversations",
             headers=headers,
-            json={"title": "Message context", "model_id": "gpt-4o-mini"},
+            json={"title": "Message context", "model_id": "glm-5.3-flash"},
         )
         self.assertEqual(conversation.status_code, 201, conversation.text)
         conversation_id = conversation.json()["conversation"]["id"]
@@ -1232,7 +1261,7 @@ class ProductApiTests(unittest.TestCase):
                 headers=headers,
                 json={
                     "query": "推进目标",
-                    "model_id": "gpt-4o-mini",
+                    "model_id": "glm-5.3-flash",
                     "skill_name": "default",
                     "conversation_id": conversation_id,
                     "mode": "goal",
@@ -1323,7 +1352,7 @@ class ProductApiTests(unittest.TestCase):
             response = self.client.post(
                 f"/api/v1/tasks/{task_id}/execute",
                 headers=owner_headers,
-                json={"model_id": "gpt-4o-mini", "skill_name": "default", "step_id": step_id, "mcp_servers": [], "idempotency_key": "release-note-first-run"},
+                json={"model_id": "glm-5.3-flash", "skill_name": "default", "step_id": step_id, "mcp_servers": [], "idempotency_key": "release-note-first-run"},
             )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertIn("event: done", response.text)
@@ -1362,7 +1391,7 @@ class ProductApiTests(unittest.TestCase):
                 plan_id=approved.json()["plan"]["id"],
                 step_id=step_id,
                 requested_by=self.owner_id,
-                model_id="gpt-4o-mini",
+                model_id="glm-5.3-flash",
                 skill_name="default",
                 mcp_servers_json='["web_tools"]',
                 tool_trace_json='[{"name":"fetch_url","tool_call_id":"parent-call","status":"error","result_preview":"provider unavailable"}]',
@@ -1381,12 +1410,12 @@ class ProductApiTests(unittest.TestCase):
             duplicate = self.client.post(
                 f"/api/v1/tasks/{task_id}/execute",
                 headers=owner_headers,
-                json={"model_id": "gpt-4o-mini", "skill_name": "default", "step_id": step_id, "idempotency_key": "release-note-first-run"},
+                json={"model_id": "glm-5.3-flash", "skill_name": "default", "step_id": step_id, "idempotency_key": "release-note-first-run"},
             )
             retry = self.client.post(
                 f"/api/v1/tasks/{task_id}/execute",
                 headers=owner_headers,
-                json={"model_id": "gpt-4o-mini", "skill_name": "default", "step_id": step_id, "mcp_servers": ["web_tools"], "retry_of_id": retry_parent_id, "idempotency_key": "release-note-retry-run"},
+                json={"model_id": "glm-5.3-flash", "skill_name": "default", "step_id": step_id, "mcp_servers": ["web_tools"], "retry_of_id": retry_parent_id, "idempotency_key": "release-note-retry-run"},
             )
         self.assertEqual(duplicate.status_code, 409, duplicate.text)
         self.assertEqual(retry.status_code, 200, retry.text)
@@ -1404,7 +1433,7 @@ class ProductApiTests(unittest.TestCase):
                 plan_id=approved.json()["plan"]["id"],
                 step_id=step_id,
                 requested_by=self.owner_id,
-                model_id="gpt-4o-mini",
+                model_id="glm-5.3-flash",
                 skill_name="default",
                 mcp_servers_json='["web_tools"]',
                 tool_trace_json='[{"name":"fetch_url","tool_call_id":"cancelled-call","status":"success","result_preview":"saved before cancellation"}]',

@@ -22,7 +22,7 @@ except ImportError:
 class ModelHub:
     """
     利用 LiteLLM 统一了不同模型的调用方式
-    model_id 例如: "gpt-4o", "claude-3-5-sonnet", "ollama/llama3", "LongCat-2.0"
+    model_id 例如: "glm-5.3-flash", "claude-3-5-sonnet", "ollama/llama3", "LongCat-2.0"
     """
 
     _ollama_models_cache: dict[str, tuple[float, set[str] | None]] = {}
@@ -197,8 +197,15 @@ class ModelHub:
         if cls._is_extra_model(model_id) or model_lower.startswith(("gpt-", "openai/")):
             if not cls._is_usable_credential(settings.openai_api_key):
                 return None
-            return settings.openai_base_url, settings.openai_api_key
+            # 模型档案里单独给了端点时以档案为准（同一把密钥接多个中转站）。
+            profile_url = (cls.model_profile(model_id) or {}).get("url") or ""
+            return (profile_url or settings.openai_base_url), settings.openai_api_key
         return None
+
+    @staticmethod
+    def model_profile(model_id: str) -> dict | None:
+        """取该模型在 MODEL_PROFILES_JSON 里的档案，没有则返回 None。"""
+        return settings.model_profiles.get(model_id)
 
     @staticmethod
     def _proxy_base_url() -> str:
@@ -218,15 +225,16 @@ class ModelHub:
     @classmethod
     def _provider_kwargs(cls, model_id: str) -> dict:
         model_lower = model_id.lower()
+        profile_url = (cls.model_profile(model_id) or {}).get("url") or ""
         if model_lower.startswith("ollama/"):
             return {"api_base": settings.ollama_base_url}
-        if model_lower.startswith(("gpt-", "openai/")) and settings.openai_base_url:
-            return {"api_base": settings.openai_base_url}
+        if model_lower.startswith(("gpt-", "openai/")) and (profile_url or settings.openai_base_url):
+            return {"api_base": profile_url or settings.openai_base_url}
         if model_lower.startswith("longcat") and settings.longcat_api_key:
             return {"api_base": settings.longcat_api_base, "api_key": settings.longcat_api_key}
         if cls._is_extra_model(model_id):
             return {
-                "api_base": settings.openai_base_url,
+                "api_base": profile_url or settings.openai_base_url,
                 "api_key": settings.openai_api_key,
             }
         return {}
@@ -268,25 +276,48 @@ class ModelHub:
         )
 
     @classmethod
+    def is_provider_configured(cls, provider: str) -> bool:
+        """供应商级别的凭据可用性，与具体模型无关。
+
+        产品不再内置任何 OpenAI 模型后，再借某个模型 id 去推断"这家供应商配好
+        了吗"只会让调用点依赖一个已经下架的字符串。管理端的供应商状态用这个
+        方法；面向单个模型的问题用 :meth:`is_direct_provider_configured`。
+        """
+        provider = (provider or "").strip().lower()
+        if provider == "openai":
+            return cls._is_usable_credential(settings.openai_api_key)
+        if provider == "anthropic":
+            return cls._is_usable_credential(settings.anthropic_api_key)
+        if provider == "google":
+            return cls._is_usable_credential(settings.google_api_key)
+        if provider == "longcat":
+            return cls._is_usable_credential(settings.longcat_api_key)
+        if provider == "ollama":
+            return bool(settings.ollama_base_url.strip())
+        return False
+
+    @classmethod
     def is_direct_provider_configured(cls, model_id: str) -> bool:
         """Return whether the API itself has a usable direct provider route."""
         model_lower = model_id.lower()
         if model_lower.startswith(("gpt-", "openai/")):
-            return cls._is_usable_credential(settings.openai_api_key)
+            return cls.is_provider_configured("openai")
         if model_lower.startswith("claude"):
-            return cls._is_usable_credential(settings.anthropic_api_key)
+            return cls.is_provider_configured("anthropic")
         if model_lower.startswith(("gemini/", "gemini-")):
-            return cls._is_usable_credential(settings.google_api_key)
+            return cls.is_provider_configured("google")
         if model_lower.startswith("ollama/"):
-            return bool(settings.ollama_base_url.strip())
+            return cls.is_provider_configured("ollama")
         if model_lower.startswith("longcat"):
-            return cls._is_usable_credential(settings.longcat_api_key)
+            return cls.is_provider_configured("longcat")
         if cls._is_extra_model(model_id):
             # 配置式模型走 OpenAI 兼容端点：密钥与地址缺一不可，
             # 否则会把请求默认发到 api.openai.com 并泄露密钥。
-            return cls._is_usable_credential(
-                settings.openai_api_key
-            ) and bool(settings.openai_base_url.strip())
+            # 地址可以来自全局 OPENAI_BASE_URL，也可以来自该模型的档案。
+            has_base = bool(settings.openai_base_url.strip()) or bool(
+                (cls.model_profile(model_id) or {}).get("url")
+            )
+            return cls.is_provider_configured("openai") and has_base
         return False
 
     @classmethod
@@ -386,11 +417,14 @@ class ModelHub:
 
     @staticmethod
     def list_supported_models() -> list[str]:
-        """列出内置模型与配置式接入的额外模型。"""
+        """列出内置模型与配置式接入的额外模型。
+
+        刻意不再内置任何 OpenAI GPT 模型：本产品面向自建/中转端点部署，而这些
+        端点上 gpt-* 基本已经下线，调用直接 404；同时"配了 OPENAI_API_KEY"又会让
+        它们显示成就绪，是最容易误选的一类。确需 GPT 的部署在
+        `EXTRA_MODEL_IDS_CSV` 里显式加回来即可。
+        """
         builtin = [
-            "gpt-4o",
-            "gpt-4o-mini",
-            "gpt-3.5-turbo",
             "claude-3-5-sonnet-20241022",
             "claude-3-haiku-20240307",
             "ollama/llama3",
@@ -400,4 +434,26 @@ class ModelHub:
             "LongCat-2.0",
         ]
         # 去重但保留顺序：配置里重复列出内置模型时不应出现两次。
-        return builtin + [m for m in settings.extra_model_ids if m not in builtin]
+        # 模型档案与部署默认模型都并入列表，否则前端会拿到一个选不中的默认值。
+        candidates = list(builtin) + list(settings.extra_model_ids)
+        candidates.extend(settings.model_profiles.keys())
+        candidates.append(str(getattr(settings, "default_model", "") or "").strip())
+        ordered: list[str] = []
+        for model_id in candidates:
+            if model_id and model_id not in ordered:
+                ordered.append(model_id)
+        return ordered
+
+    @staticmethod
+    def default_model() -> str:
+        """部署级默认模型。
+
+        内置模型按注册顺序排列，与部署实际配置的 DEFAULT_MODEL 无关；客户端
+        若拿列表首项当默认值，就会选到一个未必在本部署路由里可用的模型。
+        这里给出权威默认值，客户端优先采用。
+        """
+        configured = str(getattr(settings, "default_model", "") or "").strip()
+        if configured:
+            return configured
+        supported = ModelHub.list_supported_models()
+        return supported[0] if supported else ""

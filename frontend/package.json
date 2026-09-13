@@ -8,7 +8,10 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "e2e": "node e2e/smoke.mjs"
+    "e2e": "node e2e/click-flow.mjs",
+    "e2e:smoke": "node e2e/smoke.mjs",
+    "e2e:audit": "node e2e/audit-studio.mjs && node e2e/audit-reduced-motion.mjs && node e2e/audit-select.mjs && node e2e/audit-dropdowns.mjs && node e2e/audit-scrollbar.mjs && node e2e/audit-narrow.mjs",
+    "e2e:login": "node e2e/screenshot-login.mjs"
   },
   "dependencies": {
     "@ant-design/icons": "^5.5.0",

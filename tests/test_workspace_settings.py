@@ -107,6 +107,86 @@ class WorkspaceSettingsTests(unittest.TestCase):
         )
         self.assertEqual(deleted.status_code, 200, deleted.text)
 
+    def test_c_workspace_preferences_round_trip(self):
+        """设置面板的开关必须真的落库并原样读回。"""
+        initial = self.client.get(
+            f"/api/v1/workspaces/{self.workspace_id}/preferences",
+            headers=self.headers(),
+        )
+        self.assertEqual(initial.status_code, 200, initial.text)
+        # 未设置过的工作区拿到的是完整默认值，而不是缺字段的空对象。
+        self.assertEqual(initial.json()["preferences"]["automation_permission_mode"], "default")
+        self.assertTrue(initial.json()["preferences"]["memory_enabled"])
+        self.assertEqual(initial.json()["preferences"]["rules"], [])
+
+        payload = {
+            "automation_permission_mode": "auto_approve",
+            "memory_enabled": False,
+            "include_agents_md": False,
+            "include_claude_md": True,
+            "rules": ["先给结论再给理由", "  ", "不要编造数据"],
+            "browser": {
+                "allow_internal": True,
+                "allow_external": True,
+                "default_target": "external",
+                "auto_screenshot": False,
+                "data_cleared_at": "2026-09-13T00:00:00Z",
+            },
+            "installed_plugins": ["local_tools"],
+        }
+        saved = self.client.put(
+            f"/api/v1/workspaces/{self.workspace_id}/preferences",
+            json=payload,
+            headers=self.headers(),
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        stored = saved.json()["preferences"]
+        self.assertEqual(stored["automation_permission_mode"], "auto_approve")
+        self.assertFalse(stored["memory_enabled"])
+        self.assertFalse(stored["include_agents_md"])
+        # 空白规则被丢弃，不留空条目
+        self.assertEqual(stored["rules"], ["先给结论再给理由", "不要编造数据"])
+        self.assertEqual(stored["browser"]["default_target"], "external")
+        self.assertEqual(stored["installed_plugins"], ["local_tools"])
+
+        # 工作区列表也要带上偏好：设置面板首屏直接读它，不再多发一次请求。
+        workspaces = self.client.get("/api/v1/workspaces", headers=self.headers()).json()["workspaces"]
+        listed = next(ws for ws in workspaces if ws["id"] == self.workspace_id)
+        self.assertEqual(listed["preferences"]["rules"], ["先给结论再给理由", "不要编造数据"])
+
+    def test_d_preferences_above_deployment_cap_are_rejected(self):
+        """自动化任务档位同样受部署上限约束，超限必须报错而不是静默收紧。"""
+        original_cap = settings.max_permission_mode
+        settings.max_permission_mode = "default"
+        try:
+            rejected = self.client.put(
+                f"/api/v1/workspaces/{self.workspace_id}/preferences",
+                json={"automation_permission_mode": "full_access"},
+                headers=self.headers(),
+            )
+        finally:
+            settings.max_permission_mode = original_cap
+        self.assertEqual(rejected.status_code, 422, rejected.text)
+
+    def test_e_plain_member_cannot_write_preferences(self):
+        """成员可读不可写：规则会影响所有人的对话行为，只能由所有者改。"""
+        member_login = self.client.post(
+            "/api/v1/auth/login",
+            json={"email": "ws-member@example.com", "password": TEST_PASSWORD},
+        )
+        member_token = member_login.json()["access_token"]
+        readable = self.client.get(
+            f"/api/v1/workspaces/{self.workspace_id}/preferences",
+            headers=self.headers(member_token),
+        )
+        self.assertEqual(readable.status_code, 200, readable.text)
+        denied = self.client.put(
+            f"/api/v1/workspaces/{self.workspace_id}/preferences",
+            json={"rules": ["成员不该能写"]},
+            headers=self.headers(member_token),
+        )
+        self.assertEqual(denied.status_code, 403, denied.text)
+
     def test_z_owner_transfer_then_new_owner_can_delete(self):
         transferred = self.client.post(
             f"/api/v1/workspaces/{self.workspace_id}/transfer-owner",

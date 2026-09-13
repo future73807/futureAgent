@@ -155,7 +155,7 @@ export default function MessageBlocks({ message, canWrite = false }) {
       {subagents.length > 0 && (
         <Space size={[4, 4]} wrap className="message-subagents">
           {subagents.map((item, index) => (
-            <Tag key={index} color="purple">子代理 · {skillDisplayName(item.skill_name)} · {item.model_id} · {formatTokens(item.total_tokens)} token</Tag>
+            <Tag key={index} bordered={false}>子代理 · {skillDisplayName(item.skill_name)} · {item.model_id} · {formatTokens(item.total_tokens)} token</Tag>
           ))}
         </Space>
       )}
@@ -180,7 +180,7 @@ export default function MessageBlocks({ message, canWrite = false }) {
         <div className="message-card plan-card">
           <Flex justify="space-between" align="center" gap={8}>
             <Text strong>执行计划</Text>
-            <Tag color="blue" style={{ marginInlineEnd: 0 }}>规划模式</Tag>
+            <Tag bordered={false} style={{ marginInlineEnd: 0 }}>规划模式</Tag>
           </Flex>
           <div className="plan-card-objective">{planPayload.objective}</div>
           <ol className="plan-card-steps">

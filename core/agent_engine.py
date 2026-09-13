@@ -289,15 +289,27 @@ class AgentEngine:
         goal = str(config.get("goal") or "").strip()
         criteria = str(config.get("success_criteria") or "").strip()
         if mode == "plan":
-            return f"{base_prompt}\n\n{PLAN_OUTPUT_CONTRACT}"
-        if mode == "goal":
-            return (
+            prompt = f"{base_prompt}\n\n{PLAN_OUTPUT_CONTRACT}"
+        elif mode == "goal":
+            prompt = (
                 f"{base_prompt}\n\n{GOAL_MODE_CONTRACT}\n"
                 f"目标：{goal or '（未提供）'}\n达成标准：{criteria or '（未提供）'}"
             )
-        if mode == "loop":
-            return f"{base_prompt}\n\n{LOOP_MODE_CONTRACT}\n停止条件：{criteria or '（未提供）'}"
-        return base_prompt
+        elif mode == "loop":
+            prompt = f"{base_prompt}\n\n{LOOP_MODE_CONTRACT}\n停止条件：{criteria or '（未提供）'}"
+        else:
+            prompt = base_prompt
+        # 自建智能体的人设插在技能提示词与工作区规则之间：它比通用技能更具体，
+        # 又要服从部署方的硬约束，所以不能排在规则之后。
+        persona = str(config.get("agent_persona") or "").strip()
+        if persona:
+            prompt = f"{prompt}\n\n【当前智能体人设】\n{persona}\n【人设结束】"
+        # 工作区规则与仓库约定放在最后：它们是部署方写给人看的硬约束，
+        # 排在模式契约之后可以覆盖前面所有"建议性"的措辞。
+        rules = str(config.get("workspace_rules") or "").strip()
+        if rules:
+            prompt = f"{prompt}\n\n{rules}"
+        return prompt
 
     @classmethod
     def _record_iteration(cls, config: dict, iteration: int, verdict: str, reason: str) -> None:
@@ -503,7 +515,7 @@ class AgentEngine:
             user_role: 用户角色 (如 "developer", "user")
             query: 用户查询
             config: 配置字典
-                - model_id: 模型ID (如 "gpt-4o", "claude-3-5-sonnet")
+                - model_id: 模型ID (如 "glm-5.3-flash", "claude-3-5-sonnet")
                 - skill_name: Skill名称
                 - mcp_servers: MCP服务器列表
                 - mode: chat/plan/agent/goal/loop，缺省为 agent

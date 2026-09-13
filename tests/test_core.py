@@ -15,6 +15,12 @@ from core.mcp_manager import MCPManager
 from core import model_hub
 from core.model_hub import ModelHub
 from core.skill_manager import Skill, SkillManager
+from core.workspace_context import (
+    MAX_INSTRUCTION_BYTES,
+    build_workspace_context,
+    load_workspace_instructions,
+    workspace_scope_dir,
+)
 from config import Settings, settings
 from langchain_core.language_models.chat_models import SimpleChatModel
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
@@ -159,9 +165,90 @@ class AgentHelpersTests(unittest.TestCase):
             PRICE_PER_MILLION_TOKENS.pop("priced-model", None)
 
 
+class WorkspaceContextTests(unittest.TestCase):
+    """设置面板的"规则与记忆"最终要落到执行上，这里锁住翻译规则。"""
+
+    def test_rules_are_compiled_into_a_numbered_block(self):
+        context = build_workspace_context(None, {"rules": ["先给结论", "  ", "不要编造数据"]})
+        self.assertIn("## 工作区规则（必须遵守）", context["workspace_rules"])
+        self.assertIn("1. 先给结论", context["workspace_rules"])
+        # 空白项被丢弃，编号不留空洞
+        self.assertIn("2. 不要编造数据", context["workspace_rules"])
+        self.assertNotIn("3.", context["workspace_rules"])
+        self.assertTrue(context["memory_enabled"])
+
+    def test_memory_toggle_is_passed_through(self):
+        self.assertFalse(build_workspace_context(None, {"memory_enabled": False})["memory_enabled"])
+        # 缺字段时按开启处理：老工作区没有这一项，默认行为必须与引入前一致。
+        self.assertTrue(build_workspace_context(None, {})["memory_enabled"])
+        self.assertEqual(build_workspace_context(None, {})["workspace_rules"], "")
+
+    def test_instruction_files_follow_their_own_toggles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(settings, "workspace_files_root", directory):
+                scope = workspace_scope_dir("workspace-a")
+                scope.mkdir(parents=True)
+                (scope / "AGENTS.md").write_text("提交前必须跑单测", encoding="utf-8")
+                (scope / "CLAUDE.md").write_text("注释用中文", encoding="utf-8")
+
+                both = load_workspace_instructions("workspace-a", {})
+                self.assertEqual(sorted(both), ["AGENTS.md", "CLAUDE.md"])
+
+                only_agents = load_workspace_instructions(
+                    "workspace-a", {"include_claude_md": False}
+                )
+                self.assertEqual(sorted(only_agents), ["AGENTS.md"])
+
+                none = load_workspace_instructions(
+                    "workspace-a",
+                    {"include_agents_md": False, "include_claude_md": False},
+                )
+                self.assertEqual(none, {})
+
+                context = build_workspace_context(
+                    SimpleNamespace(id="workspace-a"), {"include_claude_md": False}
+                )
+                self.assertIn("AGENTS.md（仓库约定）", context["workspace_rules"])
+                self.assertNotIn("CLAUDE.md（仓库约定）", context["workspace_rules"])
+
+    def test_instruction_file_is_read_with_a_hard_size_cap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(settings, "workspace_files_root", directory):
+                scope = workspace_scope_dir("workspace-b")
+                scope.mkdir(parents=True)
+                (scope / "AGENTS.md").write_text("x" * (MAX_INSTRUCTION_BYTES + 500), encoding="utf-8")
+                loaded = load_workspace_instructions("workspace-b", {})
+        self.assertEqual(len(loaded["AGENTS.md"]), MAX_INSTRUCTION_BYTES)
+
+    def test_scope_dir_matches_the_mcp_servers_addressing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(settings, "workspace_files_root", directory):
+                scope = workspace_scope_dir("workspace-a")
+        digest = hashlib.sha256("workspace-a".encode("utf-8")).hexdigest()
+        self.assertEqual(scope.parts[-3:], (".futureagent", "workspaces", digest))
+
+    def test_missing_workspace_root_degrades_to_no_instructions(self):
+        with patch.object(settings, "workspace_files_root", ""):
+            self.assertIsNone(workspace_scope_dir("workspace-a"))
+            self.assertEqual(load_workspace_instructions("workspace-a", {}), {})
+
+    def test_workspace_rules_are_appended_to_every_mode_prompt(self):
+        config = {"workspace_rules": "## 工作区规则（必须遵守）\n1. 先给结论"}
+        for mode in ("chat", "agent", "plan", "goal", "loop"):
+            prompt = AgentEngine._mode_prompt("基础提示", mode, config)
+            self.assertTrue(prompt.startswith("基础提示"))
+            self.assertIn("先给结论", prompt)
+            # 规则排在模式契约之后：它是硬约束，不该被前面的措辞盖过。
+            self.assertTrue(prompt.rstrip().endswith("1. 先给结论"))
+        self.assertEqual(AgentEngine._mode_prompt("基础提示", "agent", {}), "基础提示")
+
+
 class ModelReadinessTests(unittest.TestCase):
     def test_extra_model_ids_are_routed_as_openai_compatible(self):
         with (
+            # 开发者本机 .env 可能给同一个模型配了专属端点，那会盖掉全局地址。
+            # 这条用例验证的是全局 OPENAI_BASE_URL 这条路径，必须先清掉档案。
+            patch.object(settings, "model_profiles_json", ""),
             patch.object(settings, "extra_model_ids_csv", "glm-5.3-flash, other-model"),
             patch.object(settings, "openai_base_url", "https://relay.example.test/v1"),
             patch.object(settings, "openai_api_key", "sk-real-relay-key"),
@@ -181,14 +268,59 @@ class ModelReadinessTests(unittest.TestCase):
                 },
             )
 
+    def test_model_profile_overrides_the_global_base_url_and_declares_capabilities(self):
+        """单模型档案：端点以档案为准，能力字段供界面展示。"""
+        profiles = (
+            '[{"id":"glm-5.3-flash","name":"glm-5.3-flash","url":"https://profile.example.test/v1",'
+            '"toolCalling":true,"vision":true,"maxInputTokens":1000000,"maxOutputTokens":128000}]'
+        )
+        with (
+            patch.object(settings, "model_profiles_json", profiles),
+            patch.object(settings, "extra_model_ids_csv", "glm-5.3-flash"),
+            patch.object(settings, "openai_base_url", "https://relay.example.test/v1"),
+            patch.object(settings, "openai_api_key", "sk-real-relay-key"),
+        ):
+            profile = ModelHub.model_profile("glm-5.3-flash")
+            self.assertEqual(profile["url"], "https://profile.example.test/v1")
+            self.assertTrue(profile["vision"])
+            self.assertEqual(profile["max_input_tokens"], 1_000_000)
+            # 档案里的地址必须真的被用于路由，否则"配了却没生效"最难排查。
+            self.assertEqual(
+                ModelHub._provider_kwargs("glm-5.3-flash")["api_base"],
+                "https://profile.example.test/v1",
+            )
+            self.assertEqual(
+                ModelHub._openai_compatible_credentials("glm-5.3-flash")[0],
+                "https://profile.example.test/v1",
+            )
+            self.assertIn("glm-5.3-flash", ModelHub.list_supported_models())
+
+    def test_malformed_model_profiles_json_fails_loudly(self):
+        # 静默降级会让运营以为专属端点生效了，实际仍在打默认地址。
+        with patch.object(settings, "model_profiles_json", "{not-json"):
+            with self.assertRaisesRegex(ValueError, "MODEL_PROFILES_JSON"):
+                _ = settings.model_profiles
+
     def test_extra_model_without_base_url_is_not_advertised_as_configured(self):
         # 缺地址时如果仍声称已配置，请求会默认发往 api.openai.com 并带上密钥。
         with (
+            patch.object(settings, "model_profiles_json", ""),
             patch.object(settings, "extra_model_ids_csv", "glm-5.3-flash"),
             patch.object(settings, "openai_api_key", "sk-real-relay-key"),
             patch.object(settings, "openai_base_url", ""),
         ):
             self.assertFalse(ModelHub.is_direct_provider_configured("glm-5.3-flash"))
+
+    def test_extra_model_without_global_base_url_uses_its_own_profile_endpoint(self):
+        # 全局地址为空、但模型档案给了专属端点时，这条路由是可用的。
+        profiles = '[{"id":"glm-5.3-flash","url":"https://profile.example.test/v1"}]'
+        with (
+            patch.object(settings, "model_profiles_json", profiles),
+            patch.object(settings, "extra_model_ids_csv", "glm-5.3-flash"),
+            patch.object(settings, "openai_api_key", "sk-real-relay-key"),
+            patch.object(settings, "openai_base_url", ""),
+        ):
+            self.assertTrue(ModelHub.is_direct_provider_configured("glm-5.3-flash"))
 
     def test_chat_model_survives_missing_chatlitellm_on_openai_compatible_routes(self):
         """ChatLiteLLM 已从 langchain-community 0.4 移除，不得因此全面报错。
@@ -200,6 +332,7 @@ class ModelReadinessTests(unittest.TestCase):
 
         with (
             patch.object(settings, "litellm_proxy_url", ""),
+            patch.object(settings, "model_profiles_json", ""),
             patch.object(settings, "extra_model_ids_csv", "glm-5.3-flash"),
             patch.object(settings, "openai_api_key", "sk-real-relay-key"),
             patch.object(settings, "openai_base_url", "https://relay.example.test/v1"),
@@ -240,9 +373,9 @@ class ModelReadinessTests(unittest.TestCase):
             patch.object(settings, "openai_api_key", "sk-your-openai-key"),
             patch.object(model_hub, "LITELLM_AVAILABLE", True),
         ):
-            self.assertFalse(ModelHub.is_model_configured("gpt-4o-mini"))
-            self.assertEqual(ModelHub.configuration_source("gpt-4o-mini"), "missing")
-            self.assertIn("尚未配置", ModelHub.readiness_error("gpt-4o-mini"))
+            self.assertFalse(ModelHub.is_model_configured("glm-5.3-flash"))
+            self.assertEqual(ModelHub.configuration_source("glm-5.3-flash"), "missing")
+            self.assertIn("尚未配置", ModelHub.readiness_error("glm-5.3-flash"))
 
     def test_litellm_proxy_requires_a_non_placeholder_master_key(self):
         with (
@@ -251,9 +384,9 @@ class ModelReadinessTests(unittest.TestCase):
             patch.object(model_hub, "LITELLM_AVAILABLE", True),
         ):
             self.assertFalse(ModelHub.is_litellm_proxy_configured())
-            self.assertFalse(ModelHub.is_model_configured("gpt-4o-mini"))
-            self.assertEqual(ModelHub.configuration_source("gpt-4o-mini"), "missing")
-            self.assertIn("Master Key", ModelHub.readiness_error("gpt-4o-mini"))
+            self.assertFalse(ModelHub.is_model_configured("glm-5.3-flash"))
+            self.assertEqual(ModelHub.configuration_source("glm-5.3-flash"), "missing")
+            self.assertIn("Master Key", ModelHub.readiness_error("glm-5.3-flash"))
 
         with (
             patch.object(settings, "litellm_proxy_url", "http://proxy.example.test"),
@@ -973,7 +1106,7 @@ class SubagentTests(unittest.TestCase):
             engine.skill_manager = manager
             tool, _config = self._dispatch(engine, role="user")
             result = asyncio.run(tool.coroutine(skill_name="privileged", task="子任务"))
-        # user 角色只有 model:gpt-3.5-turbo 权限，model_override 不得绕过。
+        # user 角色只有 model:glm-5.3-flash 权限，model_override 不得绕过。
         self.assertIn("无权使用", result)
 
     def test_dispatch_tool_is_gated_by_rbac_and_depth_at_injection_time(self):
@@ -1051,7 +1184,7 @@ class SubagentTests(unittest.TestCase):
                         role,
                         "hi",
                         {
-                            "model_id": "gpt-3.5-turbo" if role == "user" else "fake-model",
+                            "model_id": "glm-5.3-flash" if role == "user" else "fake-model",
                             "skill_name": skill_name,
                             "mcp_servers": ["local_tools"],
                             "workspace_id": "workspace-a",

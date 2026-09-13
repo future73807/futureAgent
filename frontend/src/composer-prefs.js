@@ -48,23 +48,28 @@ export function saveComposerPrefs(patch) {
 
 // 偏好里可能存着已经被删除或不再就绪的模型/技能。静默沿用会让请求
 // 在服务端失败，用户却看不出原因；这里显式回退并告知调用方。
-export function reconcileComposerPrefs(prefs, { models = [], skills = [], mcpServers = [] }) {
+// 回退目标优先取部署声明的默认模型，而不是"就绪列表首项"——首项是内置模型
+// 的注册顺序，未必落在本部署实际可用的路由上。
+export function reconcileComposerPrefs(prefs, { models = [], skills = [], mcpServers = [], defaultModel = '' } = {}) {
   const readyModels = models.filter((item) => item.ready !== false)
-  const modelIds = models.map((item) => item.id || item)
+  const idOf = (item) => item?.id || item || ''
+  const modelIds = models.map(idOf)
+  const preferred = readyModels.some((item) => idOf(item) === defaultModel)
+    ? defaultModel
+    : idOf(readyModels[0])
   const fallbacks = []
 
   let modelId = prefs.modelId
   if (modelId && !modelIds.includes(modelId)) {
-    modelId = readyModels[0]?.id || readyModels[0] || ''
+    modelId = preferred
     if (modelId) fallbacks.push('上次选择的模型已不可用，已切换到当前可用的模型')
-  } else if (modelId && !readyModels.some((item) => (item.id || item) === modelId)) {
-    const ready = readyModels[0]?.id || readyModels[0] || ''
-    if (ready && ready !== modelId) {
-      modelId = ready
+  } else if (modelId && !readyModels.some((item) => idOf(item) === modelId)) {
+    if (preferred && preferred !== modelId) {
+      modelId = preferred
       fallbacks.push('上次选择的模型当前未就绪，已切换到可用模型')
     }
   }
-  if (!modelId && readyModels.length) modelId = readyModels[0].id || readyModels[0]
+  if (!modelId) modelId = preferred
 
   const skillNames = skills.map((item) => item.name)
   let skillName = prefs.skillName

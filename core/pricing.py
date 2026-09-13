@@ -9,7 +9,7 @@ from __future__ import annotations
 
 # 模型 ID -> (每百万输入 token 单价, 每百万输出 token 单价)，货币单位由部署方约定。
 # 示例（请按实际合约填写后再启用）：
-#   "gpt-4o-mini": (0.15, 0.60),
+#   "glm-5.3-flash": (0.15, 0.60),
 PRICE_PER_MILLION_TOKENS: dict[str, tuple[float, float]] = {}
 
 

@@ -60,7 +60,7 @@ export default function SidebarConversations({
   const unarchive = async (conversation) => {
     try {
       await apiFetch(`/api/v1/conversations/${conversation.id}`, { method: 'PATCH', body: JSON.stringify({ archived: false }) })
-      messageApi?.success('对话已恢复')
+      messageApi?.success('任务已恢复')
       loadArchived()
       onRefresh?.()
     } catch (error) {
@@ -70,14 +70,14 @@ export default function SidebarConversations({
 
   const archive = (conversation) => {
     modal.confirm({
-      title: `归档对话「${conversation.label}」？`,
-      content: '归档后不再出现在最近对话里，可在「已归档对话」中恢复。',
+      title: `归档任务「${conversation.label}」？`,
+      content: '归档后不再出现在任务列表里，可在「已归档任务」中恢复。',
       okText: '归档',
       cancelText: '取消',
       onOk: async () => {
         try {
           await apiFetch(`/api/v1/conversations/${conversation.key}`, { method: 'PATCH', body: JSON.stringify({ archived: true }) })
-          messageApi?.success('对话已归档')
+          messageApi?.success('任务已归档')
           if (activeConversationId === conversation.key) {
             const remaining = conversations.find((item) => item.id !== conversation.key)
             if (remaining) onSelect?.(remaining.id)
@@ -92,15 +92,15 @@ export default function SidebarConversations({
 
   const confirmDelete = (conversation) => {
     modal.confirm({
-      title: `删除对话「${conversation.label}」？`,
-      content: '对话消息与已上传附件会一并删除，且不可恢复。',
+      title: `删除任务「${conversation.label}」？`,
+      content: '任务消息与已上传附件会一并删除，且不可恢复。',
       okText: '删除',
       okButtonProps: { danger: true },
       cancelText: '取消',
       onOk: async () => {
         try {
           await apiFetch(`/api/v1/conversations/${conversation.key}`, { method: 'DELETE' })
-          messageApi?.success('对话已删除')
+          messageApi?.success('任务已删除')
           if (activeConversationId === conversation.key) {
             const remaining = conversations.find((item) => item.id !== conversation.key)
             if (remaining) onSelect?.(remaining.id)
@@ -123,7 +123,7 @@ export default function SidebarConversations({
     if (!renameTarget || !title) return
     try {
       await apiFetch(`/api/v1/conversations/${renameTarget.key}`, { method: 'PATCH', body: JSON.stringify({ title }) })
-      messageApi?.success('对话已重命名')
+      messageApi?.success('任务已重命名')
       setRenameTarget(null)
       onRefresh?.()
     } catch (error) {
@@ -133,33 +133,41 @@ export default function SidebarConversations({
 
   return (
     <div className={`sidebar-conversations${isCurrentView ? ' is-current' : ''}`}>
-      <Button type="primary" icon={<PlusOutlined />} block onClick={() => onCreate?.()} disabled={!canWrite}>
-        新建对话
-      </Button>
-      {/* 归档入口放在标题行而不是底部：列表本身占 flex:1，底部再放一个
-          链接会在对话较少时留下一大片空白。 */}
+      {/* 分组标题同时承担"新建"与"归档"两个入口：参考稿把列表级动作放在
+          标题行右侧，比在顶部再压一个大按钮更省垂直空间，也让侧边栏上半部
+          专心放导航。 */}
       <Flex className="sidebar-section-label" justify="space-between" align="center">
         <Flex gap={6} align="center">
           <span className="sidebar-section-mark" aria-hidden="true" />
-          <Text type="secondary" className="sidebar-section-title">对话</Text>
+          <Text type="secondary" className="sidebar-section-title">任务列表</Text>
         </Flex>
-        <Flex gap={0} align="center">
-          <Text type="secondary">{conversations.length}</Text>
-          <Tooltip title="已归档对话">
+        <Flex gap={0} align="center" className="sidebar-group-actions">
+          <Text type="secondary" className="sidebar-section-count">{conversations.length}</Text>
+          <Tooltip title="新建任务">
+            <Button
+              type="text"
+              size="small"
+              icon={<PlusOutlined />}
+              onClick={() => onCreate?.()}
+              disabled={!canWrite}
+              aria-label="新建任务"
+            />
+          </Tooltip>
+          <Tooltip title="已归档任务">
             <Button
               type="text"
               size="small"
               className="sidebar-archived-button"
               icon={<FolderOutlined />}
               onClick={() => { setArchivedOpen(true); loadArchived() }}
-              aria-label="已归档对话"
+              aria-label="已归档任务"
             />
           </Tooltip>
         </Flex>
       </Flex>
       {conversations.length ? (
         <Conversations
-          aria-label="对话列表"
+          aria-label="任务列表"
           items={conversations.map((item) => ({ key: item.id, label: item.title, timestamp: item.updated_at, icon: <MessageOutlined /> }))}
           activeKey={activeConversationId}
           onActiveChange={(key) => onSelect?.(key)}
@@ -180,10 +188,10 @@ export default function SidebarConversations({
           })}
         />
       ) : (
-        <Empty className="sidebar-conversations-empty" image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无对话" />
+        <Empty className="sidebar-conversations-empty" image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无任务" />
       )}
 
-      <Drawer title="已归档对话" open={archivedOpen} onClose={() => setArchivedOpen(false)} width="min(88vw, 360px)">
+      <Drawer title="已归档任务" open={archivedOpen} onClose={() => setArchivedOpen(false)} width="min(88vw, 360px)">
         {archivedLoading ? (
           <div style={{ textAlign: 'center', padding: 24 }}><Spin /></div>
         ) : archivedList.length ? (
@@ -197,14 +205,14 @@ export default function SidebarConversations({
             )}
           />
         ) : (
-          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无归档对话" />
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无归档任务" />
         )}
       </Drawer>
 
-      <Modal title="重命名对话" open={Boolean(renameTarget)} onCancel={() => setRenameTarget(null)} onOk={() => renameForm.submit()} okText="保存" cancelText="取消" destroyOnHidden>
+      <Modal title="重命名任务" open={Boolean(renameTarget)} onCancel={() => setRenameTarget(null)} onOk={() => renameForm.submit()} okText="保存" cancelText="取消" destroyOnHidden>
         <Form form={renameForm} layout="vertical" onFinish={submitRename}>
-          <Form.Item name="title" label="对话标题" rules={[{ required: true, min: 2, message: '标题至少 2 个字符' }]}>
-            <Input placeholder="输入新的对话标题" maxLength={120} />
+          <Form.Item name="title" label="任务标题" rules={[{ required: true, min: 2, message: '标题至少 2 个字符' }]}>
+            <Input placeholder="输入新的任务标题" maxLength={120} />
           </Form.Item>
         </Form>
       </Modal>

@@ -94,7 +94,8 @@ function requestHeaders(options = {}) {
 }
 
 export async function apiFetch(path, options = {}, retry = true) {
-  const response = await fetch(path, { ...options, headers: requestHeaders(options), credentials: 'include' })
+  const prepared = normalizeBody(options)
+  const response = await fetch(path, { ...prepared, headers: requestHeaders(prepared), credentials: 'include' })
   if (response.status === 401 && retry && !path.startsWith('/api/v1/auth/')) {
     try {
       await refreshAccessToken()
@@ -106,6 +107,27 @@ export async function apiFetch(path, options = {}, retry = true) {
   if (!response.ok) throw await errorFrom(response)
   if (response.status === 204) return null
   return response.json()
+}
+
+/**
+ * 把普通对象 body 序列化掉。
+ *
+ * 之前约定调用方自己 JSON.stringify：漏掉一处就会把 `[object Object]` 发出去，
+ * 服务端回一个 422，而报错信息里完全看不出是序列化问题（设置面板已经踩过一次）。
+ * 字符串 / FormData / Blob 一律原样透传，对既有调用方没有行为变化。
+ */
+function normalizeBody(options = {}) {
+  const { body } = options
+  if (body === undefined || body === null) return options
+  if (
+    typeof body === 'string'
+    || body instanceof FormData
+    || body instanceof Blob
+    || body instanceof URLSearchParams
+  ) {
+    return options
+  }
+  return { ...options, body: JSON.stringify(body) }
 }
 
 export async function uploadAttachment(file, target) {

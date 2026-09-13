@@ -28,7 +28,7 @@ class AuthManager:
     ) -> None:
         """
         校验权限
-        resource 例如: "model:gpt-4o", "skill:coder", "mcp:filesystem"
+        resource 例如: "model:glm-5.3-flash", "skill:coder", "mcp:filesystem"
         action 例如: "use", "read", "write"
         """
         if not self.enforcer.enforce(user_role, resource, action):

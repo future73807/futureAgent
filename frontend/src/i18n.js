@@ -19,6 +19,8 @@ const messages = {
   'nav.work': '工作模式',
   'nav.team': '团队成员',
   'nav.settings': '工作区设置',
+  'nav.market': '插件市场',
+  'nav.studio': '创造模式',
   'auth.title': '欢迎使用 futureAgent',
   'auth.subtitle': '面向团队协作的 AI 工作空间',
   'auth.tab.login': '登 录',

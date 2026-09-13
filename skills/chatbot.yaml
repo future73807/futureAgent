@@ -13,3 +13,8 @@ allowed_tool_names:
   - read_csv
   - web_search
   - fetch_url
+
+# 以下为插件市场展示元数据，不参与技能装配与执行。
+category: 办公助理
+tags: [对话, 问答, 写作]
+featured: false

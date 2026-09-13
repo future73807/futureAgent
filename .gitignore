@@ -25,6 +25,10 @@ env/
 node_modules/
 dist/
 
+# E2E è¿è¡Œäº§ç‰©ï¼šè§†è§‰èµ°æŸ¥æˆªå›¾ä¸å¤±è´¥ç°åœº
+frontend/e2e/screens/
+frontend/e2e/failures/
+
 # MCP æœ¬åœ°å·¥ä½œåŒº
 mcp_server/workspace/
 
@@ -51,3 +55,6 @@ Thumbs.db
 
 # æœ¬åœ°æ’ä»¶è¿è¡Œæ—¶ç›®å½•
 .video_agent/
+
+# Ìå¼ì½Å±¾ÔËĞĞÊ±ÂäÏÂµÄÁÙÊ±½ØÍ¼£¨ÕıÊ½½ØÍ¼ÔÚ frontend/e2e/screens/£¬Í¬Ñù±»ºöÂÔ£©
+frontend/e2e/*.png

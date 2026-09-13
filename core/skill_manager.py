@@ -20,6 +20,12 @@ class Skill(BaseModel):
     # 规划、子用轻模型执行）；留空则沿用父代理的模型。它只能改用哪个
     # 模型，不能绕过模型级的 RBAC 校验。
     model_override: str = Field(default="", max_length=120)
+    # 以下三项只服务于"插件市场"的展示与筛选，不参与装配与执行逻辑。
+    # 放在技能定义里而不是前端硬编码：同一个技能在管理端与用户端必须
+    # 归到同一分类，硬编码两份迟早对不上。
+    category: str = Field(default="其他", max_length=40)
+    tags: list[str] = Field(default_factory=list)
+    featured: bool = Field(default=False)
 
 
 class SkillManager:
@@ -31,6 +37,9 @@ class SkillManager:
             name="default",
             description="默认助手",
             system_prompt="你是一个有用、可靠的助手。请清晰、准确地回答用户问题。",
+            category="效率提升",
+            tags=["通用", "问答"],
+            featured=True,
         ))
         self.load_skills()
 

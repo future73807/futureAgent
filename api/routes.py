@@ -65,6 +65,7 @@ from core.observability import (
 from core.pricing import aggregate_cost, estimate_cost, is_priced
 from core.skill_manager import Skill, SkillManager
 from core.storage import ObjectNotFound, StorageError, attachment_object_key, get_storage
+from core.workspace_context import build_workspace_context
 from db.database import get_session
 from db.models import (
     AgentRun,
@@ -80,6 +81,7 @@ from db.models import (
     BusinessRecord,
     ChatMessage,
     Conversation,
+    CustomAgent,
     Deliverable,
     Membership,
     Notification,
@@ -152,6 +154,78 @@ class WorkspaceUpdateRequest(RequestModel):
 
 class PermissionModeRequest(RequestModel):
     permission_mode: Literal["default", "auto_approve", "full_access"]
+
+
+class WorkspaceBrowserPreferences(RequestModel):
+    allow_internal: bool = True
+    allow_external: bool = False
+    default_target: Literal["internal", "external"] = "internal"
+    auto_screenshot: bool = True
+    data_cleared_at: str = ""
+
+
+class WorkspacePreferencesRequest(RequestModel):
+    """工作区偏好的白名单。
+
+    走一层显式模型而不是直接存任意 JSON：这一列会被设置面板整体回写，
+    不做字段校验的话，前端传什么就存什么，脏数据要靠读的地方各自兜底。
+    每一项都有默认值，未提交的字段保持原值。
+    """
+
+    # 自动化任务可以单独设一档：定时任务无人值守，多数团队希望它比
+    # 手动任务更严而不是更松，共用一档会让二者只能同进同退。
+    automation_permission_mode: Literal["default", "auto_approve", "full_access"] = "default"
+    memory_enabled: bool = True
+    include_agents_md: bool = True
+    include_claude_md: bool = True
+    rules: list[str] = Field(default_factory=list, max_length=50)
+    browser: WorkspaceBrowserPreferences = Field(default_factory=WorkspaceBrowserPreferences)
+    installed_plugins: list[str] = Field(default_factory=list, max_length=100)
+
+
+def _default_preferences() -> dict[str, Any]:
+    return WorkspacePreferencesRequest().model_dump()
+
+
+def _workspace_preferences(workspace: Workspace) -> dict[str, Any]:
+    """读取工作区偏好；缺字段、坏 JSON 都按默认值补齐。
+
+    读侧只做"补齐"而不是回写：设置面板可能只改其中一项，读时顺手落库会
+    让并发的两个标签页互相覆盖。
+    """
+    raw = (getattr(workspace, "preferences_json", "") or "").strip()
+    stored: dict[str, Any] = {}
+    if raw and raw != "{}":
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                stored = parsed
+        except ValueError:
+            stored = {}
+    merged = _default_preferences()
+    for key, value in stored.items():
+        if key in merged and isinstance(value, type(merged[key])):
+            merged[key] = value
+        elif key == "rules" and isinstance(value, list):
+            merged["rules"] = [str(item)[:500] for item in value if str(item).strip()][:50]
+        elif key == "installed_plugins" and isinstance(value, list):
+            merged["installed_plugins"] = [str(item)[:120] for item in value if str(item).strip()][:100]
+        elif key == "browser" and isinstance(value, dict):
+            merged["browser"] = {**merged["browser"], **{k: v for k, v in value.items() if k in merged["browser"]}}
+    return merged
+
+
+def _workspace_run_context(workspace: Workspace) -> dict[str, Any]:
+    """工作区规则 + 记忆开关，拼进每次执行的 config。
+
+    单独包一层是为了让三个执行入口（对话、任务执行、并行批次）拿到完全一致
+    的行为；漏掉任何一处，用户都会觉得"规则有时生效有时不生效"。
+    """
+    try:
+        return build_workspace_context(workspace, _workspace_preferences(workspace))
+    except Exception:  # pragma: no cover - 规则构建失败不该让对话失败
+        logger.warning("workspace context build failed", exc_info=True)
+        return {"workspace_rules": "", "memory_enabled": True}
 
 
 class MembershipCreateRequest(RequestModel):
@@ -253,6 +327,10 @@ class AgentRequest(ChatCompletionRequest):
     goal: str = Field(default="", max_length=2000)
     success_criteria: str = Field(default="", max_length=2000)
     max_iterations: int = Field(default=5, ge=1, le=20)
+    # 创造模式产出的自建智能体。带上它时会把该智能体的人设注入提示词；
+    # 模型 / 技能 / 工具仍以本次请求的显式取值为准，避免改一次智能体就
+    # 悄悄改掉用户当下在输入卡里选的东西。
+    agent_id: str | None = Field(default=None, max_length=64)
 
 
 class TaskExecutionRequest(RequestModel):
@@ -392,6 +470,7 @@ def _workspace_data(workspace: Workspace, role: str | None = None) -> dict[str, 
         # 部署上限一并下发，前端据此禁用超出上限的档位，而不是
         # 让使用者选了一个永远不会生效的选项。
         "max_permission_mode": settings.effective_max_permission_mode,
+        "preferences": _workspace_preferences(workspace),
         "created_at": workspace.created_at,
     }
     if role is not None:
@@ -918,8 +997,13 @@ def _conversation_agent_query(
     session: Session,
     conversation: Conversation,
     query: str,
+    memory_enabled: bool = True,
 ) -> str:
-    """Build bounded conversation and attachment context for tool-enabled chat."""
+    """Build bounded conversation and attachment context for tool-enabled chat.
+
+    ``memory_enabled=False``（设置面板里关掉"记忆"）时不再拼接历史与滚动
+    摘要，但当前附件仍然带上——附件是用户这一次显式给的材料，不属于记忆。
+    """
     history = session.exec(
         select(ChatMessage)
         .where(ChatMessage.conversation_id == conversation.id)
@@ -950,6 +1034,10 @@ def _conversation_agent_query(
         remaining -= len(excerpt)
 
     rolling_summary = (conversation.summary or "").strip()
+    if not memory_enabled:
+        # 记忆关闭：不拼接历史与摘要，只带本次附件与当前问题。
+        history_lines = []
+        rolling_summary = ""
     if not history_lines and not excerpts and not rolling_summary:
         return query
     sections = [
@@ -1423,6 +1511,269 @@ def update_workspace_permission_mode(
     )
     session.commit()
     return {"workspace": _workspace_data(workspace)}
+
+
+@router.get("/v1/workspaces/{workspace_id}/preferences")
+def get_workspace_preferences(
+    workspace_id: str,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """读取工作区偏好。成员即可读：规则与记忆影响的是每个人的对话行为。"""
+    _membership_for_workspace(session, user, workspace_id)
+    workspace = _workspace_or_404(session, workspace_id)
+    return {"preferences": _workspace_preferences(workspace)}
+
+
+@router.put("/v1/workspaces/{workspace_id}/preferences")
+def update_workspace_preferences(
+    workspace_id: str,
+    request: WorkspacePreferencesRequest,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """整体覆盖工作区偏好。
+
+    自动化任务档位同样受部署上限约束；常规任务档位仍走
+    ``/permission-mode``，避免同一件事有两个写入点。
+    """
+    _require_workspace_owner(session, user, workspace_id)
+    workspace = _workspace_or_404(session, workspace_id)
+    cap = settings.effective_max_permission_mode
+    if PERMISSION_MODES.index(request.automation_permission_mode) > PERMISSION_MODES.index(cap):
+        raise HTTPException(
+            status_code=422,
+            detail=f"当前部署将权限档位上限设为 {cap}，自动化任务无法选择更宽松的 {request.automation_permission_mode}。",
+        )
+    previous = _workspace_preferences(workspace)
+    payload = request.model_dump()
+    payload["rules"] = [rule.strip()[:500] for rule in request.rules if rule.strip()][:50]
+    payload["installed_plugins"] = [name.strip()[:120] for name in request.installed_plugins if name.strip()][:100]
+    workspace.preferences_json = json.dumps(payload, ensure_ascii=False)
+    workspace.updated_at = now_utc()
+    session.add(workspace)
+    write_audit(
+        session,
+        actor_id=user.id,
+        workspace_id=workspace_id,
+        action="workspace.preferences_updated",
+        target_type="workspace",
+        target_id=workspace_id,
+        metadata={
+            "rules": len(payload["rules"]),
+            "installed_plugins": payload["installed_plugins"],
+            "previous_rules": len(previous.get("rules") or []),
+        },
+    )
+    session.commit()
+    return {"preferences": _workspace_preferences(workspace)}
+
+
+# ============================ 创造模式：自建智能体 ============================
+# 智能体本身只是"一组可复用的运行预设"（人设 + 模型 + 技能 + 工具）。
+# 它不携带任何额外权限：真正执行时，工具授权仍然走发起人自己的身份与工作区
+# 授权档位，所以这里不需要比"能写工作区"更严的门槛。
+
+AGENT_ICONS = ("robot", "chart", "doc", "code", "shield", "spark")
+MAX_AGENTS_PER_WORKSPACE = 50
+
+
+class CustomAgentRequest(RequestModel):
+    """新建 / 更新智能体的白名单字段。"""
+
+    name: str = Field(min_length=1, max_length=60)
+    summary: str = Field(default="", max_length=200)
+    # 人设上限与工作区指令保持一致，避免出现一整篇当作提示词的用法。
+    persona: str = Field(default="", max_length=8000)
+    model_id: str = Field(default="", max_length=120)
+    skill_name: str = Field(default="default", max_length=80)
+    mcp_servers: list[str] = Field(default_factory=list, max_length=20)
+    icon: Literal["robot", "chart", "doc", "code", "shield", "spark"] = "robot"
+    category: str = Field(default="自定义", max_length=40)
+    enabled: bool = True
+
+
+def _agent_payload(agent: CustomAgent) -> dict[str, Any]:
+    try:
+        servers = json.loads(agent.mcp_servers_json or "[]")
+    except (TypeError, ValueError):
+        servers = []
+    return {
+        "id": agent.id,
+        "workspace_id": agent.workspace_id,
+        "created_by": agent.created_by,
+        "name": agent.name,
+        "summary": agent.summary,
+        "persona": agent.persona,
+        "model_id": agent.model_id,
+        "skill_name": agent.skill_name,
+        "mcp_servers": servers if isinstance(servers, list) else [],
+        "icon": agent.icon,
+        "category": agent.category,
+        "enabled": agent.enabled,
+        "created_at": agent.created_at.isoformat() if agent.created_at else None,
+        "updated_at": agent.updated_at.isoformat() if agent.updated_at else None,
+    }
+
+
+def _agent_or_404(session: Session, workspace_id: str, agent_id: str) -> CustomAgent:
+    agent = session.get(CustomAgent, agent_id)
+    if not agent or agent.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="智能体不存在")
+    return agent
+
+
+def _validated_agent_servers(request: CustomAgentRequest, model_id: str) -> tuple[list[str], str]:
+    """把请求里的工具与模型收敛到"当前部署真的配置了"的集合。
+
+    不校验的话，用户可以存下一个拼错的服务名或模型 id，之后每次用这个智能体
+    对话都在运行期才报错，排查成本很高——错误应该停在创建这一步。
+
+    工具用 `settings.mcp_servers` 而不是实时探针：那是部署的静态配置，同步可得，
+    也不会因为某个 MCP 服务临时掉线就让用户改不动自己的智能体。
+    """
+    available = set(settings.mcp_servers)
+    servers: list[str] = []
+    for name in request.mcp_servers:
+        cleaned = name.strip()
+        if cleaned and cleaned not in servers:
+            servers.append(cleaned)
+    unknown = [name for name in servers if name not in available]
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"工具服务未接入：{'、'.join(unknown[:5])}")
+    resolved_model = model_id.strip()
+    if resolved_model and resolved_model not in ModelHub.list_supported_models():
+        raise HTTPException(status_code=422, detail=f"模型不可用：{resolved_model}")
+    return servers, resolved_model
+
+
+@router.get("/v1/workspaces/{workspace_id}/agents")
+def list_custom_agents(
+    workspace_id: str,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """列出工作区内的自建智能体。成员即可读：它们只是运行预设，不是敏感配置。"""
+    _membership_for_workspace(session, user, workspace_id)
+    agents = session.exec(
+        select(CustomAgent)
+        .where(CustomAgent.workspace_id == workspace_id)
+        .order_by(CustomAgent.created_at)
+    ).all()
+    return {"agents": [_agent_payload(agent) for agent in agents]}
+
+
+@router.post("/v1/workspaces/{workspace_id}/agents", status_code=201)
+def create_custom_agent(
+    workspace_id: str,
+    request: CustomAgentRequest,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """新建智能体。写入者及以上可建，用于个人与团队沉淀常用预设。"""
+    membership = _membership_for_workspace(session, user, workspace_id)
+    if membership.role == "viewer":
+        raise HTTPException(status_code=403, detail="只读成员不能创建智能体")
+    existing = session.exec(select(CustomAgent).where(CustomAgent.workspace_id == workspace_id)).all()
+    if len(existing) >= MAX_AGENTS_PER_WORKSPACE:
+        raise HTTPException(status_code=422, detail=f"每个工作区最多创建 {MAX_AGENTS_PER_WORKSPACE} 个智能体")
+    servers, resolved_model = _validated_agent_servers(request, request.model_id)
+    agent = CustomAgent(
+        workspace_id=workspace_id,
+        created_by=user.id,
+        name=request.name.strip(),
+        summary=request.summary.strip(),
+        persona=request.persona.strip(),
+        model_id=resolved_model,
+        skill_name=request.skill_name.strip() or "default",
+        mcp_servers_json=json.dumps(servers, ensure_ascii=False),
+        icon=request.icon,
+        category=request.category.strip() or "自定义",
+        enabled=request.enabled,
+    )
+    session.add(agent)
+    write_audit(
+        session,
+        actor_id=user.id,
+        workspace_id=workspace_id,
+        action="agent.created",
+        target_type="custom_agent",
+        target_id=agent.id,
+        metadata={"name": agent.name, "model_id": agent.model_id, "servers": servers},
+    )
+    session.commit()
+    session.refresh(agent)
+    return {"agent": _agent_payload(agent)}
+
+
+@router.put("/v1/workspaces/{workspace_id}/agents/{agent_id}")
+def update_custom_agent(
+    workspace_id: str,
+    agent_id: str,
+    request: CustomAgentRequest,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """更新智能体。创建者本人与管理员可改，避免别人随手改掉你调好的预设。"""
+    membership = _membership_for_workspace(session, user, workspace_id)
+    if membership.role == "viewer":
+        raise HTTPException(status_code=403, detail="只读成员不能修改智能体")
+    agent = _agent_or_404(session, workspace_id, agent_id)
+    if agent.created_by != user.id and membership.role not in {"owner", "admin"} and not user.is_platform_admin:
+        raise HTTPException(status_code=403, detail="只有创建者或管理员可以修改该智能体")
+    servers, resolved_model = _validated_agent_servers(request, request.model_id)
+    agent.name = request.name.strip()
+    agent.summary = request.summary.strip()
+    agent.persona = request.persona.strip()
+    agent.model_id = resolved_model
+    agent.skill_name = request.skill_name.strip() or "default"
+    agent.mcp_servers_json = json.dumps(servers, ensure_ascii=False)
+    agent.icon = request.icon
+    agent.category = request.category.strip() or "自定义"
+    agent.enabled = request.enabled
+    agent.updated_at = now_utc()
+    session.add(agent)
+    write_audit(
+        session,
+        actor_id=user.id,
+        workspace_id=workspace_id,
+        action="agent.updated",
+        target_type="custom_agent",
+        target_id=agent.id,
+        metadata={"name": agent.name, "enabled": agent.enabled},
+    )
+    session.commit()
+    session.refresh(agent)
+    return {"agent": _agent_payload(agent)}
+
+
+@router.delete("/v1/workspaces/{workspace_id}/agents/{agent_id}")
+def delete_custom_agent(
+    workspace_id: str,
+    agent_id: str,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """删除智能体。权限与更新一致；只删预设，不动任何历史对话。"""
+    membership = _membership_for_workspace(session, user, workspace_id)
+    if membership.role == "viewer":
+        raise HTTPException(status_code=403, detail="只读成员不能删除智能体")
+    agent = _agent_or_404(session, workspace_id, agent_id)
+    if agent.created_by != user.id and membership.role not in {"owner", "admin"} and not user.is_platform_admin:
+        raise HTTPException(status_code=403, detail="只有创建者或管理员可以删除该智能体")
+    name = agent.name
+    session.delete(agent)
+    write_audit(
+        session,
+        actor_id=user.id,
+        workspace_id=workspace_id,
+        action="agent.deleted",
+        target_type="custom_agent",
+        target_id=agent_id,
+        metadata={"name": name},
+    )
+    session.commit()
+    return {"deleted": agent_id}
 
 
 @router.get("/v1/workspaces/{workspace_id}/members")
@@ -2568,7 +2919,10 @@ async def agent_chat(
         request.skill_name,
         request.query,
     )
-    agent_query = _conversation_agent_query(session, conversation, request.query)
+    run_context = _workspace_run_context(context.workspace)
+    agent_query = _conversation_agent_query(
+        session, conversation, request.query, memory_enabled=run_context["memory_enabled"]
+    )
     user_message = ChatMessage(conversation_id=conversation.id, role="user", content=request.query)
     assistant_message = ChatMessage(conversation_id=conversation.id, role="assistant", content="")
     session.add(user_message)
@@ -2579,6 +2933,12 @@ async def agent_chat(
     session.add(conversation)
     session.commit()
     permission_mode = _effective_permission_mode(context.workspace, request.permission_mode)
+    agent_persona = ""
+    if request.agent_id:
+        preset = _agent_or_404(session, context.workspace.id, request.agent_id)
+        if not preset.enabled:
+            raise HTTPException(status_code=422, detail=f"智能体“{preset.name}”已停用")
+        agent_persona = preset.persona
     config = {
         "model_id": model_id,
         "skill_name": request.skill_name,
@@ -2588,7 +2948,9 @@ async def agent_chat(
         "tool_trace": [],
         "usage_by_message": {},
         "permission_mode": permission_mode,
+        "agent_persona": agent_persona,
         **_mode_config(request),
+        **run_context,
     }
     stream_started = now_utc()
 
@@ -2640,7 +3002,10 @@ async def agent_chat(
                 metadata={"model_id": model_id, "skill_name": request.skill_name},
             )
             session.commit()
-            await _maybe_update_conversation_summary(session, conversation, model_id)
+            # 记忆关闭时不再压缩历史：否则摘要仍在后台消耗 token，
+            # 只是不生效，用户会看到账单上有说不清的调用。
+            if run_context["memory_enabled"]:
+                await _maybe_update_conversation_summary(session, conversation, model_id)
             yield {"event": "done", "data": "{}"}
         except asyncio.CancelledError:
             assistant_message.content = "".join(collected)
@@ -3141,6 +3506,7 @@ async def execute_task_with_agent(
         # 让工具服务把本次执行触及的文件改动归因到这条 run。
         "agent_run_id": run.id,
         **_mode_config(request),
+        **_workspace_run_context(context.workspace),
     }
     stream_started = now_utc()
 
@@ -3452,6 +3818,7 @@ async def execute_task_steps_in_parallel(
             "permission_mode": batch_permission_mode,
             "agent_run_id": run.id,
             **_mode_config(request),
+            **_workspace_run_context(context.workspace),
         }
         worker_started = now_utc()
 
@@ -4025,6 +4392,8 @@ def list_models(
     details: list[dict[str, Any]] = []
     for model_id in models:
         readiness_error = ModelHub.readiness_error(model_id)
+        profile = ModelHub.model_profile(model_id) or {}
+        credentials = ModelHub._openai_compatible_credentials(model_id) or ("", "")
         details.append(
             {
                 "id": model_id,
@@ -4033,11 +4402,24 @@ def list_models(
                 "configuration_source": ModelHub.configuration_source(model_id),
                 "ready": readiness_error is None,
                 "readiness_error": readiness_error,
+                # 能力声明来自 MODEL_PROFILES_JSON，未登记时给出保守默认值：
+                # 只声明"支持工具调用"，视觉与上下文长度留空由界面隐藏。
+                "display_name": profile.get("name") or model_id,
+                "base_url": credentials[0],
+                "tool_calling": bool(profile.get("tool_calling", True)),
+                "vision": bool(profile.get("vision", False)),
+                "max_input_tokens": int(profile.get("max_input_tokens") or 0),
+                "max_output_tokens": int(profile.get("max_output_tokens") or 0),
             }
         )
     return {
         "models": models,
         "details": details,
+        # 前端原先只能取列表首项当默认值，而列表顺序是内置模型的注册顺序，
+        # 与部署实际配置的 DEFAULT_MODEL 无关——本机联调时默认就落到了中转
+        # 端点并不提供的模型上，用户一发消息就失败。这里显式给出服务端
+        # 默认模型，前端优先采用。
+        "default_model": ModelHub.default_model(),
     }
 
 
@@ -4288,11 +4670,11 @@ def delete_policy(
 @router.get("/v1/settings")
 def public_settings(user: User = Depends(require_platform_admin)) -> dict[str, Any]:
     provider_configured = {
-        "openai": ModelHub.is_direct_provider_configured("gpt-4o-mini"),
-        "anthropic": ModelHub.is_direct_provider_configured("claude-3-5-sonnet-20241022"),
-        "google": ModelHub.is_direct_provider_configured("gemini/gemini-1.5-pro"),
-        "longcat": ModelHub.is_direct_provider_configured("LongCat-2.0"),
-        "ollama": bool(settings.ollama_base_url.strip()),
+        "openai": ModelHub.is_provider_configured("openai"),
+        "anthropic": ModelHub.is_provider_configured("anthropic"),
+        "google": ModelHub.is_provider_configured("google"),
+        "longcat": ModelHub.is_provider_configured("longcat"),
+        "ollama": ModelHub.is_provider_configured("ollama"),
     }
     ollama_models = ModelHub._available_ollama_models() if provider_configured["ollama"] else None
     return {

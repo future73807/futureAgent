@@ -21,3 +21,8 @@ allowed_tool_names:
   - make_chart
   - web_search
   - fetch_url
+
+# 以下为插件市场展示元数据，不参与技能装配与执行。
+category: 数据分析
+tags: [数据处理, 统计, 可视化]
+featured: true

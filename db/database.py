@@ -1,8 +1,10 @@
 """数据库连接、会话和开发环境引导数据。"""
+import logging
+import re
 from collections.abc import Generator
 
 from sqlmodel import Session, SQLModel, create_engine, select
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 
 from config import settings
 from db.models import Membership, User, Workspace, now_utc
@@ -70,6 +72,10 @@ NEWEST_FEATURE_TABLES = {
     "knowledge_chunks",
     "agent_run_batches",
     "usage_records",
+    # 创造模式的自建智能体表。必须登记在这里：否则它会被算进"老库应该有的表"，
+    # 每个历史分支的 _matches_schema 都不匹配，最后一个分支也落空 —— 结果是从头
+    # 重跑整条迁移链，在已存在的表上再 batch_alter 一次。
+    "custom_agents",
 }
 
 # Revision 20260725_03 adds both business tables and audit visibility columns.
@@ -110,9 +116,16 @@ PRE_CHAT_AGENT_CONTEXT_MISSING_COLUMNS = {
     "chat_messages": {"agent_mode", "usage_json", "iterations_json"}
 }
 
+# 工作区偏好是 workspaces 的最新增量列；旧库识别时统一忽略。
+# 漏掉这里的后果不只是"认错版本"：缺列的旧库会一路落到最后的 legacy 分支
+# 全不匹配，于是从头重跑整条迁移链，在已存在的表上再做一次 batch_alter。
+PRE_WORKSPACE_PREFERENCES_MISSING_COLUMNS = {"workspaces": {"preferences_json"}}
+
 # 增量特性表 → 引入它的迁移版本（从新到旧）。无 alembic_version 的库按
 # "已拥有的最高阶梯表" 判定其实际版本，避免误判到过旧的基线重建全库。
 ADDITIVE_STEPS = [
+    # 无版本库若已经有 self-built agent 表，说明至少到过 20260913_23。
+    ("20260913_23", {"custom_agents"}),
     ("20260911_18", {"usage_records"}),
     ("20260902_15", {"agent_run_batches"}),
     ("20260902_14", {"knowledge_chunks"}),
@@ -148,6 +161,33 @@ def _read_alembic_version() -> str | None:
     return row[0] if row else None
 
 
+def _drop_leftover_batch_tables() -> list[str]:
+    """清掉 batch_alter_table 可能留下的 ``_alembic_tmp_*`` 临时表。
+
+    SQLite 的 batch 模式在需要重建表时是"建临时表 → 拷数据 → 删原表 → 改名"；
+    进程在改名那一步被杀掉就会留下临时表，之后每次重试都直接失败在
+    "table _alembic_tmp_xxx already exists"。单纯 ADD COLUMN 走的是 SQLite
+    原生 ALTER，不建临时表；但只要迁移里出现改类型、删列这类操作就会重建，
+    所以这里统一先清一次再重试。失败不影响主流程——真正的错误由调用方抛出。
+    """
+    dropped: list[str] = []
+    try:
+        with engine.begin() as connection:
+            rows = connection.execute(
+                text(
+                    "select name from sqlite_master where type='table' "
+                    "and name like '\\_alembic\\_tmp\\_%' escape '\\'"
+                )
+            ).all()
+            for (name,) in rows:
+                if re.fullmatch(r"_alembic_tmp_[A-Za-z0-9_]+", name or ""):
+                    connection.execute(text(f'DROP TABLE IF EXISTS "{name}"'))
+                    dropped.append(name)
+    except Exception:  # noqa: BLE001 - 清残留失败不该比迁移本身更早抛错
+        logging.getLogger(__name__).warning("failed to drop leftover batch tables", exc_info=True)
+    return dropped
+
+
 def _upgrade_stepwise(alembic_config, start_after: str | None) -> None:
     """从 start_after 之后的版本逐个升级。
 
@@ -167,14 +207,19 @@ def _upgrade_stepwise(alembic_config, start_after: str | None) -> None:
     if start_after in chain:
         chain = chain[chain.index(start_after) + 1 :]
     for rev in chain:
-        try:
-            command.upgrade(alembic_config, rev)
-        except Exception as exc:  # noqa: BLE001
-            message = str(exc).lower()
-            if "already exists" in message or "duplicate column" in message:
-                # 半迁移自愈：该版本的效果已在库中，记录版本继续
-                command.stamp(alembic_config, rev)
-            else:
+        for attempt in range(2):
+            try:
+                command.upgrade(alembic_config, rev)
+                break
+            except Exception as exc:  # noqa: BLE001
+                message = str(exc).lower()
+                # 残留临时表导致的 "already exists" 不是半迁移证据，先清后重试。
+                if attempt == 0 and _drop_leftover_batch_tables():
+                    continue
+                if "already exists" in message or "duplicate column" in message:
+                    # 半迁移自愈：该版本的效果已在库中，记录版本继续
+                    command.stamp(alembic_config, rev)
+                    break
                 raise
 
 
@@ -205,7 +250,14 @@ def _upgrade_schema() -> None:
     from config import BASE_DIR
 
     alembic_config = Config(str(BASE_DIR / "alembic.ini"))
-    alembic_config.set_main_option("sqlalchemy.url", settings.database_url)
+    # 必须用被检查的那个 engine 自己的 URL，而不是 settings.database_url。
+    # 两者不一致时（测试注入临时 engine、或多进程拿到不同配置），下面
+    # `_matches_schema` 判定的是 A 库，Alembic 却去写 B 库：A 库"已是最新"
+    # 的结论会变成对 B 库的一次 `stamp head`，B 库从此以为自己已升级，
+    # 而缺的列永远补不上。render_as_string 保留密码，Alembic 需要它连库。
+    alembic_config.set_main_option(
+        "sqlalchemy.url", engine.url.render_as_string(hide_password=False)
+    )
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names())
     if "alembic_version" not in existing_tables:
@@ -229,6 +281,7 @@ def _upgrade_schema() -> None:
             PRE_PERMISSION_MODE_MISSING_COLUMNS,
             PRE_AGENT_MODE_MISSING_COLUMNS,
             PRE_CHAT_AGENT_CONTEXT_MISSING_COLUMNS,
+            PRE_WORKSPACE_PREFERENCES_MISSING_COLUMNS,
         )
         for revision, marker_tables in ADDITIVE_STEPS:
             if _matches_schema(inspector, set(marker_tables), ignored_columns=legacy_ignored):
@@ -244,19 +297,43 @@ def _upgrade_schema() -> None:
             elif _matches_schema(
                 inspector,
                 core_current,
-                ignored_columns=_ignored_columns(PRE_AGENT_RUN_MCP_MISSING_COLUMNS, PRE_SUMMARY_MISSING_COLUMNS, PRE_BATCH_MISSING_COLUMNS, PRE_PERMISSION_MODE_MISSING_COLUMNS, PRE_AGENT_MODE_MISSING_COLUMNS, PRE_CHAT_AGENT_CONTEXT_MISSING_COLUMNS),
+                ignored_columns=_ignored_columns(
+                    PRE_AGENT_RUN_MCP_MISSING_COLUMNS,
+                    PRE_SUMMARY_MISSING_COLUMNS,
+                    PRE_BATCH_MISSING_COLUMNS,
+                    PRE_PERMISSION_MODE_MISSING_COLUMNS,
+                    PRE_AGENT_MODE_MISSING_COLUMNS,
+                    PRE_CHAT_AGENT_CONTEXT_MISSING_COLUMNS,
+                    PRE_WORKSPACE_PREFERENCES_MISSING_COLUMNS,
+                ),
             ):
                 command.stamp(alembic_config, "20260726_04")
             elif not (existing_tables & REPORT_AGENT_TABLES) and _matches_schema(
                 inspector,
                 pre_report_tables,
-                ignored_columns=_ignored_columns(PRE_AGENT_RUN_MCP_MISSING_COLUMNS, PRE_SUMMARY_MISSING_COLUMNS, PRE_BATCH_MISSING_COLUMNS, PRE_PERMISSION_MODE_MISSING_COLUMNS, PRE_AGENT_MODE_MISSING_COLUMNS, PRE_CHAT_AGENT_CONTEXT_MISSING_COLUMNS),
+                ignored_columns=_ignored_columns(
+                    PRE_AGENT_RUN_MCP_MISSING_COLUMNS,
+                    PRE_SUMMARY_MISSING_COLUMNS,
+                    PRE_BATCH_MISSING_COLUMNS,
+                    PRE_PERMISSION_MODE_MISSING_COLUMNS,
+                    PRE_AGENT_MODE_MISSING_COLUMNS,
+                    PRE_CHAT_AGENT_CONTEXT_MISSING_COLUMNS,
+                    PRE_WORKSPACE_PREFERENCES_MISSING_COLUMNS,
+                ),
             ):
                 command.stamp(alembic_config, "20260725_03")
             elif _matches_schema(
                 inspector,
                 non_agent_tables,
-                ignored_columns=_ignored_columns(PRE_BUSINESS_MISSING_COLUMNS, PRE_SUMMARY_MISSING_COLUMNS, PRE_BATCH_MISSING_COLUMNS, PRE_PERMISSION_MODE_MISSING_COLUMNS, PRE_AGENT_MODE_MISSING_COLUMNS, PRE_CHAT_AGENT_CONTEXT_MISSING_COLUMNS),
+                ignored_columns=_ignored_columns(
+                    PRE_BUSINESS_MISSING_COLUMNS,
+                    PRE_SUMMARY_MISSING_COLUMNS,
+                    PRE_BATCH_MISSING_COLUMNS,
+                    PRE_PERMISSION_MODE_MISSING_COLUMNS,
+                    PRE_AGENT_MODE_MISSING_COLUMNS,
+                    PRE_CHAT_AGENT_CONTEXT_MISSING_COLUMNS,
+                    PRE_WORKSPACE_PREFERENCES_MISSING_COLUMNS,
+                ),
             ):
                 # The immediately preceding commercial schema has all governed
                 # AgentRun columns but not the operating-agent tables.
@@ -266,7 +343,15 @@ def _upgrade_schema() -> None:
                 if _matches_schema(
                     inspector,
                     legacy_tables,
-                    ignored_columns=_ignored_columns(PRE_BUSINESS_MISSING_COLUMNS, PRE_SUMMARY_MISSING_COLUMNS, PRE_BATCH_MISSING_COLUMNS, PRE_PERMISSION_MODE_MISSING_COLUMNS, PRE_AGENT_MODE_MISSING_COLUMNS, PRE_CHAT_AGENT_CONTEXT_MISSING_COLUMNS),
+                    ignored_columns=_ignored_columns(
+                        PRE_BUSINESS_MISSING_COLUMNS,
+                        PRE_SUMMARY_MISSING_COLUMNS,
+                        PRE_BATCH_MISSING_COLUMNS,
+                        PRE_PERMISSION_MODE_MISSING_COLUMNS,
+                        PRE_AGENT_MODE_MISSING_COLUMNS,
+                        PRE_CHAT_AGENT_CONTEXT_MISSING_COLUMNS,
+                        PRE_WORKSPACE_PREFERENCES_MISSING_COLUMNS,
+                    ),
                 ):
                     # The pre-Alembic product schema is known and complete. Stamp
                     # that immutable baseline, then apply additive revisions.
@@ -274,6 +359,33 @@ def _upgrade_schema() -> None:
     # 半迁移感知的逐版升级：单版对象已存在时记录版本并继续
     start_after = _read_alembic_version()
     _upgrade_stepwise(alembic_config, start_after)
+    _warn_on_schema_gap()
+
+
+def _warn_on_schema_gap() -> None:
+    """迁移跑完后核对一次模型列是否都在库里。
+
+    版本号走到 head 不等于结构真的到位：自愈分支可能把某个版本记成已应用而
+    实际没落库。缺列时应用能启动、但之后每个请求都 500 在一个毫无提示的
+    "no such column" 上，所以这里把缺口直接点到列名。
+    """
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    missing: list[str] = []
+    for table_name, table in SQLModel.metadata.tables.items():
+        if table_name not in existing_tables:
+            missing.append(f"{table_name}（整表缺失）")
+            continue
+        actual = {column["name"] for column in inspector.get_columns(table_name)}
+        for column in table.columns:
+            if column.name not in actual:
+                missing.append(f"{table_name}.{column.name}")
+    if missing:
+        logging.getLogger(__name__).error(
+            "数据库结构落后于模型，缺失对象：%s。版本号已到 head，请检查是否有迁移被"
+            "跳过（残留 _alembic_tmp_* 临时表会让 batch_alter_table 误判为已应用）。",
+            ", ".join(missing[:20]),
+        )
 
 
 def _matches_schema(

@@ -6,6 +6,11 @@ export { default as AudioOutlined } from '@ant-design/icons/es/icons/AudioOutlin
 export { default as BarChartOutlined } from '@ant-design/icons/es/icons/BarChartOutlined'
 export { default as BellOutlined } from '@ant-design/icons/es/icons/BellOutlined'
 export { default as BulbOutlined } from '@ant-design/icons/es/icons/BulbOutlined'
+// Code 工作台：主视觉图标、快捷动作与右下角浮动工具条。
+export { default as BugOutlined } from '@ant-design/icons/es/icons/BugOutlined'
+export { default as CodeOutlined } from '@ant-design/icons/es/icons/CodeOutlined'
+export { default as HistoryOutlined } from '@ant-design/icons/es/icons/HistoryOutlined'
+export { default as SafetyCertificateOutlined } from '@ant-design/icons/es/icons/SafetyCertificateOutlined'
 export { default as CheckCircleFilled } from '@ant-design/icons/es/icons/CheckCircleFilled'
 // 以下 Filled 图标是 @ant-design/x 的 Attachments/FileList 硬依赖（文件类型角标
 // 与失败态）。侧边栏合并后 Conversations 与 Attachments 被提前加载，这些图标
@@ -64,3 +69,12 @@ export { default as BookOutlined } from '@ant-design/icons/es/icons/BookOutlined
 export { default as FileTextOutlined } from '@ant-design/icons/es/icons/FileTextOutlined'
 export { default as UploadOutlined } from '@ant-design/icons/es/icons/UploadOutlined'
 export { default as UserOutlined } from '@ant-design/icons/es/icons/UserOutlined'
+// 设置面板：分区图标、规则与记忆、浏览器开关。
+export { default as ApiOutlined } from '@ant-design/icons/es/icons/ApiOutlined'
+export { default as ExperimentOutlined } from '@ant-design/icons/es/icons/ExperimentOutlined'
+export { default as EyeOutlined } from '@ant-design/icons/es/icons/EyeOutlined'
+export { default as InfoCircleOutlined } from '@ant-design/icons/es/icons/InfoCircleOutlined'
+export { default as LockOutlined } from '@ant-design/icons/es/icons/LockOutlined'
+export { default as ChromeOutlined } from '@ant-design/icons/es/icons/ChromeOutlined'
+export { default as DatabaseOutlined } from '@ant-design/icons/es/icons/DatabaseOutlined'
+export { default as CheckOutlined } from '@ant-design/icons/es/icons/CheckOutlined'

@@ -106,7 +106,7 @@ class ParallelExecutionTests(unittest.TestCase):
         )
         draft = self.client.post(
             f"/api/v1/tasks/{task2_id}/execute-parallel",
-            json={"model_id": "gpt-4o-mini", "skill_name": "default"},
+            json={"model_id": "glm-5.3-flash", "skill_name": "default"},
             headers=self.headers(),
         )
         self.assertEqual(draft.status_code, 409, draft.text)
@@ -142,7 +142,7 @@ class ParallelExecutionTests(unittest.TestCase):
         ):
             response = self.client.post(
                 f"/api/v1/tasks/{task_id}/execute-parallel",
-                json={"model_id": "gpt-4o-mini", "skill_name": "default", "mcp_servers": []},
+                json={"model_id": "glm-5.3-flash", "skill_name": "default", "mcp_servers": []},
                 headers=self.headers(),
             )
         self.assertEqual(response.status_code, 200, response.text)
@@ -177,7 +177,7 @@ class ParallelExecutionTests(unittest.TestCase):
             session.commit()
         response = self.client.post(
             f"/api/v1/tasks/{task_id}/execute-parallel",
-            json={"model_id": "gpt-4o-mini", "skill_name": "default"},
+            json={"model_id": "glm-5.3-flash", "skill_name": "default"},
             headers=self.headers(),
         )
         self.assertEqual(response.status_code, 422, response.text)
@@ -224,7 +224,7 @@ class ParallelExecutionTests(unittest.TestCase):
         ):
             response = self.client.post(
                 f"/api/v1/tasks/{task_id}/execute-parallel",
-                json={"model_id": "gpt-4o-mini", "skill_name": "default"},
+                json={"model_id": "glm-5.3-flash", "skill_name": "default"},
                 headers=self.headers(),
             )
         self.assertEqual(response.status_code, 200, response.text)
@@ -275,7 +275,7 @@ class ParallelExecutionTests(unittest.TestCase):
         with patch("api.routes.get_agent_engine", return_value=FakeEngine()),                 patch("api.routes._ensure_model_ready"):
             response = self.client.post(
                 f"/api/v1/tasks/{task_id}/execute-parallel",
-                json={"model_id": "gpt-4o-mini", "skill_name": "default", "step_ids": step_ids[:1]},
+                json={"model_id": "glm-5.3-flash", "skill_name": "default", "step_ids": step_ids[:1]},
                 headers=self.headers(),
             )
         self.assertEqual(response.status_code, 200, response.text)

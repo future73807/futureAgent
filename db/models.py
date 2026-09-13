@@ -44,6 +44,10 @@ class Workspace(SQLModel, table=True):
     # 它只放宽人工审批环节，不影响 Casbin RBAC、租户目录隔离与
     # run_python 的永久禁用；单次请求只能在此基准上向下收紧。
     permission_mode: str = Field(default="default", max_length=16)
+    # 工作区级偏好（JSON 字符串）。放一列而不是建多张表：这些都是"每工作区
+    # 一份、随设置面板整体读写"的开关，拆表只会让读写变成 N 次查询。
+    # 见 api/routes.py 的 WorkspacePreferencesRequest，字段在那里做白名单校验。
+    preferences_json: str = Field(default="{}", max_length=20000)
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
 
@@ -137,7 +141,7 @@ class Conversation(SQLModel, table=True):
     owner_id: str = Field(foreign_key="users.id", index=True)
     project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
     title: str = Field(default="新对话", max_length=240)
-    model_id: str = Field(default="gpt-4o-mini", max_length=120)
+    model_id: str = Field(default="glm-5.3-flash", max_length=120)
     skill_name: str = Field(default="chatbot", max_length=120)
     archived: bool = Field(default=False)
     # 滚动摘要：长对话按阈值压缩为要点，替代无限平铺历史。
@@ -545,6 +549,39 @@ class Notification(SQLModel, table=True):
     ref_id: str = Field(default="", max_length=80)
     read_at: datetime | None = Field(default=None)
     created_at: datetime = Field(default_factory=now_utc, index=True)
+
+
+class CustomAgent(SQLModel, table=True):
+    """用户在工作区里自建的智能体。
+
+    与 ``BusinessAssistant`` 的区别：后者是产品预置的三个固定角色，带
+    "老板私聊 / 公事数据"这类数据隔离语义，受数据库约束保护；这里的是用户
+    用一句人设 + 模型 + 技能 + 工具自己拼出来的助手，本质是**一组可复用的
+    运行预设**——它不引入新的数据边界，权限仍然完全由发起人自己的身份决定。
+
+    人设只影响提示词，不会放宽任何工具授权：``mcp_servers_json`` 里的服务
+    在真正执行时仍要过工作区授权档位与工具白名单。
+    """
+
+    __tablename__ = "custom_agents"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    workspace_id: str = Field(foreign_key="workspaces.id", index=True)
+    created_by: str = Field(foreign_key="users.id", index=True)
+    name: str = Field(max_length=60)
+    summary: str = Field(default="", max_length=200)
+    # 人设 / 系统提示词。上限对齐 core/workspace_context.py 的指令长度。
+    persona: str = Field(default="", max_length=8000)
+    model_id: str = Field(default="", max_length=120)
+    skill_name: str = Field(default="default", max_length=80)
+    mcp_servers_json: str = Field(default="[]", max_length=2000)
+    # 图标用一组固定 key（robot / chart / doc / code / shield / spark），
+    # 前端映射成图标组件；存组件名会让前端换图标库时整批数据失效。
+    icon: str = Field(default="robot", max_length=32)
+    category: str = Field(default="自定义", max_length=40)
+    enabled: bool = Field(default=True, index=True)
+    created_at: datetime = Field(default_factory=now_utc, index=True)
+    updated_at: datetime = Field(default_factory=now_utc)
 
 
 class NotificationTarget(SQLModel, table=True):

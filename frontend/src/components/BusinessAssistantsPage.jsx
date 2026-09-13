@@ -40,7 +40,7 @@ const assistantCatalog = [
     summary: '汇总已授权的经营、生产、预警和待办信息，辅助老板判断与下达任务。',
     isolation: '仅工作区所有者可进入私聊；服务端会再次校验身份与工作区边界。',
     audience: '仅老板',
-    color: 'gold',
+    color: 'default',
   },
   {
     key: 'personal',
@@ -50,7 +50,7 @@ const assistantCatalog = [
     summary: '处理老板的个人安排和私密事项，不读取或展示公司公事数据。',
     isolation: '私事会话与公事数据逻辑隔离，不向公司成员开放。',
     audience: '仅老板',
-    color: 'purple',
+    color: 'default',
   },
   {
     key: 'business',
@@ -60,7 +60,7 @@ const assistantCatalog = [
     summary: '面向公司协作，查询已授权的 OA、小程序和生产数据，并接收问题或触发流程。',
     isolation: '公司成员仅能看到自己工作区已授权的公事数据，敏感老板私聊不会混入。',
     audience: '公司成员',
-    color: 'blue',
+    color: 'default',
   },
 ]
 
@@ -77,7 +77,7 @@ const alertSeverity = {
   high: { label: '高', color: 'volcano' },
   warning: { label: '中', color: 'gold' },
   medium: { label: '中', color: 'gold' },
-  low: { label: '低', color: 'blue' },
+  low: { label: '低', color: 'default' },
 }
 
 const taskStatus = {
@@ -439,7 +439,7 @@ function BusinessAssistantContent({ workspaceRole, members = [], currentUserId =
   return <div className="page-shell business-page">
     <Flex justify="space-between" align="flex-start" wrap="wrap" gap={16} className="page-heading business-heading">
       <div><Title level={2}>{t('business.title')}</Title><Text type="secondary">{t('business.subtitle')}</Text></div>
-      <Space wrap><Tag color="blue">{t('business.isolation')}</Tag><Button onClick={() => loadBusiness({ quiet: true })} loading={refreshing}>{t('business.btn.refresh')}</Button></Space>
+      <Space wrap><Tag bordered={false}>{t('business.isolation')}</Tag><Button onClick={() => loadBusiness({ quiet: true })} loading={refreshing}>{t('business.btn.refresh')}</Button></Space>
     </Flex>
 
     {loadError && <Alert className="business-load-alert" type={apiUnavailable ? 'info' : 'warning'} showIcon message={apiUnavailable ? '经营助手暂不可用' : '经营数据加载异常'} description={loadError} action={<Button size="small" onClick={() => loadBusiness()}>重新加载</Button>} />}

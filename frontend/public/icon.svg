@@ -1,14 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#5667df"/>
-      <stop offset="1" stop-color="#7655cf"/>
-    </linearGradient>
-  </defs>
-  <rect width="64" height="64" rx="16" fill="url(#g)"/>
-  <circle cx="32" cy="27" r="11" fill="none" stroke="#fff" stroke-width="4"/>
-  <circle cx="27.5" cy="25.5" r="1.8" fill="#fff"/>
-  <circle cx="36.5" cy="25.5" r="1.8" fill="#fff"/>
-  <path d="M25 33a8 8 0 0 0 14 0" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
-  <rect x="16" y="44" width="32" height="5" rx="2.5" fill="#ffffff" opacity=".85"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="futureAgent">
+  <!-- 品牌标记：近黑圆角方块 + 白色终端提示符（>_）。
+       刻意不用渐变、不用彩色——整套界面只有黑、白、灰三阶，
+       彩色留给语义状态。粗笔画保证 16px favicon 下依然清晰。 -->
+  <rect width="64" height="64" rx="16" fill="#1f1f22"/>
+  <path d="M20 22 L31 32 L20 42" fill="none" stroke="#ffffff" stroke-width="6"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="35" y="38" width="11" height="5.5" rx="2.75" fill="#ffffff"/>
 </svg>

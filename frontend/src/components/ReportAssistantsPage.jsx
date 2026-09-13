@@ -464,7 +464,7 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
           <Text type="secondary">将已授权的业务数据汇总为预警、生产日报与总结报告；支持知识库、文件和接口的输入和对接。</Text>
         </div>
         <Space wrap>
-          <Tag color="blue">工作区隔离</Tag>
+          <Tag bordered={false}>工作区隔离</Tag>
           <Button onClick={() => loadReport({ quiet: true })} loading={refreshing}>刷新数据</Button>
         </Space>
       </Flex>
@@ -486,7 +486,7 @@ function ReportAssistantContent({ workspaceRole, members = [], currentUserId = '
           <div className="report-chat-section">
             <div className="report-chat-header">
               <Space><MessageOutlined /><Text strong>汇报智能体</Text></Space>
-              <Tag color="blue">工作区成员</Tag>
+              <Tag bordered={false}>工作区成员</Tag>
             </div>
             <div className="report-chat-body">
               {historyLoading ? (

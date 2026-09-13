@@ -22,7 +22,10 @@ class Settings(BaseSettings):
     )
 
     # ===== LiteLLM 模型配置 =====
-    default_model: str = "gpt-4o-mini"
+    # 未显式配置 DEFAULT_MODEL 时的兜底值。产品内置模型里不再有 GPT 系列
+    # （自建/中转端点上基本已下线），兜底改为可经 EXTRA_MODEL_IDS_CSV 接入的
+    # OpenAI 兼容模型。
+    default_model: str = "glm-5.3-flash"
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     anthropic_api_key: str = ""
@@ -34,6 +37,13 @@ class Settings(BaseSettings):
     # 路由。用于接入中转站或自建网关等未内置前缀规则的模型，
     # 避免每接一个供应商就要改 ModelHub 代码。
     extra_model_ids_csv: str = ""
+    # 单个模型的档案（JSON 数组），用于给某个模型单独指定端点和能力声明：
+    #   [{"id":"glm-5.3-flash","name":"glm-5.3-flash","url":"https://relay/v1",
+    #     "toolCalling":true,"vision":true,
+    #     "maxInputTokens":1000000,"maxOutputTokens":128000}]
+    # url 非空时该模型走自己的端点，不再用 OPENAI_BASE_URL；能力字段用于界面
+    # 展示与调用前的容量判断，不改变路由规则。
+    model_profiles_json: str = ""
 
     # ===== LiteLLM Proxy =====
     litellm_proxy_url: str = ""
@@ -119,6 +129,10 @@ class Settings(BaseSettings):
 
     # ===== Skill 配置 =====
     skills_dir: str = str(BASE_DIR / "skills")
+    # 工作区文件根。API 只读它来取 AGENTS.md / CLAUDE.md 这类仓库约定；
+    # 写入永远由 MCP 服务负责。默认指向本机 MCP 服务的 workspace 目录，
+    # Compose 部署下以只读方式挂载同一个卷并覆盖此值。
+    workspace_files_root: str = str(BASE_DIR / "mcp_server" / "workspace")
 
     # ===== 知识库向量召回 =====
     # off 关闭（纯关键词召回）；ollama 用本地模型（推荐 qwen3-embedding，
@@ -161,6 +175,42 @@ class Settings(BaseSettings):
             for value in self.extra_model_ids_csv.split(",")
             if value.strip()
         ]
+
+    @computed_field
+    @property
+    def model_profiles(self) -> dict[str, dict]:
+        """模型档案：模型 id -> {url, tool_calling, vision, max_input_tokens, max_output_tokens}。
+
+        JSON 里刻意用驼峰（与前端/供应商配置一致），这里归一成下划线，免得
+        每个使用方各自记两套字段名。非法 JSON 直接抛错——静默降级会让运营
+        以为端点生效了，实际仍在打默认地址。
+        """
+        raw = self.model_profiles_json.strip()
+        if not raw:
+            return {}
+        try:
+            payload = json.loads(raw)
+        except ValueError as exc:
+            raise ValueError("MODEL_PROFILES_JSON 必须是合法的 JSON 数组") from exc
+        if not isinstance(payload, list):
+            raise ValueError("MODEL_PROFILES_JSON 必须是 JSON 数组")
+        profiles: dict[str, dict] = {}
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            model_id = str(entry.get("id") or entry.get("name") or "").strip()
+            if not model_id:
+                continue
+            profiles[model_id] = {
+                "id": model_id,
+                "name": str(entry.get("name") or model_id).strip(),
+                "url": str(entry.get("url") or "").strip(),
+                "tool_calling": bool(entry.get("toolCalling", True)),
+                "vision": bool(entry.get("vision", False)),
+                "max_input_tokens": int(entry.get("maxInputTokens") or 0),
+                "max_output_tokens": int(entry.get("maxOutputTokens") or 0),
+            }
+        return profiles
 
     @computed_field
     @property

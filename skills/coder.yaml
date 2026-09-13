@@ -20,3 +20,8 @@ allowed_tool_names:
   # 白名单为空的技能（如内置 default）默认就能用。
   - dispatch_subagent
 model_override: ""
+
+# 以下为插件市场展示元数据，不参与技能装配与执行。
+category: 研发工具
+tags: [编码, 调试, 重构]
+featured: true

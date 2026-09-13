@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Alert from 'antd/es/alert'
 import AntApp from 'antd/es/app'
 import AutoComplete from 'antd/es/auto-complete'
@@ -46,6 +46,7 @@ import {
   SearchOutlined,
   DeleteOutlined,
   EditOutlined,
+  ExperimentOutlined,
   FileAddOutlined,
   FileTextOutlined,
   FolderOpenOutlined,
@@ -67,9 +68,11 @@ import {
 import ErrorBoundary from './ErrorBoundary.jsx'
 // 侧边栏常驻，不参与按需分包：对话列表是工作台主入口，不应等到进对话页才加载。
 import SidebarConversations from './components/SidebarConversations.jsx'
-import PermissionModeChip from './components/PermissionModeChip.jsx'
+import AgentStudioPage from './components/AgentStudioPage.jsx'
+import BrandMark from './components/BrandMark.jsx'
 import ComposerToolbar from './components/ComposerToolbar.jsx'
 import MessageBlocks from './components/MessageBlocks.jsx'
+import SettingsModal from './components/SettingsModal.jsx'
 import WorkspaceChangesPanel from './components/WorkspaceChangesPanel.jsx'
 import { loadComposerPrefs, reconcileComposerPrefs, saveComposerPrefs } from './composer-prefs.js'
 import {
@@ -94,9 +97,58 @@ import { validateUpload } from './upload-guard.js'
 
 const { Header, Sider, Content } = Layout
 const { Title, Text, Paragraph } = Typography
-const ChatPage = lazy(() => import('./components/ChatPage.jsx'))
-const BusinessAssistantsPage = lazy(() => import('./components/BusinessAssistantsPage.jsx'))
-const ReportAssistantsPage = lazy(() => import('./components/ReportAssistantsPage.jsx'))
+
+// 按需分包只在"第一次进入某页"时才下载。原先用 React.lazy + Suspense：
+// React.lazy 的首次渲染一定会挂起并提交一次 Suspense 回退，**即使分包早已
+// 下载到本地**——点一下导航整块内容被换成加载骨架，就是这么来的。
+// 这里自己维护"已加载组件表"：预取完成后切页是同步渲染，预取尚未完成时
+// 由调用方保留上一页，任何情况下都不会提交一个空的内容区。
+const routeLoaders = {
+  chat: () => import('./components/ChatPage.jsx'),
+  business: () => import('./components/BusinessAssistantsPage.jsx'),
+  report: () => import('./components/ReportAssistantsPage.jsx'),
+  market: () => import('./components/MarketplacePage.jsx'),
+}
+const routeComponents = new Map()
+
+function loadRoute(key) {
+  const cached = routeComponents.get(key)
+  if (cached) return Promise.resolve(cached)
+  const loader = routeLoaders[key]
+  if (!loader) return Promise.resolve(null)
+  return loader().then((module) => {
+    const Component = module.default || module
+    routeComponents.set(key, Component)
+    return Component
+  })
+}
+
+function preloadRoutes() {
+  Object.keys(routeLoaders).forEach((key) => { loadRoute(key).catch(() => {}) })
+}
+
+/**
+ * 取当前路由对应的组件。
+ *
+ * 返回值里带上它属于哪个 key：分包组件表是按 key 缓存的一个共享变量，若只
+ * 返回组件本身，"nav 已经切到 B、缓存还停在 A"的那一帧就会把 A 组件按 B 的
+ * props 渲染出来（聊天页拿到插件市场的 props，直接崩在 models.map 上）。
+ * 调用方用 `key` 比对后再决定是否渲染，宁可多等一帧也不张冠李戴。
+ */
+function useRouteComponent(key) {
+  const [entry, setEntry] = useState(() => ({ key, Component: routeComponents.get(key) || null }))
+  useEffect(() => {
+    const cached = routeComponents.get(key)
+    if (cached) { setEntry({ key, Component: cached }); return undefined }
+    if (!routeLoaders[key]) { setEntry({ key, Component: null }); return undefined }
+    let alive = true
+    loadRoute(key)
+      .then((Component) => { if (alive && Component) setEntry({ key, Component }) })
+      .catch(() => {})
+    return () => { alive = false }
+  }, [key])
+  return entry
+}
 const columns = [
   { key: 'backlog', title: '待梳理', color: '#8c8c8c' },
   { key: 'todo', title: '待处理', color: '#1677ff' },
@@ -133,13 +185,18 @@ const historicRunErrorLabels = {
 // 顺序即侧边栏导航的展示顺序：看板与工作模式是主作业面，排在两个
 // 助手之前。chat 仍保留在首位作为默认页与面包屑文案的参考项，但不在
 // 导航里列项——对话列表本身就是它的入口。
-const navigationKeys = ['chat', 'board', 'work', 'business', 'report', 'team', 'settings']
+// 工作模式与创造模式都不再单独占导航入口：前者是运行模式某几档的执行视图，
+// 后者的入口在运行模式下拉的「创造」一项里。把同一个概念摆两处只会让人疑惑
+// "这两个到底是不是同一个东西"。页面组件与路由都保留，只是不在导航露出。
+const navigationKeys = ['chat', 'board', 'market', 'business', 'report', 'team', 'settings']
 const navigationIcons = {
   chat: <MessageOutlined />,
   business: <BarChartOutlined />,
   report: <FileTextOutlined />,
   board: <ProjectOutlined />,
   work: <AppstoreOutlined />,
+  market: <ThunderboltOutlined />,
+  studio: <ExperimentOutlined />,
   team: <TeamOutlined />,
   settings: <SettingOutlined />,
 }
@@ -210,7 +267,7 @@ function AuthScreen({ onAuthenticated }) {
   return (
     <div className="auth-page">
       <section className="auth-intro" aria-label="产品简介">
-        <div className="auth-intro-brand"><Avatar size={38} className="brand-avatar" icon={<RobotOutlined />} /><span>futureAgent</span></div>
+        <div className="auth-intro-brand"><BrandMark size={38} className="brand-mark" /><span>futureAgent</span></div>
         <div className="auth-intro-hero">
           <Title level={1}>把对话、任务与交付<br />放进同一个 AI 工作区</Title>
           <Paragraph>规划、审批、执行、留痕：团队在一个有权限边界的工作区里，让 AI 真正接手可追溯的工作。</Paragraph>
@@ -289,7 +346,7 @@ function TaskCard({ task, members, onSelect, onMove }) {
       {task.description && <Paragraph ellipsis={{ rows: 2 }} type="secondary" className="task-description">{task.description}</Paragraph>}
       <Flex justify="space-between" align="center" className="task-meta">
         <Space size={4}>
-          {(task.labels || []).slice(0, 2).map((label) => <Tag key={label} color="blue">{label}</Tag>)}
+          {(task.labels || []).slice(0, 2).map((label) => <Tag key={label} bordered={false}>{label}</Tag>)}
           {task.comment_count > 0 && (
             <Tooltip title={`${task.comment_count} 条评论`}>
               <Tag icon={<MessageOutlined />} color="default">{task.comment_count}</Tag>
@@ -400,7 +457,17 @@ function BoardPage({ projects, tasks, members, onRefresh, openTask, workspaceRol
   const [form] = Form.useForm()
   const [projectForm] = Form.useForm()
 
+  // 刚创建的项目在刷新回来之前不在 projects 里，如果不加保护，下面这个
+  // 守卫会立刻把选中项打回 projects[0]，用户就停在旧项目的空看板上。
+  const pendingProjectRef = useRef('')
   useEffect(() => {
+    if (pendingProjectRef.current) {
+      if (projects.some((item) => item.id === pendingProjectRef.current)) {
+        setProjectId(pendingProjectRef.current)
+        pendingProjectRef.current = ''
+      }
+      return
+    }
     if (!projects.some((item) => item.id === projectId)) setProjectId(projects[0]?.id || '')
   }, [projects, projectId])
 
@@ -419,10 +486,16 @@ function BoardPage({ projects, tasks, members, onRefresh, openTask, workspaceRol
   }
   const saveProject = async (values) => {
     try {
-      await apiFetch('/api/v1/projects', { method: 'POST', body: JSON.stringify({ ...values, color: '#5B5BD6' }) })
+      // 颜色只作为看板标识的占位，用中性灰：项目卡片不参与彩色装饰体系。
+      const payload = await apiFetch('/api/v1/projects', { method: 'POST', body: JSON.stringify({ ...values, color: '#8a8f98' }) })
       message.success('项目已创建')
       setProjectOpen(false)
       projectForm.resetFields()
+      // 建完直接切到新项目：否则用户会停在旧项目的空看板上，以为创建失败。
+      if (payload?.project?.id) {
+        pendingProjectRef.current = payload.project.id
+        setProjectId(payload.project.id)
+      }
       onRefresh()
     } catch (error) { message.error(readableError(error)) }
   }
@@ -633,7 +706,7 @@ function TaskResultsPanel({ taskId, canWrite, members, refreshKey }) {
     try { await downloadAttachment({ ...deliverable, original_name: deliverable.name }); message.success('已开始下载') } catch (error) { message.error(readableError(error)) }
   }
   const files = <List loading={loading} size="small" locale={{ emptyText: '暂无任务文件' }} dataSource={attachments} renderItem={(attachment) => <List.Item actions={[attachment.preview_available ? <Button key="preview" type="link" size="small" onClick={() => showPreview(attachment)}>预览</Button> : null, <Button key="download" type="link" size="small" onClick={() => download(attachment)}>下载</Button>, <Button key="changes" type="link" size="small" onClick={() => setActiveTab('changes')}>查看变更</Button>].filter(Boolean)}><List.Item.Meta title={attachment.original_name} description={`${Math.ceil(attachment.size_bytes / 1024)} KB · ${formatDateTime(attachment.created_at)}`} /></List.Item>} />
-  const deliverableList = <List loading={loading} size="small" locale={{ emptyText: '尚无交付物；AI 执行或登记工作区文件后会出现在这里' }} dataSource={deliverables} renderItem={(deliverable) => <List.Item actions={[<Button key="download" type="link" size="small" onClick={() => downloadDeliverable(deliverable)}>下载</Button>, <Button key="changes" type="link" size="small" onClick={() => setActiveTab('changes')}>查看变更</Button>]}><List.Item.Meta title={<Space size={6}><Tag color={deliverable.kind === 'image' ? 'blue' : deliverable.kind === 'file' ? 'default' : 'purple'}>{deliverable.kind}</Tag>{deliverable.name}</Space>} description={`${Math.ceil(deliverable.size_bytes / 1024)} KB · 来源 ${deliverable.source_path || '工作区'} · ${formatDateTime(deliverable.created_at)}`} /></List.Item>} />
+  const deliverableList = <List loading={loading} size="small" locale={{ emptyText: '尚无交付物；AI 执行或登记工作区文件后会出现在这里' }} dataSource={deliverables} renderItem={(deliverable) => <List.Item actions={[<Button key="download" type="link" size="small" onClick={() => downloadDeliverable(deliverable)}>下载</Button>, <Button key="changes" type="link" size="small" onClick={() => setActiveTab('changes')}>查看变更</Button>]}><List.Item.Meta title={<Space size={6}><Tag bordered={false}>{deliverable.kind}</Tag>{deliverable.name}</Space>} description={`${Math.ceil(deliverable.size_bytes / 1024)} KB · 来源 ${deliverable.source_path || '工作区'} · ${formatDateTime(deliverable.created_at)}`} /></List.Item>} />
   const activity = <List loading={loading} size="small" locale={{ emptyText: '暂无任务动态' }} dataSource={events} renderItem={(event) => {
     const actor = members.find((member) => member.user.id === event.actor_id)?.user.display_name || '工作区成员'
     const status = event.metadata?.status ? ` · ${readableStatus(event.metadata.status)}` : ''
@@ -833,7 +906,7 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
   const runItems = runs.map((run) => {
     const hasRecordedMcpConfig = recordedRunMcpServers(run) !== null
     const retryButton = <Button size="small" onClick={() => execute(run)} disabled={running || batchRunning}>{hasRecordedMcpConfig ? '使用原配置重试' : '复用原模型与技能重试'}</Button>
-    return { key: run.id, label: <Space size={6}>{run.batch_id && <Tag color="geekblue">并行批次</Tag>}{run.agent_mode && run.agent_mode !== 'agent' && <Tag color="cyan">{agentModeDisplayName(run.agent_mode)}</Tag>}{readableStatus(run.status)} · {formatDateTime(run.started_at)}</Space>, children: <Space direction="vertical" size="small" style={{ width: '100%' }}><Text type="secondary">{run.model_id} · {skillDisplayName(run.skill_name)} · 第 {run.attempt || 1} 次尝试{run.usage?.records ? '' : ' · 用量未上报'}</Text>{/* 用量、子代理与轮次时间线统一由 MessageBlocks 渲染，与对话页共用一套样式。 */}<MessageBlocks message={run} canWrite={canWrite} />{run.output ? <div className="markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(run.output) }} /> : <Text type="secondary">{readableRunError(run.error_message)}</Text>}<Space>{['failed', 'cancelled'].includes(run.status) && canWrite && (hasRecordedMcpConfig ? retryButton : <Tooltip title="历史记录未包含 MCP 配置，重试时会使用当前工具选择。">{retryButton}</Tooltip>)}{run.status === 'running' && canWrite && <Button size="small" danger onClick={() => cancelRun(run.id)} disabled={running && activeRunId && activeRunId !== run.id}>取消执行</Button>}</Space></Space> }
+    return { key: run.id, label: <Space size={6}>{run.batch_id && <Tag bordered={false}>并行批次</Tag>}{run.agent_mode && run.agent_mode !== 'agent' && <Tag bordered={false}>{agentModeDisplayName(run.agent_mode)}</Tag>}{readableStatus(run.status)} · {formatDateTime(run.started_at)}</Space>, children: <Space direction="vertical" size="small" style={{ width: '100%' }}><Text type="secondary">{run.model_id} · {skillDisplayName(run.skill_name)} · 第 {run.attempt || 1} 次尝试{run.usage?.records ? '' : ' · 用量未上报'}</Text>{/* 用量、子代理与轮次时间线统一由 MessageBlocks 渲染，与对话页共用一套样式。 */}<MessageBlocks message={run} canWrite={canWrite} />{run.output ? <div className="markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(run.output) }} /> : <Text type="secondary">{readableRunError(run.error_message)}</Text>}<Space>{['failed', 'cancelled'].includes(run.status) && canWrite && (hasRecordedMcpConfig ? retryButton : <Tooltip title="历史记录未包含 MCP 配置，重试时会使用当前工具选择。">{retryButton}</Tooltip>)}{run.status === 'running' && canWrite && <Button size="small" danger onClick={() => cancelRun(run.id)} disabled={running && activeRunId && activeRunId !== run.id}>取消执行</Button>}</Space></Space> }
   })
   const executable = Boolean(plan && ['approved', 'in_progress'].includes(plan.status) && canWrite && models.some((item) => item.id === modelId && item.ready) && skillName && stepId)
   const pendingSteps = (plan?.steps || []).filter((step) => step.status === 'pending')
@@ -1122,7 +1195,7 @@ function WorkModePage({ tasks, members, models, skills, mcpServers, workspaceRol
               <Steps direction="vertical" size="small" current={Math.min(plan.steps.findIndex((step) => step.status !== 'done'), Math.max(plan.steps.length - 1, 0))} items={plan.steps.map((step) => ({ title: <Flex justify="space-between" gap={8}><span>{step.title}</span><Select value={step.status} size="small" style={{ width: 124 }} disabled={!canUpdateStep(step)} onChange={(value) => updateStep(step, { status: value })} options={['pending', 'running', 'blocked', 'done'].map((value) => ({ value, label: stepStatusLabels[value] }))} /></Flex>, description: <Space direction="vertical" size={2}><Text type="secondary">{step.instructions || '暂无补充说明。'}</Text><Text type="secondary">负责人：{members.find((item) => item.user.id === step.assignee_id)?.user.display_name || '未分配'}</Text>{step.output_summary && <Text>执行证据：{step.output_summary}</Text>}{canUpdateStep(step) && <Button type="link" size="small" style={{ paddingInline: 0, width: 'fit-content' }} onClick={() => openEvidence(step)}>记录结果或证据</Button>}</Space>, status: step.status === 'done' ? 'finish' : step.status === 'blocked' ? 'error' : step.status === 'running' ? 'process' : 'wait' }))} />
             </Card>
           ) : (
-            <Card title={t('work.card.plan')} extra={plan && <Tag color={plan.status === 'draft' ? 'gold' : 'processing'}>{planStatusLabels[plan.status] || plan.status}</Tag>}>
+            <Card title={t('work.card.plan')} extra={plan && <Tag color={plan.status === 'draft' ? 'default' : 'processing'}>{planStatusLabels[plan.status] || plan.status}</Tag>}>
               <Form form={form} layout="vertical" onFinish={submitPlan}>
                 <Form.Item label="选择可复用流程"><Select placeholder="选择交付、调研或故障响应流程" onChange={applyTemplate} disabled={!canWrite} options={planTemplates.map((item) => ({ value: item.value, label: item.label }))} /></Form.Item>
                 <Form.Item name="objective" label="目标" rules={[{ required: true, min: 4 }]}><Input.TextArea rows={3} placeholder="这项工作要交付什么结果？" disabled={!canWrite} /></Form.Item>
@@ -1168,7 +1241,7 @@ function TeamPage({ workspace, members, workspaceRole, onRefresh }) {
   const removeMember = async (member) => {
     try { await apiFetch(`/api/v1/workspaces/${workspace.id}/members/${member.id}`, { method: 'DELETE' }); message.success('成员已移除'); onRefresh() } catch (error) { message.error(readableError(error)) }
   }
-  return <div className="page-shell"><Flex justify="space-between" align="center" wrap="wrap" gap={12} className="page-heading"><div><Title level={2}>{t('nav.team')}</Title><Text type="secondary">成员归属工作区管理；管理员可添加已注册用户，并按最小权限原则分配角色。</Text></div>{manager && <Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>添加成员</Button>}</Flex><Card><List dataSource={members} renderItem={(member) => <List.Item actions={manager && member.role !== 'owner' ? [<Popconfirm key="remove" title="确认移除此成员？" onConfirm={() => removeMember(member)} okText="确认" cancelText="取消"><Button danger type="link">移除</Button></Popconfirm>] : []}><List.Item.Meta avatar={<Avatar icon={<UserOutlined />} />} title={<Space><Text strong>{member.user.display_name}</Text>{member.user.is_platform_admin && <Tag color="purple">平台管理员</Tag>}</Space>} description={member.user.email} /><Tag color={member.role === 'owner' ? 'gold' : member.role === 'admin' ? 'blue' : 'default'}>{roleLabels[member.role] || member.role}</Tag></List.Item>} /></Card><Modal title="添加已注册成员" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} okText="确认" cancelText="取消" destroyOnHidden><Form form={form} layout="vertical" onFinish={addMember} initialValues={{ role: 'member' }}><Form.Item name="email" label="邮箱" rules={[{ required: true, type: 'email' }]}><Input placeholder="对方需要先完成注册" /></Form.Item><Form.Item name="role" label="角色"><Select options={['admin', 'member', 'viewer'].map((value) => ({ value, label: roleLabels[value] }))} /></Form.Item></Form></Modal></div>
+  return <div className="page-shell"><Flex justify="space-between" align="center" wrap="wrap" gap={12} className="page-heading"><div><Title level={2}>{t('nav.team')}</Title><Text type="secondary">成员归属工作区管理；管理员可添加已注册用户，并按最小权限原则分配角色。</Text></div>{manager && <Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>添加成员</Button>}</Flex><Card><List dataSource={members} renderItem={(member) => <List.Item actions={manager && member.role !== 'owner' ? [<Popconfirm key="remove" title="确认移除此成员？" onConfirm={() => removeMember(member)} okText="确认" cancelText="取消"><Button danger type="link">移除</Button></Popconfirm>] : []}><List.Item.Meta avatar={<Avatar icon={<UserOutlined />} />} title={<Space><Text strong>{member.user.display_name}</Text>{member.user.is_platform_admin && <Tag bordered={false}>平台管理员</Tag>}</Space>} description={member.user.email} /><Tag bordered={false}>{roleLabels[member.role] || member.role}</Tag></List.Item>} /></Card><Modal title="添加已注册成员" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} okText="确认" cancelText="取消" destroyOnHidden><Form form={form} layout="vertical" onFinish={addMember} initialValues={{ role: 'member' }}><Form.Item name="email" label="邮箱" rules={[{ required: true, type: 'email' }]}><Input placeholder="对方需要先完成注册" /></Form.Item><Form.Item name="role" label="角色"><Select options={['admin', 'member', 'viewer'].map((value) => ({ value, label: roleLabels[value] }))} /></Form.Item></Form></Modal></div>
 }
 
 function WorkspaceUsageCard() {
@@ -1369,7 +1442,7 @@ function WorkspaceSettingsPage({ workspace, members, workspaceRole, onRefresh, o
                 disabled: capIndex >= 0 && permissionModeOrder.indexOf(mode) > capIndex,
               }))}
             />
-          ) : <Tag color="blue">{permissionModeLabels[currentMode]}</Tag>}
+          ) : <Tag bordered={false}>{permissionModeLabels[currentMode]}</Tag>}
           {savingMode && <Spin size="small" />}
         </Flex>
         <Paragraph type="secondary" style={{ marginTop: 10, marginBottom: 0 }}>{permissionModeHints[currentMode]}</Paragraph>
@@ -1387,7 +1460,7 @@ function WorkspaceSettingsPage({ workspace, members, workspaceRole, onRefresh, o
                 <Button key="delete" size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => removeTarget(target)} aria-label={`删除 ${target.name}`} />,
                 <Switch key="switch" size="small" checked={target.enabled} onChange={(checked) => toggleTarget(target, checked)} aria-label={`启用 ${target.name}`} />,
               ]}>
-                <List.Item.Meta title={<Space size={6}><Tag color="purple">{targetKindLabels[target.kind] || target.kind}</Tag>{target.name}</Space>} description={target.url} />
+                <List.Item.Meta title={<Space size={6}><Tag bordered={false}>{targetKindLabels[target.kind] || target.kind}</Tag>{target.name}</Space>} description={target.url} />
               </List.Item>
             )} />
           ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未配置通知出口" />}
@@ -1433,8 +1506,21 @@ function WorkspaceApp({ session, onLogout }) {
   const [activeConversationId, setActiveConversationId] = useState('')
   const [messages, setMessages] = useState([])
   const [models, setModels] = useState([])
+  const [modelsLoading, setModelsLoading] = useState(true)
+  // 服务端给出的部署级默认模型；列表首项是内置模型注册顺序，不代表本部署可用。
+  const [defaultModel, setDefaultModel] = useState('')
   const [skills, setSkills] = useState([])
   const [mcpServers, setMcpServers] = useState([])
+  const [mcpLoading, setMcpLoading] = useState(true)
+  // 设置面板是一个覆盖在任意页面之上的弹窗：切页不该把它关掉，关掉也不该
+  // 触发一次重新加载，所以它独立于 nav 之外。
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  // 递增即让 ChatPage 重挂载，用于"从插件市场带一个技能进输入卡"这类
+  // 需要重新读取本地偏好的场景。
+  const [chatEpoch, setChatEpoch] = useState(0)
+  // 当前正在使用的自建智能体（创造模式产出）。只影响人设注入与输入卡预设，
+  // 不参与任何权限判定。
+  const [activeAgent, setActiveAgent] = useState(null)
   const [nav, setNav] = useState('chat')
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
@@ -1468,10 +1554,14 @@ function WorkspaceApp({ session, onLogout }) {
   currentConversationIdRef.current = activeConversationId
   const workspace = workspaces.find((item) => item.id === workspaceId) || workspaces[0]
   const activeConversation = conversations.find((item) => item.id === activeConversationId)
-  // 写权限判定提到这一层：侧边栏的“新建对话”与权限档位都需要它。
+  // 写权限判定提到这一层：侧边栏的“新建任务”与权限档位都需要它。
   // 各页面原先各自算一遍，口径一致但容易遗漏（只读成员不能发起 AI 工作）。
   const canWrite = workspace?.role !== 'viewer'
   const canProbeMcp = ['owner', 'admin'].includes(workspace?.role)
+  // 加载函数只按 workspaceId 重建。角色、message API 经 ref 读取：写进依赖
+  // 会让 canProbeMcp 从 false 变 true 时再触发一次全量加载（首屏发两遍请求）。
+  const canProbeMcpRef = useRef(canProbeMcp)
+  canProbeMcpRef.current = canProbeMcp
 
   const clearWorkspaceData = useCallback(() => {
     conversationRequestIdRef.current += 1
@@ -1484,6 +1574,28 @@ function WorkspaceApp({ session, onLogout }) {
     setSkills([])
     setMcpServers([])
     setActiveConversationId('')
+  }, [])
+
+  // 工具探针会逐个连接 MCP 服务，服务没起来时要等到连接超时（实测 2.8s），
+  // 模型探针同样要真实打一次供应商（实测 2s）。它们都不该卡住首屏：先把
+  // 毫秒级返回的成员/任务/会话渲染出来，慢数据到了再补齐。
+  const loadSlowWorkspaceData = useCallback((requestedWorkspaceId, isFresh) => {
+    setModelsLoading(true)
+    apiFetch('/api/v1/models', { workspaceId: requestedWorkspaceId })
+      .then((data) => {
+        if (!isFresh()) return
+        // models 全线按"对象数组"消费（id/ready/能力字段），不要在这里退化成 id 列表。
+        setModels(data.details || [])
+        setDefaultModel(data.default_model || '')
+      })
+      .catch(() => { if (isFresh()) setModels([]) })
+      .finally(() => { if (isFresh()) setModelsLoading(false) })
+    setMcpLoading(true)
+    apiFetch(`/api/v1/mcp/servers${canProbeMcpRef.current ? '?probe=true' : ''}`, { workspaceId: requestedWorkspaceId })
+      .catch(() => apiFetch('/api/v1/mcp/servers', { workspaceId: requestedWorkspaceId }))
+      .then((data) => { if (isFresh()) setMcpServers(data?.servers || []) })
+      .catch(() => { if (isFresh()) setMcpServers([]) })
+      .finally(() => { if (isFresh()) setMcpLoading(false) })
   }, [])
 
   const loadWorkspace = useCallback(async ({ quiet = false } = {}) => {
@@ -1501,35 +1613,31 @@ function WorkspaceApp({ session, onLogout }) {
       setLoading(true)
     } else if (quiet) setRefreshing(true)
     setWorkspaceError('')
+    const isFresh = () => requestId === workspaceRequestIdRef.current && currentWorkspaceIdRef.current === requestedWorkspaceId
     try {
-      const [memberData, projectData, taskData, conversationData, modelData, skillData, mcpData, workspaceListData] = await Promise.all([
+      const [memberData, projectData, taskData, conversationData, skillData, workspaceListData] = await Promise.all([
         apiFetch(`/api/v1/workspaces/${requestedWorkspaceId}/members`, { workspaceId: requestedWorkspaceId }),
         apiFetch('/api/v1/projects', { workspaceId: requestedWorkspaceId }),
         apiFetch('/api/v1/tasks', { workspaceId: requestedWorkspaceId }),
         apiFetch('/api/v1/conversations', { workspaceId: requestedWorkspaceId }),
-        apiFetch('/api/v1/models', { workspaceId: requestedWorkspaceId }),
         apiFetch('/api/v1/skills', { workspaceId: requestedWorkspaceId }),
-        apiFetch(`/api/v1/mcp/servers${canProbeMcp ? '?probe=true' : ''}`, { workspaceId: requestedWorkspaceId })
-          .catch(() => canProbeMcp ? apiFetch('/api/v1/mcp/servers', { workspaceId: requestedWorkspaceId }) : { servers: [] })
-          .catch(() => ({ servers: [] })),
         // 工作区自身的字段（名称、权限档位）以前只在登录时取一次，
         // 改完不重新拉取会让界面一直停在旧值。失败不拖垮其余数据。
         apiFetch('/api/v1/workspaces', { workspaceId: requestedWorkspaceId }).catch(() => null),
       ])
-      if (requestId !== workspaceRequestIdRef.current || currentWorkspaceIdRef.current !== requestedWorkspaceId) return false
+      if (!isFresh()) return false
       if (workspaceListData?.workspaces) setWorkspaces(workspaceListData.workspaces)
       setMembers(memberData.members || [])
       setProjects(projectData.projects || [])
       setTasks(taskData.tasks || [])
       setConversations(conversationData.conversations || [])
-      setModels(modelData.details || [])
       setSkills(skillData.skills || [])
-      setMcpServers(mcpData.servers || [])
       setActiveConversationId((current) => current && conversationData.conversations?.some((item) => item.id === current) ? current : conversationData.conversations?.[0]?.id || '')
       loadedWorkspaceIdRef.current = requestedWorkspaceId
+      loadSlowWorkspaceData(requestedWorkspaceId, isFresh)
       return true
     } catch (error) {
-      if (requestId !== workspaceRequestIdRef.current || currentWorkspaceIdRef.current !== requestedWorkspaceId) return false
+      if (!isFresh()) return false
       const detail = readableError(error)
       setWorkspaceError(detail)
       message.error(detail)
@@ -1540,10 +1648,17 @@ function WorkspaceApp({ session, onLogout }) {
         setRefreshing(false)
       }
     }
-  }, [canProbeMcp, clearWorkspaceData, message, workspaceId])
+  }, [clearWorkspaceData, loadSlowWorkspaceData, message, workspaceId])
 
   useEffect(() => { setWorkspaceId(workspaceId); loadWorkspace() }, [loadWorkspace, workspaceId])
   useEffect(() => { window.scrollTo(0, 0) }, [nav])
+  // 首屏渲染完再预取其余路由：既不抢首屏带宽，也避免切页时出现骨架屏。
+  useEffect(() => {
+    const idle = window.requestIdleCallback || ((fn) => window.setTimeout(fn, 400))
+    const cancel = window.cancelIdleCallback || window.clearTimeout
+    const handle = idle(() => preloadRoutes())
+    return () => cancel(handle)
+  }, [])
   const loadConversationMessages = useCallback(async (conversationId = activeConversationId, { notify = false, beforeId = '', append = false } = {}) => {
     const requestId = ++conversationRequestIdRef.current
     const requestedWorkspaceId = workspaceId
@@ -1634,12 +1749,60 @@ function WorkspaceApp({ session, onLogout }) {
     if (!updated?.id) return
     setWorkspaces((current) => current.map((item) => item.id === updated.id ? { ...item, ...updated } : item))
   }, [])
+  // 工作区偏好整体覆盖写。接口回包就是权威值，直接合并进工作区对象，
+  // 免得设置面板下一次打开时显示的还是旧开关。
+  const saveWorkspacePreferences = useCallback(async (next) => {
+    if (!workspaceId) throw new Error('尚未选择工作区')
+    const data = await apiFetch(`/api/v1/workspaces/${workspaceId}/preferences`, {
+      method: 'PUT',
+      workspaceId,
+      body: next,
+    })
+    setWorkspaces((current) => current.map((item) => (
+      item.id === workspaceId ? { ...item, preferences: data.preferences } : item
+    )))
+    return data.preferences
+  }, [workspaceId])
+  const savePermissionMode = useCallback(async (mode) => {
+    if (!workspaceId) throw new Error('尚未选择工作区')
+    const data = await apiFetch(`/api/v1/workspaces/${workspaceId}/permission-mode`, {
+      method: 'PUT',
+      workspaceId,
+      body: { permission_mode: mode },
+    })
+    if (data.workspace) patchWorkspace(data.workspace)
+    return data
+  }, [workspaceId, patchWorkspace])
+  // 插件市场点「使用」：把技能带到对话输入卡上，而不是弹一个说明就完事。
+  // ChatPage 只在挂载时读一次输入卡偏好，所以这里换一个 key 让它重挂载，
+  // 否则"已选择技能"的提示和实际发出的请求会对不上。
+  const useSkillFromMarket = useCallback((skillName) => {
+    saveComposerPrefs({ ...loadComposerPrefs(), skillName })
+    setChatEpoch((value) => value + 1)
+    setNav('chat')
+    setMobileNav(false)
+    message.success(`已选择技能：${skillDisplayName(skillName)}`)
+  }, [message])
+  // 创造模式：把智能体的运行预设灌进输入卡，并记住当前智能体。
+  // 只覆盖它显式配过的项——模型留空表示"跟随默认"，那就不该把用户当前选的模型改掉。
+  const useAgentFromStudio = useCallback((agent) => {
+    const next = { ...loadComposerPrefs() }
+    if (agent.model_id) next.modelId = agent.model_id
+    if (agent.skill_name) next.skillName = agent.skill_name
+    if (Array.isArray(agent.mcp_servers)) next.mcpServers = agent.mcp_servers
+    saveComposerPrefs(next)
+    setActiveAgent(agent)
+    setChatEpoch((value) => value + 1)
+    setNav('chat')
+    setMobileNav(false)
+    message.success(`已切换到智能体：${agent.name}`)
+  }, [message])
   const searchTypeLabels = { task: '任务', project: '项目', conversation: '对话', message: '消息', attachment: '附件', knowledge_base: '知识库' }
   const searchOptions = useMemo(() => searchResults.map((item) => ({
     value: `${item.type}:${item.id}`,
     label: (
       <div className="global-search-option">
-        <Tag color="blue" className="global-search-tag">{searchTypeLabels[item.type] || item.type}</Tag>
+        <Tag bordered={false} className="global-search-tag">{searchTypeLabels[item.type] || item.type}</Tag>
         <div className="global-search-copy"><span>{item.title}</span>{item.snippet && <small>{item.snippet}</small>}</div>
       </div>
     ),
@@ -1662,11 +1825,22 @@ function WorkspaceApp({ session, onLogout }) {
     setGlobalQuery('')
     setSearchResults([])
   }
-  // 导航不再用 Menu：它与对话列表共享一条侧边栏，需要更紧凑的行高
-  // 与非选中态的弱化样式。“AI 对话”不单独列项——对话列表本身就是入口。
+  // 参考稿的结构：侧边栏顶部是"新建任务"这个首要动作，随后是一组等权的
+  // 功能入口，再往下是常驻的任务（对话）列表，最后才是账号区。
+  // 本产品只有 code 一种形态，因此不提供模式切换器——顶部不做任何 tab。
   const sidebarNav = (
     <nav className="sidebar-nav" aria-label="工作区视图">
-      {buildNavigationItems().filter((item) => item.key !== 'chat').map((item) => (
+      <button
+        type="button"
+        className="sidebar-nav-item is-primary"
+        onClick={() => { setNav('chat'); setMobileNav(false); newConversation() }}
+        disabled={!canWrite}
+        title={canWrite ? '新建一个任务' : '只读成员不能新建任务'}
+      >
+        <span className="sidebar-nav-icon"><PlusOutlined /></span>
+        <span className="sidebar-nav-label">新建任务</span>
+      </button>
+      {buildNavigationItems().filter((item) => !['chat', 'settings'].includes(item.key)).map((item) => (
         <button
           key={item.key}
           type="button"
@@ -1680,11 +1854,27 @@ function WorkspaceApp({ session, onLogout }) {
       ))}
     </nav>
   )
+  const accountMenu = {
+    items: [
+      // label 兜底：/auth/me 还没回来时 profile 为空，undefined 会让 antd 渲染出
+      // 一个没有内容的空白菜单项，看着像"菜单是空的"。
+      { key: 'profile', label: profile?.email || '正在加载账号…', disabled: true },
+      { type: 'divider' },
+      // 参考稿里"设置"是一个覆盖式面板，不是又一个页面；切页会丢掉
+      // 正在看的内容，而设置属于随时开随时关的动作。
+      { key: 'settings', icon: <SettingOutlined />, label: '设置', onClick: () => setSettingsOpen(true) },
+      { key: 'workspace-settings', icon: <TeamOutlined />, label: t('nav.settings'), onClick: () => { setNav('settings'); setMobileNav(false) } },
+      { key: 'theme', icon: <BulbOutlined />, label: getThemeMode() === 'dark' ? '切换到浅色' : '切换到深色', onClick: () => { toggleThemeMode(); setThemeTick((tick) => tick + 1) } },
+      { type: 'divider' },
+      { key: 'logout', icon: <LogoutOutlined />, label: '退出登录', onClick: onLogout },
+    ],
+  }
   const layoutSider = <>
-    <button type="button" className="workspace-brand" onClick={() => { setNav('chat'); setMobileNav(false) }} title="回到对话工作台">
-      <Avatar icon={<RobotOutlined />} className="brand-avatar" />
-      <span className="workspace-brand-copy"><strong>futureAgent</strong><small>{t('app.tagline')}</small></span>
+    <button type="button" className="workspace-brand" onClick={() => { setNav('chat'); setMobileNav(false) }} title="回到任务工作台">
+      <BrandMark size={26} className="brand-mark" />
+      <span className="workspace-brand-copy"><strong>futureAgent</strong><small>{workspace?.name || t('app.tagline')}</small></span>
     </button>
+    {sidebarNav}
     <SidebarConversations
       conversations={conversations}
       activeConversationId={activeConversation?.id}
@@ -1696,38 +1886,61 @@ function WorkspaceApp({ session, onLogout }) {
       onCreate={() => { setNav('chat'); setMobileNav(false); newConversation() }}
       onSelect={(conversationId) => { setNav('chat'); setMobileNav(false); selectConversation(conversationId) }}
     />
-    {sidebarNav}
     <div className="sidebar-footer">
-      <Select value={workspaceId || undefined} onChange={selectWorkspace} className="sidebar-workspace-select" size="small" placeholder="选择工作区" aria-label="切换工作区" options={workspaces.map((item) => ({ value: item.id, label: item.name }))} />
-      <PermissionModeChip workspace={workspace} canWrite={canWrite} onUpdated={patchWorkspace} messageApi={message} />
-      <Flex align="center" justify="space-between" gap={8} className="sidebar-account-row">
-        <Tag color={workspace?.role === 'owner' ? 'gold' : 'blue'}>{roleLabels[workspace?.role] || '成员'}</Tag>
-        <Dropdown menu={{ items: [{ key: 'profile', label: profile?.email, disabled: true }, { type: 'divider' }, { key: 'logout', icon: <LogoutOutlined />, label: '退出登录', onClick: onLogout }] }}>
-          <Button type="text" size="small" className="sidebar-account" aria-label={'账号菜单：' + (profile?.display_name || '当前用户')}><Avatar size={20} icon={<UserOutlined />} /><span>{profile?.display_name}</span></Button>
+      {/* 侧边栏底部这两个浮层都在窗口最下沿，默认的 bottom* 放置没有向下空间，
+          只能指望 rc-trigger 自动翻转；一旦它没翻（短窗口下很常见），菜单就落在
+          视口之外，看起来就是"点了什么也没有"，同时把文档撑高冒出滚动条。
+          这里直接指定向上展开，不再依赖自动判断。 */}
+      <Select value={workspaceId || undefined} onChange={selectWorkspace} className="sidebar-workspace-select" size="small" placeholder="选择工作区" aria-label="切换工作区" placement="topLeft" options={workspaces.map((item) => ({ value: item.id, label: item.name }))} />
+      <Flex align="center" justify="space-between" gap={6} className="sidebar-account-row">
+        <Dropdown menu={accountMenu} trigger={['click']} placement="topRight">
+          <Button type="text" size="small" className="sidebar-account" aria-label={'账号菜单：' + (profile?.display_name || '当前用户')}>
+            <Avatar size={20} icon={<UserOutlined />} />
+            <span>{profile?.display_name}</span>
+            <Tag bordered={false}>{roleLabels[workspace?.role] || '成员'}</Tag>
+          </Button>
         </Dropdown>
       </Flex>
     </div>
   </>
 
-  let content
-  if (nav === 'chat') content = <ChatPage activeConversation={activeConversation} messages={messages} models={models} skills={skills} mcpServers={mcpServers} hasMoreMessages={hasMoreMessages} onLoadMoreMessages={loadOlderMessages} onRefreshMessages={loadConversationMessages} workspaceRole={workspace?.role} />
-  else if (nav === 'business') content = <BusinessAssistantsPage workspaceRole={workspace?.role} members={members} currentUserId={profile?.id} />
-  else if (nav === 'report') content = <ReportAssistantsPage workspaceRole={workspace?.role} members={members} currentUserId={profile?.id} />
+  // 分包页面走自己的路由缓存；看板/工作模式/团队/设置是同步组件。
+  // JSX 里小写标签会被当成 HTML 标签，必须先赋给大写开头的变量。
+  const { key: resolvedRouteKey, Component: RouteView } = useRouteComponent(
+    ['chat', 'business', 'report', 'market'].includes(nav) ? nav : '',
+  )
+  // 只有"缓存里的组件就是当前这一页"时才渲染，避免把上一页的组件按这一页的
+  // props 渲染出来。
+  const routeViewFor = (key) => (resolvedRouteKey === key && RouteView ? RouteView : null)
+  let content = null
+  const ChatView = routeViewFor('chat')
+  const BusinessView = routeViewFor('business')
+  const ReportView = routeViewFor('report')
+  const MarketView = routeViewFor('market')
+  if (nav === 'chat') content = ChatView ? <ChatView key={chatEpoch} activeConversation={activeConversation} messages={messages} models={models} modelsLoading={modelsLoading} defaultModel={defaultModel} skills={skills} mcpServers={mcpServers} hasMoreMessages={hasMoreMessages} onLoadMoreMessages={loadOlderMessages} onRefreshMessages={loadConversationMessages} onRefresh={refreshWorkspace} workspace={workspace} onWorkspaceUpdated={patchWorkspace} onOpenBoard={() => setNav('board')} onCreateTask={newConversation} workspaceRole={workspace?.role} activeAgent={activeAgent} onClearAgent={() => setActiveAgent(null)} onOpenStudio={() => setNav('studio')} /> : null
+  else if (nav === 'business') content = BusinessView ? <BusinessView workspaceRole={workspace?.role} members={members} currentUserId={profile?.id} /> : null
+  else if (nav === 'report') content = ReportView ? <ReportView workspaceRole={workspace?.role} members={members} currentUserId={profile?.id} /> : null
+  else if (nav === 'market') content = MarketView ? <MarketView mcpServers={mcpServers} skills={skills} mcpLoading={mcpLoading} preferences={workspace?.preferences} onSavePreferences={saveWorkspacePreferences} canManage={workspace?.role === 'owner' || workspace?.role === 'admin'} onUseSkill={useSkillFromMarket} onRefresh={refreshWorkspace} /> : null
   else if (nav === 'board') content = <BoardPage projects={projects} tasks={tasks} members={members} onRefresh={refreshWorkspace} openTask={(task) => setTaskDrawer(task)} workspaceRole={workspace?.role} />
   else if (nav === 'work') content = <WorkModePage tasks={tasks} members={members} models={models} skills={skills} mcpServers={mcpServers} workspaceRole={workspace?.role} profile={profile} workspace={workspace} onRefresh={refreshWorkspace} onOpenBoard={() => setNav('board')} />
+  else if (nav === 'studio') content = <AgentStudioPage workspace={workspace} workspaceRole={workspace?.role} models={models} defaultModel={defaultModel} skills={skills} mcpServers={mcpServers} onUseAgent={useAgentFromStudio} onRefresh={refreshWorkspace} loading={mcpLoading} />
   else if (nav === 'team') content = <TeamPage workspace={workspace} members={members} workspaceRole={workspace?.role} onRefresh={refreshWorkspace} />
   else if (nav === 'settings') content = <WorkspaceSettingsPage workspace={workspace} members={members} workspaceRole={workspace?.role} onRefresh={refreshWorkspace} onWorkspaceUpdated={patchWorkspace} />
 
-  const workspaceContent = loading ? (
+  // 分包还没就绪时保留上一页的节点：宁可短暂停在旧页面，也不提交一帧空内容。
+  const lastRouteContentRef = useRef(null)
+  if (content) lastRouteContentRef.current = content
+  const stableContent = content || lastRouteContentRef.current
+  const routeReady = Boolean(stableContent)
+
+  const workspaceContent = loading || !routeReady ? (
     <div className="workspace-loading"><Space direction="vertical" align="center"><Spin size="large" /><Text type="secondary">正在加载工作区</Text></Space></div>
   ) : workspaceError && (!workspaceId || loadedWorkspaceIdRef.current !== workspaceId) ? (
     <div className="workspace-state-page"><Alert type="error" showIcon message="工作区加载失败" description={workspaceError} /><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请检查连接后重新加载"><Button type="primary" icon={<ReloadOutlined />} onClick={() => loadWorkspace()}>重新加载</Button></Empty></div>
   ) : (
     <>
       {workspaceError && <Alert className="workspace-error-strip" banner type="warning" showIcon message="刷新未完成，当前显示上次成功加载的数据。" action={<Button size="small" onClick={refreshWorkspace}>重试</Button>} />}
-      <ErrorBoundary resetToken={nav}>
-        <Suspense fallback={<div className="workspace-loading"><Spin size="large" /></div>}>{content}</Suspense>
-      </ErrorBoundary>
+      <ErrorBoundary resetToken={nav}>{stableContent}</ErrorBoundary>
     </>
   )
 
@@ -1821,6 +2034,29 @@ function WorkspaceApp({ session, onLogout }) {
           )} />
         ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无通知" />}
       </Drawer>
+      {/* 设置面板挂在 ErrorBoundary 之外会连累整个工作台：面板里任何一处
+          渲染异常都会把侧边栏和主区一起打成白屏，用户连"关掉设置"都点不到。 */}
+      <ErrorBoundary resetToken={settingsOpen ? 'settings-open' : 'settings-closed'}>
+        <SettingsModal
+          open={settingsOpen}
+          onClose={() => setSettingsOpen(false)}
+          profile={profile}
+          workspace={workspace}
+          workspaceRole={workspace?.role}
+          models={models}
+          skills={skills}
+          mcpServers={mcpServers}
+          modelsLoading={modelsLoading}
+          preferences={workspace?.preferences}
+          onSavePreferences={saveWorkspacePreferences}
+          onSavePermissionMode={savePermissionMode}
+          onOpenAdvanced={() => { setSettingsOpen(false); setNav('settings'); setMobileNav(false) }}
+          onUseSkill={useSkillFromMarket}
+          onLogout={onLogout}
+          themeMode={getThemeMode()}
+          onToggleTheme={() => { toggleThemeMode(); setThemeTick((tick) => tick + 1) }}
+        />
+      </ErrorBoundary>
       <Drawer title="任务详情" open={Boolean(taskDrawer)} onClose={() => setTaskDrawer(null)} width={screens.sm ? 480 : '100%'}>
         {drawerTask && <Space direction="vertical" size="middle" style={{ width: '100%' }}><Title level={4}>{drawerTask.title}</Title><Paragraph>{drawerTask.description || '暂无任务说明。'}</Paragraph><Descriptions bordered size="small" column={1}>
           <Descriptions.Item label="状态"><Select size="small" value={drawerTask.status} style={{ width: 110 }} onChange={(value) => updateDrawerTask({ status: value })} options={Object.entries(taskStatusLabels).map(([value, label]) => ({ value, label }))} /></Descriptions.Item>
@@ -1867,24 +2103,47 @@ export function Root() {
   return <ConfigProvider locale={antdLocaleOf()} theme={{
     algorithm: isDark ? theme.darkAlgorithm : theme.defaultAlgorithm,
     token: {
-      colorPrimary: '#4f5fd5',
-      colorInfo: '#4f5fd5',
-      colorSuccess: '#1f9d72',
-      colorWarning: '#d97706',
-      colorError: '#d14343',
-      colorText: isDark ? '#e6eaf2' : '#172033',
-      colorTextSecondary: isDark ? '#9aa4b8' : '#667085',
-      colorBorder: isDark ? '#39435c' : '#e0e6ef',
-      colorBorderSecondary: isDark ? '#2a3346' : '#eaeef6',
-      colorBgLayout: isDark ? '#0f1420' : '#f4f6fb',
-      colorBgContainer: isDark ? '#171e2e' : '#ffffff',
-      borderRadius: 10,
-      controlHeight: 36,
+      // 主色取近黑：整套界面不用渐变，也不给按钮加彩色投影。
+      // 彩色只留给语义状态（成功 / 警告 / 危险）。
+      colorPrimary: isDark ? '#ededf0' : '#1f1f22',
+      colorInfo: isDark ? '#ededf0' : '#1f1f22',
+      // 但**只设 colorPrimary 是不够的**：antd 会拿主色按比例调出一整套"底色"
+      // 令牌（选中项背景 controlItemBgActive、Alert 的 colorInfoBg 等）。
+      // 近黑按比例调出来仍是深灰，于是下拉菜单的选中项变成一块黑方块、
+      // 提示条变成黑底配深色字——又丑又看不清。这里把派生底色统一压回中性浅色，
+      // 主色只用来做文字/描边强调。
+      colorPrimaryBg: isDark ? '#1e1e22' : '#f4f4f6',
+      colorPrimaryBgHover: isDark ? '#26262c' : '#ebebee',
+      colorPrimaryBorder: isDark ? '#33333a' : '#dcdce0',
+      colorPrimaryBorderHover: isDark ? '#3d3d45' : '#c8c8ce',
+      colorPrimaryHover: isDark ? '#ffffff' : '#3a3a42',
+      colorPrimaryActive: isDark ? '#d8d8de' : '#0c0c0e',
+      colorPrimaryText: isDark ? '#ededf0' : '#1f1f22',
+      colorPrimaryTextHover: isDark ? '#ffffff' : '#3a3a42',
+      colorPrimaryTextActive: isDark ? '#d8d8de' : '#0c0c0e',
+      colorInfoBg: isDark ? '#1e1e22' : '#f4f4f6',
+      colorInfoBorder: isDark ? '#33333a' : '#dcdce0',
+      controlItemBgActive: isDark ? '#26262c' : '#efeff1',
+      controlItemBgActiveHover: isDark ? '#2e2e35' : '#e6e6e9',
+      controlItemBgHover: isDark ? '#222227' : '#f5f5f7',
+      colorSuccess: isDark ? '#3fbd8e' : '#17916b',
+      colorWarning: isDark ? '#d8a33f' : '#b7791f',
+      colorError: isDark ? '#e0706a' : '#c5362f',
+      colorText: isDark ? '#ededf0' : '#1a1a1c',
+      colorTextSecondary: isDark ? '#b9b9c0' : '#55555c',
+      colorBorder: isDark ? '#2b2b30' : '#e4e4e6',
+      colorBorderSecondary: isDark ? '#26262b' : '#ececee',
+      colorBgLayout: isDark ? '#0f0f11' : '#ffffff',
+      colorBgContainer: isDark ? '#17171a' : '#ffffff',
+      colorLink: isDark ? '#ededf0' : '#1a1a1c',
+      borderRadius: 9,
+      controlHeight: 34,
       fontFamily: '"PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif',
     },
     components: {
-      Button: { primaryShadow: '0 6px 16px rgba(79, 95, 213, .22)', fontWeight: 500 },
+      Button: { primaryShadow: 'none', defaultShadow: 'none', fontWeight: 500 },
       Card: { headerFontSize: 15 },
+      Layout: { bodyBg: isDark ? '#0f0f11' : '#ffffff', headerBg: isDark ? '#0f0f11' : '#ffffff', siderBg: isDark ? '#17171a' : '#f7f7f8' },
     },
   }}><AntApp><App /></AntApp></ConfigProvider>
 }

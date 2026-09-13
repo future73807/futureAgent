@@ -32,6 +32,8 @@ services:
       # Compose path can therefore expose its five file tools by default.
       ENABLE_LOCAL_MCP_TOOLS: ${ENABLE_LOCAL_MCP_TOOLS:-true}
       MCP_WORKSPACE_SIGNING_KEY: ${MCP_WORKSPACE_SIGNING_KEY:-change-this-development-mcp-secret-before-production}
+      # 与 mcp 服务共享同一个工作区卷（只读），用于读取 AGENTS.md / CLAUDE.md。
+      WORKSPACE_FILES_ROOT: /workspace
       # 留空时直连已配置的供应商；设置后统一通过 LiteLLM 代理路由。
       LITELLM_PROXY_URL: ${LITELLM_PROXY_URL:-}
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-}
@@ -57,6 +59,9 @@ services:
     volumes:
       - futureagent_uploads:/app/uploads
       - futureagent_runtime_config:/app/runtime/config
+      # 只读挂载工作区文件卷：API 需要读 AGENTS.md / CLAUDE.md 才能实现设置
+      # 面板里的"导入设置"开关。写入仍然只由 mcp 服务负责（它挂的是读写）。
+      - agent_workspace:/workspace:ro
     extra_hosts:
       # Linux Docker 需要显式注册该别名；Docker Desktop 会安全地复用它。
       - "host.docker.internal:host-gateway"
