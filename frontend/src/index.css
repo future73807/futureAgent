@@ -512,9 +512,8 @@ html[data-theme='dark'] .brand-mark-fg { fill: #1f1f22; stroke: #1f1f22; }
   scrollbar-width: thin;
 }
 .sidebar-conversations .ant-conversations-item {
-  height: 32px;
-  margin-bottom: 1px;
-  border-radius: 8px !important;
+  padding: 0 8px !important;
+  border-radius: 7px !important;
   color: var(--text-secondary) !important;
   transition: color .15s var(--ease), background .15s var(--ease);
 }
@@ -597,6 +596,14 @@ html[data-theme='dark'] .brand-mark-fg { fill: #1f1f22; stroke: #1f1f22; }
 .global-search-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .global-search-copy small { display: block; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
 .messages-older-wrap { width: fit-content; margin: 0 auto 14px; }
+/* ============================== 会话列表密度 ============================== */
+/* antd-x 的会话列表按"大按钮"排：条目最小高度 = controlHeightLG(≈40px)、列表
+   还有 4px 行距，实测行距 48px。侧边栏动辄几十条任务、助手面板十几条会话，
+   一屏只放得下十来个。统一压到 30px 行高、0 行距——同样高度多看约 50% 的条目，
+   行内仍是 13px 文字 + 16px 图标，不挤。 */
+.ant-conversations { row-gap: 0 !important; }
+.ant-conversations-item { height: 30px !important; min-height: 30px !important; margin-bottom: 0; }
+
 /* ============================== 通知中心 ============================== */
 /* 一屏里要能分清"发生了什么、有多急、什么时候"。所以：图标管来源、颜色管
    严重度（只有语义色）、时间用相对值、按天分组；未读用左侧黑条 + 极浅底色，
