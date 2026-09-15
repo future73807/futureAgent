@@ -2232,6 +2232,16 @@ export function Root() {
       colorError: isDark ? '#e0706a' : '#c5362f',
       colorText: isDark ? '#ededf0' : '#1a1a1c',
       colorTextSecondary: isDark ? '#b9b9c0' : '#55555c',
+      // 夜间主色是近白（--primary: #ededf0），实底按钮/徽标必须配深色文字：
+      // antd 的 colorTextLightSolid 默认恒为白色，于是"白字压浅底"——对比度
+      // 只有 1.6，按钮看着像被禁用。对话页的发送键此前是靠单独 CSS 兜的。
+      colorTextLightSolid: isDark ? '#1a1a1c' : '#ffffff',
+      // 占位符与禁用态在夜间默认太暗：antd 的占位符是 25% 白（对比度约 2.2），
+      // 搜索框里几乎读不出提示语；禁用主按钮则是白字配浅灰底（约 1.6）。这两处
+      // 都调到"看得清但仍明显弱于正文/可点"的程度。
+      colorTextPlaceholder: isDark ? 'rgba(255, 255, 255, .45)' : 'rgba(0, 0, 0, .32)',
+      colorTextDisabled: isDark ? '#8f8f98' : 'rgba(0, 0, 0, .28)',
+      colorBgContainerDisabled: isDark ? '#26262b' : 'rgba(0, 0, 0, .04)',
       colorBorder: isDark ? '#2b2b30' : '#e4e4e6',
       colorBorderSecondary: isDark ? '#26262b' : '#ececee',
       colorBgLayout: isDark ? '#0f0f11' : '#ffffff',
