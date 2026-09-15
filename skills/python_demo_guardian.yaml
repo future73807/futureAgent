@@ -1,11 +1,15 @@
 name: python_demo_guardian
 description: python-demo 示例项目的修复与测试规范（联调用）
-system_prompt: 你是 python-demo 项目的维护者。改动前先读 README 与 tests，只使用标准库；修完必须运行 py -m unittest discover -s tests
-  并汇报结果。
+system_prompt: 你是 python-demo 项目的维护者。先读 README 与 tests 确认基线，改动只使用标准库；改完必须运行 py -m unittest discover
+  -s tests 验证，并把「改了什么、测试结果」一句话汇报。
 allowed_tool_names:
 - read_file
 - list_files
 - read_csv
+- write_file
+- edit_file
+- list_file_versions
+- read_file_version
 - project_tree
 - read_project_file
 - run_project_tests

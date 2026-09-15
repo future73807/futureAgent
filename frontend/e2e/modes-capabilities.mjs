@@ -457,6 +457,43 @@ await step('循环模式：按停止条件反复迭代', async () => {
   return iterations ? iterations.replace(/\n/g, ' ').slice(0, 120) : body.replace(/\n/g, ' ').slice(0, 120)
 })
 
+// ---- 计划 + 自主：真的把缺陷改掉 -------------------------------------------
+await step('计划+自主闭环：执行修复步骤并写入工作区文件', async () => {
+  const controls = page.locator('.execution-controls').last()
+  const selects = controls.locator('.ant-select')
+  await selects.nth(0).click()
+  await page.waitForSelector('.ant-select-dropdown:visible .ant-select-item-option', { timeout: 10_000 })
+  if (!(await clickOptionByText(/修复|修改|实现|改动/))) {
+    await page.keyboard.press('Escape')
+    throw new Error('计划里没有可执行的修复步骤（计划只在复现步停下了）')
+  }
+  await controls.locator('[aria-label="选择运行模式"]').getByText('自主', { exact: true }).click()
+  await page.waitForTimeout(400)
+  await page.getByRole('button', { name: /执行选中步骤/ }).first().click()
+  await page.waitForFunction(
+    () => {
+      const cards = [...document.querySelectorAll('.work-results')]
+        .filter((card) => card.querySelector('.execution-controls'))
+      return cards.some((card) => /执行失败|已取消/.test(card.innerText))
+        || cards.some((card) => /已完成/.test(card.innerText))
+    },
+    null,
+    { timeout: RUN_TIMEOUT },
+  )
+  const panel = workPanel()
+  // 执行记录里的工具明细在折叠面板内，展开后才能读到工具名（与对话页同一套组件）。
+  for (const header of await panel.locator('.tool-trace-card .ant-collapse-header').all()) {
+    await header.click({ timeout: 3000 }).catch(() => {})
+  }
+  await page.waitForTimeout(600)
+  const text = (await panel.innerText()).split('\n').join(' ')
+  await shot('12-agent-delivery')
+  if (/执行失败|客户端已断开/.test(text)) throw new Error(`修复步骤执行失败：${text.slice(0, 200)}`)
+  const wrote = /write_file|edit_file/.test(text)
+  if (!wrote) throw new Error(`执行记录里没有写入类工具调用：${text.slice(0, 240)}`)
+  return text.slice(0, 220)
+})
+
 // ---- 技能：用户端可见并被使用 ----------------------------------------------
 await step('技能：用户端可选择新建的技能', async () => {
   await sidebarNav('新建任务').click()
