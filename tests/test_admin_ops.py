@@ -173,5 +173,99 @@ class AdminOpsTests(unittest.TestCase):
         self.assertEqual(none_today.json()["events"], [])
 
 
+    def test_delete_user_only_when_no_data(self):
+        """删除账号只对"干净"账号开放：有数据的一律挡回并说明是什么挡住了。"""
+        created = self.client.post(
+            "/api/v1/admin/users",
+            json={
+                "email": "ops-cleanup@example.com",
+                "password": TEST_PASSWORD,
+                "display_name": "Cleanup Target",
+            },
+            headers=self.auth_headers(),
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        user_id = created.json()["user"]["id"]
+
+        # 先给他一个工作区：此时删除必须被拒，并提示先转移所有权
+        workspace = self.client.post(
+            "/api/v1/admin/workspaces",
+            json={"name": "Cleanup 工作区", "owner_user_id": user_id},
+            headers=self.auth_headers(),
+        )
+        self.assertEqual(workspace.status_code, 201, workspace.text)
+        blocked_by_ownership = self.client.delete(
+            f"/api/v1/admin/users/{user_id}", headers=self.auth_headers()
+        )
+        self.assertEqual(blocked_by_ownership.status_code, 409, blocked_by_ownership.text)
+        self.assertIn("所有权", blocked_by_ownership.json()["detail"])
+
+        # 工作区删掉后账号就干净了：这次应当真的被删掉
+        workspace_id = workspace.json()["workspace"]["id"]
+        self.assertIn(
+            self.client.delete(
+                f"/api/v1/admin/workspaces/{workspace_id}", headers=self.auth_headers()
+            ).status_code,
+            (200, 204),
+        )
+        deleted = self.client.delete(f"/api/v1/admin/users/{user_id}", headers=self.auth_headers())
+        self.assertEqual(deleted.status_code, 204, deleted.text)
+        listed = self.client.get("/api/v1/admin/users", headers=self.auth_headers())
+        self.assertNotIn(user_id, [item["id"] for item in listed.json()["users"]])
+        self.assertEqual(
+            self.client.delete(f"/api/v1/admin/users/{user_id}", headers=self.auth_headers()).status_code,
+            404,
+        )
+
+    def test_delete_user_guards_self_admin_and_data(self):
+        me = self.client.get("/api/v1/auth/me", headers=self.auth_headers())
+        self.assertEqual(me.status_code, 200, me.text)
+        my_id = me.json()["user"]["id"]
+        self_delete = self.client.delete(f"/api/v1/admin/users/{my_id}", headers=self.auth_headers())
+        self.assertEqual(self_delete.status_code, 409, self_delete.text)
+        self.assertIn("自己", self_delete.json()["detail"])
+
+        # 平台管理员账号必须先撤销管理员身份
+        other_admin = self.client.post(
+            "/api/v1/admin/users",
+            json={
+                "email": "ops-other-admin@example.com",
+                "password": TEST_PASSWORD,
+                "display_name": "Other Admin",
+                "is_platform_admin": True,
+            },
+            headers=self.auth_headers(),
+        )
+        self.assertEqual(other_admin.status_code, 201, other_admin.text)
+        other_admin_id = other_admin.json()["user"]["id"]
+        refused = self.client.delete(f"/api/v1/admin/users/{other_admin_id}", headers=self.auth_headers())
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertIn("管理员", refused.json()["detail"])
+
+        # 有业务数据的账号：创建内容后删除应被拒，并列出挡住的具体表
+        with_data = self.client.post(
+            "/api/v1/admin/users",
+            json={
+                "email": "ops-with-data@example.com",
+                "password": TEST_PASSWORD,
+                "display_name": "Has Data",
+            },
+            headers=self.auth_headers(),
+        )
+        with_data_id = with_data.json()["user"]["id"]
+        # 让这个账号加入一个现有工作区：它没有拥有工作区，但已有成员关系，
+        # 命中的是「还有数据」这条分支，而不是所有权那条。
+        workspaces = self.client.get("/api/v1/admin/workspaces", headers=self.auth_headers()).json()["workspaces"]
+        membership = self.client.post(
+            f"/api/v1/workspaces/{workspaces[0]['id']}/members",
+            json={"email": "ops-with-data@example.com", "role": "member"},
+            headers=self.auth_headers(),
+        )
+        self.assertEqual(membership.status_code, 201, membership.text)
+        blocked = self.client.delete(f"/api/v1/admin/users/{with_data_id}", headers=self.auth_headers())
+        self.assertEqual(blocked.status_code, 409, blocked.text)
+        self.assertIn("请改为停用账号", blocked.json()["detail"])
+
+
 if __name__ == "__main__":
     unittest.main()

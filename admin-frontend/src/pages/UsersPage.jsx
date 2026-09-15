@@ -62,15 +62,32 @@ export default function UsersPage() {
       },
     })
   }
+  const deleteUser = (user) => {
+    modal.confirm({
+      title: `永久删除「${user.display_name || user.email}」？`,
+      content: '只对没有任何数据的账号开放：一旦拥有工作区或留下工作项、对话、审计记录，服务端会拒绝并要求改为停用。',
+      okText: '删除账号',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        try {
+          await apiFetch(`/api/v1/admin/users/${user.id}`, { method: 'DELETE' })
+          message.success('账号已删除')
+          await load()
+        } catch (error) { message.error(toUserErrorMessage(error, '删除账号失败，请稍后重试。')) }
+      },
+    })
+  }
   const columns = [
     { title: '用户', render: (_, user) => <Space direction="vertical" size={0}><Text strong>{user.display_name}</Text><Text type="secondary">{user.email}</Text></Space> },
     { title: '平台管理员', dataIndex: 'is_platform_admin', render: (value, user) => <Switch checked={value} checkedChildren="开" unCheckedChildren="关" loading={updatingKey === `${user.id}:is_platform_admin`} aria-label={`切换 ${user.display_name || user.email} 的平台管理员权限`} onChange={(is_platform_admin) => requestUpdate(user, 'is_platform_admin', is_platform_admin)} /> },
     { title: '账号状态', dataIndex: 'is_active', render: (value, user) => <Space><Switch checked={value} checkedChildren="开" unCheckedChildren="关" loading={updatingKey === `${user.id}:is_active`} aria-label={`切换 ${user.display_name || user.email} 的账号状态`} onChange={(is_active) => requestUpdate(user, 'is_active', is_active)} /><Tag color={value ? 'success' : 'error'}>{value ? '正常' : '已停用'}</Tag></Space> },
     { title: '创建时间', dataIndex: 'created_at', render: formatDateTime },
     {
-      title: '操作', width: 190, render: (_, user) => <Space size={4}>
+      title: '操作', width: 250, render: (_, user) => <Space size={4}>
         <Button size="small" onClick={() => { setResetTarget(user); resetForm.resetFields() }}>重置密码</Button>
         <Button size="small" icon={<LogoutOutlined />} disabled={!user.is_active} onClick={() => revokeSessions(user)}>吊销会话</Button>
+        <Button size="small" danger disabled={user.is_platform_admin} onClick={() => deleteUser(user)}>删除</Button>
       </Space>,
     },
   ]

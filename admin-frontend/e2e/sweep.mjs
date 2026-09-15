@@ -710,15 +710,16 @@ async function usersFlow(page, label) {
   await clickDialog(page, label, '确认移除平台管理员（自建账号）', /确\s*认/)
   await waitMessage(page, /用户信息已更新/, 8000)
 
-  // 6. cleanup: no delete API for users -> disable the throwaway account
-  await interact(page, label, `清理：停用一次性账号 ${email}`, () =>
-    row.first().locator('button[role=switch]').nth(1).click({ timeout: 6000 }),
+  // 6. cleanup: no data attached -> delete the throwaway account outright
+  await interact(page, label, `清理：删除一次性账号 ${email}`, () =>
+    row.first().locator('button').filter({ hasText: /删\s*除/ }).first().click({ timeout: 6000 }),
   )
-  await clickDialog(page, label, '清理：确认停用一次性账号', /确\s*认/)
-  await waitMessage(page, /用户信息已更新/, 8000)
-  const tag = await row.first().innerText().catch(() => '')
-  if (/已停用/.test(tag)) pass(label, '清理结果', `一次性账号 ${email} 已停用（后端/界面均未提供删除用户能力，停用为可用的最强清理）`)
-  else observe(label, '清理结果', `一次性账号 ${email} 仍为启用状态，停用标签未在行内出现`)
+  await clickDialog(page, label, '清理：确认删除一次性账号', /删除账号|删\s*除/)
+  await waitMessage(page, /账号已删除/, 8000)
+  await page.waitForTimeout(1200)
+  const gone = (await page.locator('.ant-table-row', { hasText: email }).count()) === 0
+  if (gone) pass(label, '清理结果', `一次性账号 ${email} 已删除，列表里已消失`)
+  else observe(label, '清理结果', `一次性账号 ${email} 删除后仍在列表中`)
 }
 
 async function workspacesFlow(page, label) {
@@ -1283,9 +1284,10 @@ async function cleanupAndReport(page) {
     }
     if (mine.userEmail) {
       const user = listing.users.find((u) => u.email === mine.userEmail)
-      if (user && user.is_active) {
-        const s = await api('PATCH', `/api/v1/admin/users/${user.id}`, { is_active: false })
-        if (s === 200) leftovers.push(`账号 ${mine.userEmail}（已停用，系统无删除账号能力）`)
+      if (user) {
+        // 一次性账号没有任何数据，直接删除；删不掉说明它的 guard 触发了，值得记一条。
+        const s = await api('DELETE', `/api/v1/admin/users/${user.id}`)
+        if (s !== 204) leftovers.push(`账号 ${mine.userEmail}（删除返回 ${s}，请人工确认）`)
       }
     }
   }
