@@ -159,6 +159,18 @@ MCP 服务的签名密钥默认与 API 一致。启动后在对话页“按需�
 `工作区与联网工具`，即可让 AI 联网搜索、读写工作区文件、生成 xlsx/docx/
 图表并登记为交付物。联网搜索无需任何 API 密钥（DuckDuckGo HTML）。
 
+要再接一个**自己的**本地工具服务（例如给某个项目加只读探查与跑测试的工具），
+把它加进 `MCP_SERVERS_JSON` 后，还要在 `MCP_WORKSPACE_SCOPED_SERVERS_CSV`
+里登记服务名，它才会收到 API 签发的工作区声明、从而拿到该租户的文件根：
+
+```powershell
+MCP_SERVERS_JSON={"local_tools":"http://localhost:8050/mcp","python_tools":"http://localhost:8051/mcp"}
+MCP_WORKSPACE_SCOPED_SERVERS_CSV=local_tools,python_tools
+```
+
+未登记的服务收不到任何租户信息，它的文件类工具会以“缺少有效的工作区授权”
+失败关闭——这是刻意的：声明等于租户边界，只发给部署方信任的服务。
+
 ## 6. 模型与 API 配置
 
 先从示例生成只在本机使用的配置文件；`.env` 已被 Git 忽略，不要把真实密钥提交到仓库：

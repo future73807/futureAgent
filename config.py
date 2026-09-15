@@ -94,6 +94,11 @@ class Settings(BaseSettings):
     mcp_servers_json: str = ""
     mcp_connect_timeout: float = 5.0
     enable_local_mcp_tools: bool = False
+    # 哪些 MCP 服务可以收到 API 签发的「工作区声明」头。拿到该声明的服务会把
+    # 文件操作限制在调用方租户的私有目录里；未被登记的服务收不到任何租户信息
+    # （它的工具只能做无租户的公共事，例如公开网页抓取）。接入自建本地工具
+    # 服务时在这里登记服务名，多个用逗号分隔。
+    mcp_workspace_scoped_servers_csv: str = "local_tools"
     # Shared by the API and the bundled MCP service.  It authenticates the
     # server-derived workspace scope attached to local file-tool sessions; it
     # is not exposed to the model or browser.
@@ -227,6 +232,16 @@ class Settings(BaseSettings):
         return [
             h.strip() for h in self.mcp_hostnames_csv.split(",") if h.strip()
         ]
+
+    @computed_field
+    @property
+    def mcp_workspace_scoped_servers(self) -> set[str]:
+        """可以接收工作区签名声明的 MCP 服务名集合。"""
+        return {
+            name.strip()
+            for name in self.mcp_workspace_scoped_servers_csv.split(",")
+            if name.strip()
+        }
 
     @computed_field
     @property

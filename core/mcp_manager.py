@@ -97,9 +97,13 @@ class MCPManager:
         workspace_id: str | None = None,
         agent_run_id: str | None = None,
     ) -> AsyncGenerator[ClientSession, None]:
+        # 只有受信任的服务端本地服务才拿得到工作区签名声明：这是 API 自己签的
+        # 声明，拿到它等于拿到该租户的文件根。默认只信任内置的 local_tools，
+        # 部署方要接入自己的本地工具服务时用 MCP_WORKSPACE_SCOPED_SERVERS_CSV
+        # 显式登记，别让所有 MCP 服务都默认继承租户边界。
         headers = (
             self.workspace_scope_headers(workspace_id, agent_run_id)
-            if server_name == "local_tools"
+            if server_name in settings.mcp_workspace_scoped_servers
             else None
         )
         async with self._open_transport(self.servers[server_name], headers=headers) as (read_stream, write_stream):
