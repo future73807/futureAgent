@@ -596,6 +596,11 @@ html[data-theme='dark'] .brand-mark-fg { fill: #1f1f22; stroke: #1f1f22; }
 .global-search-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .global-search-copy small { display: block; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
 .messages-older-wrap { width: fit-content; margin: 0 auto 14px; }
+/* 看板工具栏：复选框与 34px 的 Select/Segmented 同排时，antd 默认按基线对齐，
+   方块会掉到文字下方约 6px（其余控件都是垂直居中）；这里统一居中。 */
+.board-filters .ant-checkbox-wrapper { align-items: center; line-height: 1; }
+.board-filters .ant-checkbox-wrapper > span:last-child { line-height: 22px; }
+
 /* ============================== 会话列表密度 ============================== */
 /* antd-x 的会话列表按"大按钮"排：条目最小高度 = controlHeightLG(≈40px)、列表
    还有 4px 行距，实测行距 48px。侧边栏动辄几十条任务、助手面板十几条会话，
