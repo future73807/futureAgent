@@ -7,6 +7,7 @@ import Avatar from 'antd/es/avatar'
 import Badge from 'antd/es/badge'
 import Button from 'antd/es/button'
 import Card from 'antd/es/card'
+import Checkbox from 'antd/es/checkbox'
 import ConfigProvider from 'antd/es/config-provider'
 import Descriptions from 'antd/es/descriptions'
 import Drawer from 'antd/es/drawer'
@@ -50,6 +51,8 @@ import {
   FileAddOutlined,
   FileTextOutlined,
   FolderOpenOutlined,
+  InboxOutlined,
+  UndoOutlined,
   LogoutOutlined,
   MenuOutlined,
   MessageOutlined,
@@ -327,21 +330,26 @@ function TaskCard({ task, members, onSelect, onMove }) {
   return (
     <Card
       size="small"
-      className="task-card"
+      className={`task-card${task.archived ? ' is-archived' : ''}`}
       hoverable
       onClick={() => onSelect(task)}
-      draggable
+      draggable={!task.archived}
       data-task-id={task.id}
       onDragStart={(event) => {
+        if (task.archived) return
         event.dataTransfer.setData('text/futureagent-task', task.id)
         event.dataTransfer.effectAllowed = 'move'
       }}
     >
       <Flex justify="space-between" align="start" gap={8}>
         <Text strong>{task.title}</Text>
-        <Dropdown menu={{ items: columns.filter((item) => item.key !== task.status).map((item) => ({ key: item.key, label: `移动到「${item.title}」` })), onClick: ({ key }) => onMove(task, key) }} trigger={['click']}>
-          <Button size="small" type="text" onClick={(event) => event.stopPropagation()}><SettingOutlined /></Button>
-        </Dropdown>
+        {task.archived ? (
+          <Tag bordered={false}>已归档</Tag>
+        ) : (
+          <Dropdown menu={{ items: columns.filter((item) => item.key !== task.status).map((item) => ({ key: item.key, label: `移动到「${item.title}」` })), onClick: ({ key }) => onMove(task, key) }} trigger={['click']}>
+            <Button size="small" type="text" onClick={(event) => event.stopPropagation()}><SettingOutlined /></Button>
+          </Dropdown>
+        )}
       </Flex>
       {task.description && <Paragraph ellipsis={{ rows: 2 }} type="secondary" className="task-description">{task.description}</Paragraph>}
       <Flex justify="space-between" align="center" className="task-meta">
@@ -454,8 +462,25 @@ function BoardPage({ projects, tasks, members, onRefresh, openTask, workspaceRol
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
   const [view, setView] = useState('board')
+  // 已归档的工作项默认不出现；打开开关时才按需拉一次（列表接口默认就过滤掉）。
+  const [showArchived, setShowArchived] = useState(false)
+  const [archivedTasks, setArchivedTasks] = useState([])
   const [form] = Form.useForm()
   const [projectForm] = Form.useForm()
+
+  useEffect(() => {
+    if (!showArchived) {
+      setArchivedTasks([])
+      return undefined
+    }
+    let cancelled = false
+    apiFetch('/api/v1/tasks?include_archived=true')
+      .then((data) => {
+        if (!cancelled) setArchivedTasks((data.tasks || []).filter((task) => task.archived))
+      })
+      .catch(() => { if (!cancelled) setArchivedTasks([]) })
+    return () => { cancelled = true }
+  }, [showArchived, tasks])
 
   // 刚创建的项目在刷新回来之前不在 projects 里，如果不加保护，下面这个
   // 守卫会立刻把选中项打回 projects[0]，用户就停在旧项目的空看板上。
@@ -471,7 +496,15 @@ function BoardPage({ projects, tasks, members, onRefresh, openTask, workspaceRol
     if (!projects.some((item) => item.id === projectId)) setProjectId(projects[0]?.id || '')
   }, [projects, projectId])
 
-  const projectTasks = tasks.filter((task) => {
+  // 归档列表是异步取回的，刷新前后可能短暂与 tasks 重叠；按 id 去重，
+  // 否则同一张卡片会渲染两次（React 也会报 key 重复）。
+  const projectTasks = (() => {
+    const merged = new Map(tasks.map((task) => [task.id, task]))
+    if (showArchived) {
+      archivedTasks.forEach((task) => { if (!merged.has(task.id)) merged.set(task.id, task) })
+    }
+    return [...merged.values()]
+  })().filter((task) => {
     const text = `${task.title} ${task.description || ''} ${(task.labels || []).join(' ')}`.toLowerCase()
     return task.project_id === projectId && (statusFilter === 'all' || task.status === statusFilter) && (!query.trim() || text.includes(query.trim().toLowerCase()))
   })
@@ -531,7 +564,7 @@ function BoardPage({ projects, tasks, members, onRefresh, openTask, workspaceRol
           {canWrite && <Button type="primary" icon={<PlusOutlined />} disabled={!projectId} onClick={() => setTaskOpen(true)}>新建任务</Button>}
         </Space>
       </Flex>
-      {projects.length ? <Flex wrap="wrap" gap={10} className="board-filters"><Select value={projectId} onChange={setProjectId} className="project-selector" options={projects.map((item) => ({ value: item.id, label: item.name }))} /><Input.Search allowClear placeholder="搜索任务标题、上下文或标签" value={query} onChange={(event) => setQuery(event.target.value)} style={{ width: 280, maxWidth: '100%' }} /><Select value={statusFilter} onChange={setStatusFilter} style={{ width: 150 }} options={[{ value: 'all', label: '全部状态' }, ...columns.map((item) => ({ value: item.key, label: item.title }))]} /><Segmented value={view} onChange={setView} options={[{ label: '看板', value: 'board' }, { label: '日历', value: 'calendar' }]} /></Flex> : <Empty className="guided-empty" description="请先创建项目，再开始规划工作">{canWrite && <Button type="primary" icon={<FolderOpenOutlined />} onClick={() => setProjectOpen(true)}>创建第一个项目</Button>}</Empty>}
+      {projects.length ? <Flex wrap="wrap" gap={10} className="board-filters"><Select value={projectId} onChange={setProjectId} className="project-selector" options={projects.map((item) => ({ value: item.id, label: item.name }))} /><Input.Search allowClear placeholder="搜索任务标题、上下文或标签" value={query} onChange={(event) => setQuery(event.target.value)} style={{ width: 280, maxWidth: '100%' }} /><Select value={statusFilter} onChange={setStatusFilter} style={{ width: 150 }} options={[{ value: 'all', label: '全部状态' }, ...columns.map((item) => ({ value: item.key, label: item.title }))]} /><Checkbox checked={showArchived} onChange={(event) => setShowArchived(event.target.checked)}>显示已归档</Checkbox><Segmented value={view} onChange={setView} options={[{ label: '看板', value: 'board' }, { label: '日历', value: 'calendar' }]} /></Flex> : <Empty className="guided-empty" description="请先创建项目，再开始规划工作">{canWrite && <Button type="primary" icon={<FolderOpenOutlined />} onClick={() => setProjectOpen(true)}>创建第一个项目</Button>}</Empty>}
       {projectId && view === 'calendar' && <TaskCalendarView tasks={projectTasks} members={members} onSelect={openTask} />}
       {projectId && view === 'board' && <div className="kanban-grid">{columns.map((column) => (
         <section
@@ -1970,6 +2003,16 @@ function WorkspaceApp({ session, onLogout }) {
       refreshWorkspace()
     } catch (error) { message.error(readableError(error)) }
   }
+  // 归档/恢复：归档项从看板与搜索里收起，计划与执行记录不变，可随时恢复。
+  // 两个动作都收起抽屉：归档后对象已不在看板上，恢复后抽屉又挡住了看板。
+  const changeTaskArchive = async (task, archived) => {
+    try {
+      await apiFetch(`/api/v1/tasks/${task.id}/${archived ? 'archive' : 'unarchive'}`, { method: 'POST' })
+      message.success(archived ? '工作项已归档' : '工作项已恢复')
+      setTaskDrawer(null)
+      await refreshWorkspace()
+    } catch (error) { message.error(readableError(error)) }
+  }
   const activeDrawerTask = taskDrawer ? tasks.find((task) => task.id === taskDrawer.id) || taskDrawer : null
   const drawerTask = taskDrawer && {
     ...activeDrawerTask,
@@ -2076,12 +2119,14 @@ function WorkspaceApp({ session, onLogout }) {
         />
       </ErrorBoundary>
       <Drawer title="任务详情" open={Boolean(taskDrawer)} onClose={() => setTaskDrawer(null)} width={screens.sm ? 480 : '100%'}>
-        {drawerTask && <Space direction="vertical" size="middle" style={{ width: '100%' }}><Title level={4}>{drawerTask.title}</Title><Paragraph>{drawerTask.description || '暂无任务说明。'}</Paragraph><Descriptions bordered size="small" column={1}>
-          <Descriptions.Item label="状态"><Select size="small" value={drawerTask.status} style={{ width: 110 }} onChange={(value) => updateDrawerTask({ status: value })} options={Object.entries(taskStatusLabels).map(([value, label]) => ({ value, label }))} /></Descriptions.Item>
-          <Descriptions.Item label="优先级"><Select size="small" value={drawerTask.priority} style={{ width: 110 }} onChange={(value) => updateDrawerTask({ priority: value })} options={Object.entries(priorityLabels).map(([value, label]) => ({ value, label }))} /></Descriptions.Item>
-          <Descriptions.Item label="负责人"><Select size="small" value={drawerTask.assignee_id || undefined} allowClear style={{ width: 140 }} placeholder="未分配" onChange={(value) => updateDrawerTask({ assignee_id: value || null })} options={members.map((item) => ({ value: item.user.id, label: item.user.display_name }))} /></Descriptions.Item>
+        {drawerTask && <Space direction="vertical" size="middle" style={{ width: '100%' }}><Title level={4}>{drawerTask.title}</Title><Paragraph>{drawerTask.description || '暂无任务说明。'}</Paragraph>{drawerTask.archived && <Alert type="info" showIcon message="该工作项已归档" description="归档项不出现在看板与搜索里；计划、执行记录与评论都还在，恢复后可继续操作。" />}<Descriptions bordered size="small" column={1}>
+          <Descriptions.Item label="状态"><Select size="small" value={drawerTask.status} disabled={drawerTask.archived} style={{ width: 110 }} onChange={(value) => updateDrawerTask({ status: value })} options={Object.entries(taskStatusLabels).map(([value, label]) => ({ value, label }))} /></Descriptions.Item>
+          <Descriptions.Item label="优先级"><Select size="small" value={drawerTask.priority} disabled={drawerTask.archived} style={{ width: 110 }} onChange={(value) => updateDrawerTask({ priority: value })} options={Object.entries(priorityLabels).map(([value, label]) => ({ value, label }))} /></Descriptions.Item>
+          <Descriptions.Item label="负责人"><Select size="small" value={drawerTask.assignee_id || undefined} disabled={drawerTask.archived} allowClear style={{ width: 140 }} placeholder="未分配" onChange={(value) => updateDrawerTask({ assignee_id: value || null })} options={members.map((item) => ({ value: item.user.id, label: item.user.display_name }))} /></Descriptions.Item>
           <Descriptions.Item label="截止日期">{drawerTask.due_date || '未设置'}</Descriptions.Item>
-        </Descriptions><TaskComments taskId={drawerTask.id} /><Button type="primary" icon={<AppstoreOutlined />} onClick={() => openTaskInWorkMode(drawerTask.id)}>在工作模式中打开</Button></Space>}
+        </Descriptions><TaskComments taskId={drawerTask.id} /><Space wrap>{drawerTask.archived
+          ? <Button type="primary" icon={<UndoOutlined />} onClick={() => changeTaskArchive(drawerTask, false)}>恢复工作项</Button>
+          : <><Button type="primary" icon={<AppstoreOutlined />} onClick={() => openTaskInWorkMode(drawerTask.id)}>在工作模式中打开</Button><Popconfirm title="归档这个工作项？" description="归档后不再出现在看板与搜索里，计划与执行记录保留，可随时恢复。" okText="归档" cancelText="取消" onConfirm={() => changeTaskArchive(drawerTask, true)}><Button icon={<InboxOutlined />}>归档</Button></Popconfirm></>}</Space></Space>}
       </Drawer>
     </Layout>
   )

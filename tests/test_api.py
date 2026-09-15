@@ -1869,5 +1869,105 @@ class ProductApiTests(unittest.TestCase):
             self.assertEqual(attachments_after.status_code, 404)
 
 
+    def test_task_archive_hides_from_list_and_search_until_restored(self):
+        """归档把工作项从列表与搜索里收起来，但计划与执行记录都还在。"""
+        project = self.client.post(
+            "/api/v1/projects",
+            headers=self.auth_headers(self.owner_token, self.owner_workspace),
+            json={"name": "Archive board", "description": "", "color": "#1f1f22"},
+        )
+        self.assertEqual(project.status_code, 201, project.text)
+        project_id = project.json()["project"]["id"]
+        task = self.client.post(
+            "/api/v1/tasks",
+            headers=self.auth_headers(self.owner_token, self.owner_workspace),
+            json={"project_id": project_id, "title": "归档验收任务", "status": "todo", "priority": "medium"},
+        )
+        self.assertEqual(task.status_code, 201, task.text)
+        task_id = task.json()["task"]["id"]
+        headers = self.auth_headers(self.owner_token, self.owner_workspace)
+
+        archived = self.client.post(f"/api/v1/tasks/{task_id}/archive", headers=headers)
+        self.assertEqual(archived.status_code, 200, archived.text)
+        self.assertTrue(archived.json()["task"]["archived"])
+        self.assertIsNotNone(archived.json()["task"]["archived_at"])
+        # 归档是幂等的
+        self.assertEqual(self.client.post(f"/api/v1/tasks/{task_id}/archive", headers=headers).status_code, 200)
+
+        default_list = self.client.get("/api/v1/tasks", headers=headers)
+        self.assertNotIn(task_id, [item["id"] for item in default_list.json()["tasks"]])
+        with_archived = self.client.get("/api/v1/tasks", headers=headers, params={"include_archived": "true"})
+        self.assertIn(task_id, [item["id"] for item in with_archived.json()["tasks"]])
+        # 全局搜索也不再命中已归档的工作项
+        searched = self.client.get("/api/v1/search", headers=headers, params={"q": "归档验收任务"})
+        self.assertEqual(searched.status_code, 200, searched.text)
+        self.assertNotIn(task_id, [item["id"] for item in searched.json()["results"] if item["type"] == "task"])
+
+        restored = self.client.post(f"/api/v1/tasks/{task_id}/unarchive", headers=headers)
+        self.assertEqual(restored.status_code, 200, restored.text)
+        self.assertFalse(restored.json()["task"]["archived"])
+        self.assertIsNone(restored.json()["task"]["archived_at"])
+        listed = self.client.get("/api/v1/tasks", headers=headers)
+        self.assertIn(task_id, [item["id"] for item in listed.json()["tasks"]])
+
+        audits = self.client.get("/api/v1/admin/audit-events", headers=self.auth_headers(self.owner_token, self.owner_workspace))
+        actions = [event["action"] for event in audits.json()["events"]] if audits.status_code == 200 else []
+        # 普通成员看不到管理端审计时跳过这一步（避免把权限行为混进归档断言）
+        if audits.status_code == 200:
+            self.assertIn("task.archived", actions)
+            self.assertIn("task.unarchived", actions)
+
+    def test_archiving_task_with_running_agent_run_is_rejected(self):
+        """有 AI 执行在跑时不能归档：否则任务会变成"看不见但还在被改"。"""
+        project = self.client.post(
+            "/api/v1/projects",
+            headers=self.auth_headers(self.owner_token, self.owner_workspace),
+            json={"name": "Busy board", "description": "", "color": "#1f1f22"},
+        )
+        project_id = project.json()["project"]["id"]
+        task = self.client.post(
+            "/api/v1/tasks",
+            headers=self.auth_headers(self.owner_token, self.owner_workspace),
+            json={"project_id": project_id, "title": "正在执行的任务", "status": "todo", "priority": "medium"},
+        )
+        task_id = task.json()["task"]["id"]
+
+        from datetime import datetime, timezone
+
+        from sqlmodel import Session
+
+        import db.database as database
+        from db.models import AgentRun
+
+        with Session(database.engine) as session:
+            session.add(
+                AgentRun(
+                    id="run-archive-guard",
+                    workspace_id=self.owner_workspace,
+                    task_id=task_id,
+                    requested_by=self.owner_id,
+                    model_id="GLM-5.3-Flash",
+                    skill_name="default",
+                    mcp_servers_json="[]",
+                    status="running",
+                    started_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                )
+            )
+            session.commit()
+        try:
+            blocked = self.client.post(
+                f"/api/v1/tasks/{task_id}/archive",
+                headers=self.auth_headers(self.owner_token, self.owner_workspace),
+            )
+            self.assertEqual(blocked.status_code, 409, blocked.text)
+            self.assertIn("执行", blocked.json()["detail"])
+        finally:
+            with Session(database.engine) as session:
+                run = session.get(AgentRun, "run-archive-guard")
+                if run:
+                    session.delete(run)
+                    session.commit()
+
+
 if __name__ == "__main__":
     unittest.main()

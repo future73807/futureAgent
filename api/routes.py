@@ -40,6 +40,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from sse_starlette.sse import EventSourceResponse
 from starlette.background import BackgroundTask
 from sqlmodel import Session, select
+from sqlalchemy import func, or_
 
 from api.dependencies import (
     WorkspaceContext,
@@ -560,6 +561,47 @@ def _project_data(project: Project) -> dict[str, Any]:
     }
 
 
+def _user_reference_blockers(session: Session, user_id: str) -> list[str]:
+    """列出仍引用该账号的表与行数（供删除账号前把关）。
+
+    从模型元数据里找出所有指向 ``users.id`` 的外键列逐表计数：新加一张带
+    用户外键的表会自动纳入检查，不需要在这里补一行——删除这类动作必须
+    失败在「还有数据」这一侧，漏检等于悄悄删数据。
+    """
+    from sqlmodel import SQLModel
+
+    labels = {
+        "audit_events": "审计记录",
+        "business_records": "经营记录",
+        "chat_messages": "对话消息",
+        "conversations": "对话",
+        "deliverables": "交付物",
+        "memberships": "工作区成员关系",
+        "notifications": "通知",
+        "projects": "项目",
+        "refresh_sessions": "登录会话",
+        "report_assistant_messages": "汇报助手消息",
+        "report_records": "汇报记录",
+        "task_comments": "任务评论",
+        "tasks": "工作项",
+        "work_plans": "工作计划",
+    }
+    blockers: list[str] = []
+    for table in SQLModel.metadata.sorted_tables:
+        columns = [
+            column
+            for column in table.columns
+            if any(key.target_fullname == "users.id" for key in column.foreign_keys)
+        ]
+        if not columns:
+            continue
+        condition = or_(*[column == user_id for column in columns])
+        count = session.exec(select(func.count()).select_from(table).where(condition)).one()
+        if count:
+            blockers.append(f"{labels.get(table.name, table.name)} {count} 行")
+    return blockers
+
+
 def _task_data(task: Task, *, comment_count: int | None = None) -> dict[str, Any]:
     data = {
         "id": task.id,
@@ -574,6 +616,8 @@ def _task_data(task: Task, *, comment_count: int | None = None) -> dict[str, Any
         "due_date": task.due_date,
         "labels": _safe_json_list(task.labels_json),
         "sort_order": task.sort_order,
+        "archived": bool(task.archived),
+        "archived_at": task.archived_at,
         "created_at": task.created_at,
         "updated_at": task.updated_at,
     }
@@ -2073,10 +2117,13 @@ def list_tasks(
     project_id: str | None = Query(None),
     task_status: str | None = Query(None, alias="status"),
     assignee_id: str | None = Query(None),
+    include_archived: bool = Query(False, description="是否一并返回已归档工作项"),
     context: WorkspaceContext = Depends(get_workspace_context),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     statement = select(Task).where(Task.workspace_id == context.workspace.id)
+    if not include_archived:
+        statement = statement.where(Task.archived.is_(False))
     if project_id:
         _project_or_404(session, context.workspace.id, project_id)
         statement = statement.where(Task.project_id == project_id)
@@ -2200,6 +2247,66 @@ def update_task(
         target_type="task",
         target_id=task.id,
         metadata={"status": task.status, "assignee_id": task.assignee_id},
+    )
+    session.commit()
+    return {"task": _task_data(task)}
+
+
+@router.post("/v1/tasks/{task_id}/archive")
+def archive_task(
+    task_id: str,
+    context: WorkspaceContext = Depends(get_workspace_context),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """归档工作项：从看板与列表里收起来，计划与执行记录原样保留。"""
+    task = _task_or_404(session, context.workspace.id, task_id)
+    if task.archived:
+        return {"task": _task_data(task)}
+    # 正在跑的 AI 执行会继续写回这个任务；归档后它就成了"看不见但还在改"的状态。
+    running = session.exec(
+        select(AgentRun)
+        .where(AgentRun.task_id == task.id)
+        .where(AgentRun.status == "running")
+    ).first()
+    if running:
+        raise HTTPException(status_code=409, detail="该工作项有 AI 执行正在进行，请先取消或等待结束再归档")
+    task.archived = True
+    task.archived_at = now_utc()
+    task.updated_at = now_utc()
+    session.add(task)
+    write_audit(
+        session,
+        actor_id=context.user.id,
+        workspace_id=context.workspace.id,
+        action="task.archived",
+        target_type="task",
+        target_id=task.id,
+    )
+    session.commit()
+    return {"task": _task_data(task)}
+
+
+@router.post("/v1/tasks/{task_id}/unarchive")
+def unarchive_task(
+    task_id: str,
+    context: WorkspaceContext = Depends(get_workspace_context),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """恢复已归档的工作项，重新出现在看板与列表里。"""
+    task = _task_or_404(session, context.workspace.id, task_id)
+    if not task.archived:
+        return {"task": _task_data(task)}
+    task.archived = False
+    task.archived_at = None
+    task.updated_at = now_utc()
+    session.add(task)
+    write_audit(
+        session,
+        actor_id=context.user.id,
+        workspace_id=context.workspace.id,
+        action="task.unarchived",
+        target_type="task",
+        target_id=task.id,
     )
     session.commit()
     return {"task": _task_data(task)}
@@ -2693,6 +2800,7 @@ def workspace_search(
         select(Task)
         .where(Task.workspace_id == context.workspace.id)
         .where(Task.title.ilike(pattern) | Task.description.ilike(pattern) | Task.labels_json.ilike(pattern))
+        .where(Task.archived.is_(False))
         .order_by(Task.updated_at.desc())
         .limit(limit)
     ).all():
@@ -4945,6 +5053,49 @@ def admin_update_user(
     )
     session.commit()
     return {"user": _user_data(target)}
+
+
+@router.delete("/v1/admin/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def admin_delete_user(
+    user_id: str,
+    admin: User = Depends(require_platform_admin),
+    session: Session = Depends(get_session),
+) -> Response:
+    """删除账号——只允许删「彻底没有数据」的账号。
+
+    账号一旦拥有工作区或留下任何业务记录（工作项、对话、执行、审计……），
+    硬删会连审计与协作线索一起带走，正确动作是停用。这里按外键逐表核对：
+    只要还有一行引用它，就把是哪些表挡住说清楚，而不是含糊地 409。
+    """
+    target = session.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if target.id == admin.id:
+        raise HTTPException(status_code=409, detail="不能删除自己的账号")
+    if target.is_platform_admin:
+        raise HTTPException(status_code=409, detail="平台管理员账号不可删除，请先取消其管理员身份")
+    owned = session.exec(select(Workspace).where(Workspace.owner_id == target.id)).first()
+    if owned:
+        raise HTTPException(status_code=409, detail=f"该账号仍是工作区「{owned.name}」的所有者，请先转移所有权")
+
+    blockers = _user_reference_blockers(session, target.id)
+    if blockers:
+        raise HTTPException(
+            status_code=409,
+            detail="该账号仍有数据（" + "、".join(blockers) + "），请改为停用账号",
+        )
+
+    write_audit(
+        session,
+        actor_id=admin.id,
+        action="admin.user_deleted",
+        target_type="user",
+        target_id=target.id,
+        metadata={"email": target.email},
+    )
+    session.delete(target)
+    session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/v1/admin/users", status_code=status.HTTP_201_CREATED)

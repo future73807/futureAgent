@@ -92,6 +92,10 @@ class Task(SQLModel, table=True):
     due_date: date | None = Field(default=None)
     labels_json: str = Field(default="[]", max_length=2000)
     sort_order: int = Field(default=0)
+    # 归档：默认不出现在列表/看板，但计划、执行记录与评论都留着，可随时恢复。
+    archived: bool = Field(default=False)
+    dummy_probe: str = Field(default="")
+    archived_at: datetime | None = Field(default=None)
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
 
@@ -144,6 +148,7 @@ class Conversation(SQLModel, table=True):
     model_id: str = Field(default="glm-5.3-flash", max_length=120)
     skill_name: str = Field(default="chatbot", max_length=120)
     archived: bool = Field(default=False)
+    dummy_probe: str = Field(default="")
     # 滚动摘要：长对话按阈值压缩为要点，替代无限平铺历史。
     summary: str = Field(default="", max_length=8000)
     created_at: datetime = Field(default_factory=now_utc)

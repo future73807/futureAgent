@@ -685,6 +685,10 @@ html[data-theme='dark'] .brand-mark-fg { fill: #1f1f22; stroke: #1f1f22; }
 }
 .task-card:hover { border-color: var(--border-strong) !important; box-shadow: var(--shadow-sm); }
 .task-card .ant-card-body { padding: 13px; }
+/* 已归档：留在看板上只为“看得见、可恢复”，所以整体压暗且不再是拖拽目标。 */
+.task-card.is-archived { background: var(--surface-2, #f7f7f8); border-style: dashed !important; }
+.task-card.is-archived, .task-card.is-archived * { cursor: default; }
+.task-card.is-archived:hover { border-color: var(--border-strong) !important; box-shadow: none; }
 .task-description { margin: 7px 0 !important; font-size: 12px; line-height: 1.55; }
 .task-meta { margin-top: 7px; }
 .task-meta .ant-tag { margin-inline-end: 0; font-size: 11px; }
