@@ -107,6 +107,23 @@ await page.waitForSelector('.settings-page', { timeout: 15000 })
 await page.waitForTimeout(1500)
 await page.screenshot({ path: `${OUT}/16-workspace-settings.png` })
 
+// 通知中心：分组、来源图标、语义色与相对时间都是新设计，单独留档
+await page.locator('.sidebar-nav-item', { hasText: '新建任务' }).first().click()
+await page.waitForSelector('.chat-stage', { timeout: 15000 })
+await page.waitForTimeout(800)
+await page.locator('.ant-badge').first().click()
+await page.waitForSelector('.notification-drawer', { timeout: 15000 })
+await page.waitForTimeout(1000)
+await page.screenshot({ path: `${OUT}/18-notifications.png` })
+const unreadTab = page.locator('.notification-filter .ant-segmented-item', { hasText: '未读' }).first()
+if (await unreadTab.count()) {
+  await unreadTab.click()
+  await page.waitForTimeout(700)
+  await page.screenshot({ path: `${OUT}/19-notifications-unread.png` })
+}
+await page.keyboard.press('Escape')
+await page.waitForTimeout(500)
+
 // 深色主题：确认中性色在暗色下也成立
 await page.locator('button[aria-label="切换深浅色主题"]').click()
 await page.waitForTimeout(900)
@@ -114,6 +131,12 @@ await page.locator('.sidebar-nav-item', { hasText: '新建任务' }).first().cli
 await page.waitForSelector('.chat-stage', { timeout: 15000 })
 await page.waitForTimeout(1200)
 await page.screenshot({ path: `${OUT}/17-dark.png` })
+
+// 看板在深色下的工具栏与按钮（夜间对比度回归点）
+await page.locator('.sidebar-nav-item', { hasText: '项目看板' }).click()
+await page.waitForSelector('.board-filters', { timeout: 20000 })
+await page.waitForTimeout(1500)
+await page.screenshot({ path: `${OUT}/20-dark-board.png` })
 
 await browser.close()
 console.log('screens written to', OUT)
