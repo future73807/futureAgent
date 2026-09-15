@@ -159,6 +159,18 @@ def run_project_tests(ctx: Context, project: str = ".", pattern: str = "tests") 
     if not root.is_dir():
         return f"项目目录不存在：{project}"
     safe_pattern = "".join(ch for ch in pattern if ch.isalnum() or ch in "._-") or "tests"
+    # 指错目录时 unittest 的报错很难懂（会把别处的同名包导进来）。先自己看一眼，
+    # 把可用的候选目录列给模型，省掉一轮试错。
+    if not (root / safe_pattern).is_dir():
+        candidates = sorted(
+            item.name
+            for item in root.iterdir()
+            if item.is_dir() and item.name not in IGNORED_DIRS
+        )
+        return (
+            f"目录 {project} 下没有 {safe_pattern}/，无法发现测试。"
+            f"现有子目录：{'、'.join(candidates) or '（无）'}"
+        )
     return _run(
         [sys.executable or "py", "-m", "unittest", "discover", "-s", safe_pattern],
         cwd=root,

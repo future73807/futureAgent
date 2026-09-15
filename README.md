@@ -224,6 +224,17 @@ cd frontend && npm run e2e
 #   - 全站下拉 36 / 滚动条与浮层 76 / 窄屏 11。
 #   改交互后先跑这个。
 cd frontend && npm run e2e:audit
+# 运行模式与工具链验收（18 项）：对话 / 规划 / 自主 / 目标 / 循环五档，
+# 联网搜索（web_search 工具链）、双 MCP 服务、技能、创造模式，并跑通
+# 「规划 → 保存为工作计划 → 批准 → 自主执行 → 真的写入工作区文件」闭环，
+# 结束后清理本轮造出的智能体与技能。
+#   E2E_MODEL=<模型 id> 指定被测模型（默认 local-mock 替身）
+cd frontend && node e2e/modes-capabilities.mjs
+# 管理端全页面点击巡检：逐个页面、逐个非破坏性按钮点击并断言有反应，
+# 截图落在 admin-frontend/e2e/screens/，结构化结果在 e2e/last-run.json
+cd ../admin-frontend && node e2e/sweep.mjs
+# 技能复制回归（对应 POST /v1/skills/{name}/copy）
+cd ../frontend && node e2e/admin-skill-copy.mjs
 # 登录页是否铺满视口（三种宽度）
 cd frontend && npm run e2e:login
 # 视觉走查截图 → frontend/e2e/screens/
@@ -231,6 +242,11 @@ cd frontend && node e2e/screens.mjs
 cd ../admin-frontend && npm run build
 docker compose config --quiet
 ```
+
+联调素材（工作区文件目录不入库，用脚本重放）：`py scripts/seed_python_demo.py`
+写入 `python-demo` 示例项目（自带一条失败用例），`mcp_server/project_tools_server.py`
+是配套的第二个 MCP 服务（项目只读探查 + 跑测试 + 语法检查），技能
+`python_demo_guardian` 给出该项目的改动规范。
 
 `E2E_BASE_URL` 可覆盖被测地址（默认 `http://localhost:5173`）。E2E 使用本机
 Edge/Chrome（`E2E_CHANNEL` 可换），无需下载浏览器二进制。
