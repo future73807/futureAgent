@@ -56,5 +56,10 @@ Thumbs.db
 # 本地插件运行时目录
 .video_agent/
 
-# ���ű�����ʱ���µ���ʱ��ͼ����ʽ��ͼ�� frontend/e2e/screens/��ͬ�������ԣ�
+# 体检脚本运行时落下的临时截图（正式截图在 frontend/e2e/screens/，同样被忽略）
 frontend/e2e/*.png
+
+# 管理端体检运行产物：页面截图、失败现场与结构化结果
+admin-frontend/e2e/screens/
+admin-frontend/e2e/failures/
+admin-frontend/e2e/last-run.json
