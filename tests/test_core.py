@@ -79,6 +79,42 @@ class AuthManagerTests(unittest.TestCase):
             reloaded = AuthManager(str(model), str(policy))
             self.assertTrue(reloaded.is_allowed("developer", "skill:coder", "use"))
 
+    def test_policy_writes_keep_comments(self):
+        """后台增删策略不能抹掉策略文件里的注释：那是写给人看的运维说明。"""
+        model = Path(__file__).parents[1] / "auth" / "rbac_model.conf"
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.csv"
+            policy.write_text(
+                "# 权限策略示例\n"
+                "# admin 可以操作一切\n"
+                "p, admin, *, *\n"
+                "\n"
+                "# user 只能使用轻量模型\n"
+                "p, user, model:glm-5.3-flash, use\n"
+                "# 文件末尾的说明\n",
+                encoding="utf-8",
+            )
+            manager = AuthManager(str(model), str(policy))
+
+            self.assertTrue(manager.add_policy("user", "skill:chatbot", "use"))
+            after_add = policy.read_text(encoding="utf-8")
+            self.assertIn("# 权限策略示例", after_add)
+            self.assertIn("# admin 可以操作一切", after_add)
+            self.assertIn("# user 只能使用轻量模型", after_add)
+            self.assertIn("# 文件末尾的说明", after_add)
+            self.assertIn("p, user, skill:chatbot, use", after_add)
+            # 新规则紧跟在 user 注释块之后，仍与被注释的规则相邻。
+            self.assertLess(after_add.index("# user 只能使用轻量模型"), after_add.index("p, user, skill:chatbot, use"))
+
+            self.assertTrue(manager.remove_policy("user", "skill:chatbot", "use"))
+            after_remove = policy.read_text(encoding="utf-8")
+            self.assertIn("# 权限策略示例", after_remove)
+            self.assertIn("# 文件末尾的说明", after_remove)
+            self.assertNotIn("skill:chatbot", after_remove)
+            # 重新加载后策略本身仍然生效。
+            reloaded = AuthManager(str(model), str(policy))
+            self.assertTrue(reloaded.is_allowed("user", "model:glm-5.3-flash", "use"))
+
 
 class AgentHelpersTests(unittest.TestCase):
     def test_content_blocks_are_converted_to_text(self):

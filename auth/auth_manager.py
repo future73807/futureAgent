@@ -21,6 +21,7 @@ class AuthManager:
         # 确保目录存在
         Path(model_path).parent.mkdir(parents=True, exist_ok=True)
         Path(policy_path).parent.mkdir(parents=True, exist_ok=True)
+        self.policy_path = str(policy_path)
         self.enforcer = casbin.Enforcer(model_path, policy_path)
 
     def check_permission(
@@ -45,15 +46,54 @@ class AuthManager:
         """添加权限策略"""
         added = self.enforcer.add_policy(role, resource, action)
         if added:
-            self.enforcer.save_policy()
+            self._save_policy_keeping_comments()
         return bool(added)
 
     def remove_policy(self, role: str, resource: str, action: str) -> bool:
         """移除权限策略"""
         removed = self.enforcer.remove_policy(role, resource, action)
         if removed:
-            self.enforcer.save_policy()
+            self._save_policy_keeping_comments()
         return bool(removed)
+
+    def _save_policy_keeping_comments(self) -> None:
+        """保存策略，并保住策略文件里的注释。
+
+        casbin 的 ``save_policy()`` 按内存模型整体重写文件，注释与空行都会
+        丢——那是运维写给人看的说明（哪条规则为什么存在、user 为什么没有
+        dispatch_subagent），一次后台点选就抹掉是不可接受的。
+        这里按「规则 → 紧邻其上的注释块」记住归属，重写后原样贴回；
+        被删掉的规则连同它的注释一起消失，文件末尾的注释保留在末尾。
+        """
+        path = Path(self.policy_path)
+        stored = path.read_text(encoding="utf-8") if path.exists() else ""
+        heads: dict[str, str] = {}
+        pending: list[str] = []
+        for line in stored.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                pending.append(line.rstrip())
+                continue
+            if pending:
+                heads[stripped] = "\n".join(pending)
+            pending = []
+        trailing = pending
+
+        self.enforcer.save_policy()
+
+        out: list[str] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            head = heads.get(stripped)
+            if head:
+                out.append(head)
+            out.append(stripped)
+        out.extend(trailing)
+        # 用平台原生换行写回：仓库开启了 autocrlf 且没有 .gitattributes，
+        # 在 Windows 上写 LF 会让 git status 一直显示"已修改"（diff 却是空的）。
+        path.write_text("\n".join(out).rstrip("\n") + "\n", encoding="utf-8")
 
     def get_roles_for_user(self, user: str) -> list[str]:
         """获取用户的所有角色"""
