@@ -538,6 +538,49 @@ await step('创造模式：使用智能体并发消息', async () => {
   return `提示条${composerText.includes(AGENT_NAME) ? '含' : '不含'}智能体名｜回复：${answer.slice(0, 40)}`
 })
 
+// ---- 收尾：清掉本轮造出来的智能体与技能 --------------------------------------
+await step('清理：删除验收智能体', async () => {
+  if (!(await page.locator('.studio-card', { hasText: AGENT_NAME }).count())) {
+    await modeChip().click()
+    await page.waitForSelector('.composer-mode-menu .ant-dropdown-menu-item', { timeout: 10_000 })
+    await page.locator('.composer-mode-menu .ant-dropdown-menu-item', { hasText: '创造' }).first().click()
+    await page.waitForSelector('.studio-card', { timeout: 20_000 })
+    await page.waitForTimeout(1200)
+  }
+  const card = page.locator('.studio-card:visible', { hasText: AGENT_NAME }).first()
+  await card.getByRole('button', { name: /删\s*除/ }).first().click({ timeout: 10_000 })
+  const confirm = page.locator('.ant-popover:visible, .ant-popconfirm:visible').last()
+  await confirm.getByRole('button', { name: /删\s*除/ }).first().click({ timeout: 8000 })
+  await page.waitForTimeout(2000)
+  if (await page.locator('.studio-card', { hasText: AGENT_NAME }).count()) throw new Error('智能体未删除')
+  return `${AGENT_NAME} 已删除`
+})
+
+await step('清理：删除验收技能', async () => {
+  const admin = await context.newPage()
+  admin.setDefaultTimeout(20_000)
+  await admin.goto(ADMIN_BASE, { waitUntil: 'domcontentloaded' })
+  await admin.waitForTimeout(2500)
+  const email = admin.locator('input[placeholder="name@company.com"]')
+  if (await email.count()) {
+    await email.fill('admin@futureagent.dev')
+    await admin.locator('input[placeholder="请输入登录密码"]').fill('ChangeMe123!')
+    await admin.getByRole('button', { name: /进入管理后台/ }).first().click()
+  }
+  await admin.waitForSelector('.ant-layout-sider', { timeout: 25_000 })
+  await admin.locator('.ant-menu-item', { hasText: '技能管理' }).first().click()
+  await admin.waitForTimeout(1500)
+  const row = admin.locator('.ant-table-row', { hasText: SKILL_NAME }).first()
+  if (!(await row.count())) { await admin.close(); return '本轮技能已不在列表中' }
+  await row.getByRole('button', { name: /删\s*除/ }).first().click()
+  await admin.locator('.ant-popconfirm button.ant-btn-primary, .ant-popover button.ant-btn-primary').first().click({ timeout: 8000 })
+  await admin.waitForTimeout(2000)
+  const left = await admin.locator('.ant-table-row', { hasText: SKILL_NAME }).count()
+  await admin.close()
+  if (left) throw new Error('技能未删除')
+  return `${SKILL_NAME} 已删除`
+})
+
 // ---- 收尾 ------------------------------------------------------------------
 await step('无未预期的运行时错误', async () => {
   const unexpected = consoleErrors.filter(
