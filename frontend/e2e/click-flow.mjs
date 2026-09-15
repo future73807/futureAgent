@@ -723,6 +723,12 @@ try {
   // ================= J. 账号菜单 / 设置 / 主题 =================
   await step('账号菜单可打开', async () => {
     await openAccountMenu()
+    // 浮层有进场动画：立刻读 allInnerTexts 可能读到空数组，先等菜单项真的渲染出来。
+    await page.waitForFunction(
+      () => [...document.querySelectorAll('.ant-dropdown-menu-item')].some((el) => (el.innerText || '').includes('工作区设置')),
+      null,
+      { timeout: 8000 },
+    ).catch(() => {})
     const items = await page.locator('.ant-dropdown-menu-item:visible').allInnerTexts()
     if (!items.some((item) => item.includes('工作区设置'))) throw new Error(`菜单项异常：[${items.join(' / ')}]`)
     return items.join(' / ').slice(0, 60)

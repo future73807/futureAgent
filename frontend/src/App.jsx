@@ -1019,7 +1019,7 @@ function TaskExecutionPanel({ taskId, plan, models, skills, mcpServers = [], can
   </Card>
 }
 
-function WorkModePage({ tasks, members, models, skills, mcpServers, workspaceRole, profile, workspace, onRefresh, onOpenBoard }) {
+function WorkModePage({ tasks, members, models, skills, mcpServers, workspaceRole, profile, workspace, onRefresh, onOpenBoard, requestedTaskId, requestNonce }) {
   const { message } = AntApp.useApp()
   const [taskId, setTaskId] = useState(tasks[0]?.id || '')
   const [plan, setPlan] = useState(null)
@@ -1034,6 +1034,16 @@ function WorkModePage({ tasks, members, models, skills, mcpServers, workspaceRol
   const planRequestIdRef = useRef(0)
   const currentTaskIdRef = useRef(taskId)
   currentTaskIdRef.current = taskId
+  // 从任务抽屉「在工作模式中打开」进来时，工作模式必须切到那个任务：这个页面
+  // 自己记着上次选中的工作项，不接过来的话点开看到的是另一个任务。只在请求
+  // nonce 变化时切换，工作区刷新不会把用户手动选的项冲掉。
+  const appliedTaskRequestRef = useRef(null)
+  useEffect(() => {
+    if (!requestNonce || appliedTaskRequestRef.current === requestNonce) return
+    if (!requestedTaskId || !tasks.some((item) => item.id === requestedTaskId)) return
+    appliedTaskRequestRef.current = requestNonce
+    setTaskId(requestedTaskId)
+  }, [requestNonce, requestedTaskId, tasks])
   const selectedTask = tasks.find((item) => item.id === taskId)
   const canWrite = workspaceRole !== 'viewer'
   const canApprove = ['owner', 'admin'].includes(workspaceRole)
@@ -1526,6 +1536,8 @@ function WorkspaceApp({ session, onLogout }) {
   const [refreshing, setRefreshing] = useState(false)
   const [workspaceError, setWorkspaceError] = useState('')
   const [taskDrawer, setTaskDrawer] = useState(null)
+  // { id, nonce }：工作模式据此切到「从抽屉点开」的那个任务。
+  const [workTaskRequest, setWorkTaskRequest] = useState(null)
   const [mobileNav, setMobileNav] = useState(false)
   const [hasMoreMessages, setHasMoreMessages] = useState(false)
   const [globalQuery, setGlobalQuery] = useState('')
@@ -1797,6 +1809,12 @@ function WorkspaceApp({ session, onLogout }) {
     setMobileNav(false)
     message.success(`已切换到智能体：${agent.name}`)
   }, [message])
+  // 任务抽屉里的「在工作模式中打开」：把被点开的任务带进工作模式。
+  const openTaskInWorkMode = useCallback((taskId) => {
+    setWorkTaskRequest({ id: taskId, nonce: Date.now() })
+    setNav('work')
+    setTaskDrawer(null)
+  }, [])
   const searchTypeLabels = { task: '任务', project: '项目', conversation: '对话', message: '消息', attachment: '附件', knowledge_base: '知识库' }
   const searchOptions = useMemo(() => searchResults.map((item) => ({
     value: `${item.type}:${item.id}`,
@@ -1922,7 +1940,7 @@ function WorkspaceApp({ session, onLogout }) {
   else if (nav === 'report') content = ReportView ? <ReportView workspaceRole={workspace?.role} members={members} currentUserId={profile?.id} /> : null
   else if (nav === 'market') content = MarketView ? <MarketView mcpServers={mcpServers} skills={skills} mcpLoading={mcpLoading} preferences={workspace?.preferences} onSavePreferences={saveWorkspacePreferences} canManage={workspace?.role === 'owner' || workspace?.role === 'admin'} onUseSkill={useSkillFromMarket} onRefresh={refreshWorkspace} /> : null
   else if (nav === 'board') content = <BoardPage projects={projects} tasks={tasks} members={members} onRefresh={refreshWorkspace} openTask={(task) => setTaskDrawer(task)} workspaceRole={workspace?.role} />
-  else if (nav === 'work') content = <WorkModePage tasks={tasks} members={members} models={models} skills={skills} mcpServers={mcpServers} workspaceRole={workspace?.role} profile={profile} workspace={workspace} onRefresh={refreshWorkspace} onOpenBoard={() => setNav('board')} />
+  else if (nav === 'work') content = <WorkModePage tasks={tasks} members={members} models={models} skills={skills} mcpServers={mcpServers} workspaceRole={workspace?.role} profile={profile} workspace={workspace} onRefresh={refreshWorkspace} onOpenBoard={() => setNav('board')} requestedTaskId={workTaskRequest?.id} requestNonce={workTaskRequest?.nonce} />
   else if (nav === 'studio') content = <AgentStudioPage workspace={workspace} workspaceRole={workspace?.role} models={models} defaultModel={defaultModel} skills={skills} mcpServers={mcpServers} onUseAgent={useAgentFromStudio} onRefresh={refreshWorkspace} loading={mcpLoading} />
   else if (nav === 'team') content = <TeamPage workspace={workspace} members={members} workspaceRole={workspace?.role} onRefresh={refreshWorkspace} />
   else if (nav === 'settings') content = <WorkspaceSettingsPage workspace={workspace} members={members} workspaceRole={workspace?.role} onRefresh={refreshWorkspace} onWorkspaceUpdated={patchWorkspace} />
@@ -2063,7 +2081,7 @@ function WorkspaceApp({ session, onLogout }) {
           <Descriptions.Item label="优先级"><Select size="small" value={drawerTask.priority} style={{ width: 110 }} onChange={(value) => updateDrawerTask({ priority: value })} options={Object.entries(priorityLabels).map(([value, label]) => ({ value, label }))} /></Descriptions.Item>
           <Descriptions.Item label="负责人"><Select size="small" value={drawerTask.assignee_id || undefined} allowClear style={{ width: 140 }} placeholder="未分配" onChange={(value) => updateDrawerTask({ assignee_id: value || null })} options={members.map((item) => ({ value: item.user.id, label: item.user.display_name }))} /></Descriptions.Item>
           <Descriptions.Item label="截止日期">{drawerTask.due_date || '未设置'}</Descriptions.Item>
-        </Descriptions><TaskComments taskId={drawerTask.id} /><Button type="primary" icon={<AppstoreOutlined />} onClick={() => { setNav('work'); setTaskDrawer(null) }}>在工作模式中打开</Button></Space>}
+        </Descriptions><TaskComments taskId={drawerTask.id} /><Button type="primary" icon={<AppstoreOutlined />} onClick={() => openTaskInWorkMode(drawerTask.id)}>在工作模式中打开</Button></Space>}
       </Drawer>
     </Layout>
   )
