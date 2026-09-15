@@ -4466,7 +4466,7 @@ async def probe_model(
         session.commit()
         raise HTTPException(
             status_code=502,
-            detail="已配置的模型路由没有返回验证响应。",
+            detail="探测失败：已配置的模型路由没有返回验证响应。",
         ) from exc
     write_audit(
         session,
@@ -4530,9 +4530,9 @@ def copy_skill(
     skill_name: str,
     context: WorkspaceContext = Depends(get_workspace_context),
     session: Session = Depends(get_session),
+    user: User = Depends(require_platform_admin),
 ) -> dict[str, Any]:
     """复制现有技能为副本（名称加 -copy 后缀，可改），方便沉淀团队模板。"""
-    user: User = require_platform_admin(session=session)
     manager = SkillManager()
     source = manager.get_skill(skill_name)
     if not source:
