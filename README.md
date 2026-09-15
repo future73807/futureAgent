@@ -241,6 +241,10 @@ cd frontend && npm run e2e:login
 cd frontend && node e2e/screens.mjs
 cd ../admin-frontend && npm run build
 docker compose config --quiet
+
+# 清理可再生成的产物（构建输出、E2E 截图与失败现场、__pycache__、日志）：
+# 先干跑列清单，加 --apply 真删；这些都不在 git 里，随时会由构建/测试重建
+py scripts/clean_artifacts.py --apply
 ```
 
 联调素材（工作区文件目录不入库，用脚本重放）：`py scripts/seed_python_demo.py`
