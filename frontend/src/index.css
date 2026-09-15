@@ -597,10 +597,84 @@ html[data-theme='dark'] .brand-mark-fg { fill: #1f1f22; stroke: #1f1f22; }
 .global-search-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .global-search-copy small { display: block; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
 .messages-older-wrap { width: fit-content; margin: 0 auto 14px; }
-.notification-item { border-radius: 10px; transition: background .15s var(--ease); }
-.notification-item:hover { background: var(--surface-2); }
-.notification-item-unread { background: var(--primary-soft); }
-.notification-item-unread:hover { background: var(--primary-soft); }
+/* ============================== 通知中心 ============================== */
+/* 一屏里要能分清"发生了什么、有多急、什么时候"。所以：图标管来源、颜色管
+   严重度（只有语义色）、时间用相对值、按天分组；未读用左侧黑条 + 极浅底色，
+   不整块染色。 */
+.notification-drawer .ant-drawer-header { padding: 14px 16px; border-bottom: 1px solid var(--border); }
+.notification-drawer .ant-drawer-body { padding: 0; }
+
+.notification-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.notification-head-title { font-size: 15px; font-weight: 600; }
+.notification-head-count {
+  padding: 1px 8px; border-radius: 999px;
+  font-size: 12px; color: var(--warning-text); background: var(--warning-bg);
+}
+/* 让开右侧的关闭按钮，别挤在一起 */
+.notification-head-action { margin-inline-start: auto; margin-inline-end: 22px; }
+
+.notification-panel { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.notification-filter { margin: 12px 16px 6px; align-self: flex-start; }
+.notification-list { flex: 1; min-height: 0; overflow: auto; padding: 0 8px 16px; scrollbar-gutter: stable; }
+
+.notification-group-title {
+  position: sticky; top: 0; z-index: 1;
+  padding: 8px 10px 6px;
+  font-size: 12px; color: var(--muted);
+  background: var(--surface);
+}
+
+.notification-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  width: 100%;
+  padding: 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  text-align: start;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: background .15s var(--ease);
+}
+.notification-row:hover { background: var(--surface-2); }
+.notification-row.is-unread { background: var(--primary-tint); }
+.notification-row.is-unread:hover { background: var(--primary-tint); }
+/* 未读标记：左缘一条 2px 竖条 */
+.notification-row.is-unread::before {
+  content: ''; position: absolute; inset-inline-start: 3px; top: 12px; bottom: 12px;
+  width: 2px; border-radius: 2px; background: var(--primary);
+}
+
+.notification-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: 8px;
+  font-size: 14px;
+  background: var(--surface-2); color: var(--text-secondary);
+}
+.notification-row.is-done .notification-icon { background: var(--success-bg); color: var(--success); }
+.notification-row.is-attention .notification-icon { background: var(--warning-bg); color: var(--warning-text); }
+
+.notification-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.notification-title {
+  font-size: 13px; line-height: 1.5; color: var(--text);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.notification-row.is-unread .notification-title { font-weight: 600; }
+.notification-body {
+  font-size: 12px; line-height: 1.55; color: var(--text-secondary);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.notification-time { padding-top: 1px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+/* 视觉上的未读标记是左侧竖条；这个节点只负责把状态读给屏幕阅读器。 */
+.notification-dot {
+  position: absolute; width: 1px; height: 1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
 
 /* ============================== 内容区 ============================== */
 .workspace-content {

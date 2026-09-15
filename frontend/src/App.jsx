@@ -53,6 +53,7 @@ import {
   FolderOpenOutlined,
   InboxOutlined,
   UndoOutlined,
+  WarningOutlined,
   LogoutOutlined,
   MenuOutlined,
   MessageOutlined,
@@ -96,6 +97,7 @@ import { agentModeDisplayName, agentModeHint, agentModeRequirement, agentModes, 
 import { applyThemeMode, getThemeMode, toggleThemeMode } from './theme.js'
 import { renderMarkdown } from './markdown.js'
 import { applyLocale, t, antdLocaleOf } from './i18n.js'
+import { formatRelativeTime, groupNotifications, notificationKind, notificationTone } from './notification-view.js'
 import { validateUpload } from './upload-guard.js'
 
 const { Header, Sider, Content } = Layout
@@ -163,6 +165,8 @@ const columns = [
 const taskStatusLabels = Object.fromEntries(columns.map((item) => [item.key, item.title]))
 const priorityLabels = { low: '低', medium: '中', high: '高', urgent: '紧急' }
 const roleLabels = { owner: '所有者', admin: '管理员', member: '成员', viewer: '只读成员' }
+// 通知中心的来源图标：图标表来源，颜色表强度（见 notification-view.js）。
+const NOTIFICATION_ICONS = { task: <ProjectOutlined />, plan: <FileTextOutlined />, run: <RobotOutlined />, alert: <BellOutlined />, default: <InboxOutlined /> }
 const planStatusLabels = { draft: '草稿', approved: '已批准', in_progress: '执行中', completed: '已完成' }
 // 权限档位按宽松程度递增；超出部署上限的选项会被禁用。
 const permissionModeOrder = ['default', 'auto_approve', 'full_access']
@@ -1577,6 +1581,12 @@ function WorkspaceApp({ session, onLogout }) {
   const [searchResults, setSearchResults] = useState([])
   const [notifications, setNotifications] = useState([])
   const [unreadCount, setUnreadCount] = useState(0)
+  const [notificationFilter, setNotificationFilter] = useState('all')
+  const visibleNotifications = useMemo(
+    () => (notificationFilter === 'unread' ? notifications.filter((item) => !item.read) : notifications),
+    [notifications, notificationFilter],
+  )
+  const notificationGroups = useMemo(() => groupNotifications(visibleNotifications), [visibleNotifications])
   const [notificationOpen, setNotificationOpen] = useState(false)
   const [themeTick, setThemeTick] = useState(0)
   const searchInputRef = useRef(null)
@@ -2074,25 +2084,53 @@ function WorkspaceApp({ session, onLogout }) {
         <Content className="workspace-content">{workspaceContent}</Content>
       </Layout>
       <Drawer
-        title={<Flex justify="space-between" align="center" gap={8}><span>通知中心</span><Button size="small" type="link" disabled={!unreadCount} onClick={markAllNotificationsRead}>全部已读</Button></Flex>}
+        className="notification-drawer"
+        title={(
+          <div className="notification-head">
+            <span className="notification-head-title">通知中心</span>
+            {unreadCount > 0 && <span className="notification-head-count">{unreadCount} 条未读</span>}
+            {unreadCount > 0 && <Button size="small" className="notification-head-action" onClick={markAllNotificationsRead}>全部已读</Button>}
+          </div>
+        )}
         open={notificationOpen}
         onClose={() => setNotificationOpen(false)}
-        width={screens.sm ? 400 : '100%'}
+        width={screens.sm ? 420 : '100%'}
       >
         {notifications.length ? (
-          <List dataSource={notifications} renderItem={(item) => (
-            <List.Item
-              className={item.read ? 'notification-item' : 'notification-item notification-item-unread'}
-              onClick={() => openNotification(item)}
-              style={{ cursor: 'pointer' }}
-            >
-              <List.Item.Meta
-                title={item.title}
-                description={<Space direction="vertical" size={2}>{item.body && <span>{item.body}</span>}<Text type="secondary" style={{ fontSize: 12 }}>{formatDateTime(item.created_at)}</Text></Space>}
-              />
-              {!item.read && <Badge status="processing" />}
-            </List.Item>
-          )} />
+          <div className="notification-panel">
+            <Segmented
+              size="small"
+              className="notification-filter"
+              value={notificationFilter}
+              onChange={setNotificationFilter}
+              options={[{ value: 'all', label: '全部' }, { value: 'unread', label: unreadCount ? `未读 ${unreadCount}` : '未读' }]}
+            />
+            {visibleNotifications.length ? (
+              <div className="notification-list">
+                {notificationGroups.map((group) => (
+                  <section key={group.bucket} className="notification-group">
+                    <div className="notification-group-title">{group.bucket}</div>
+                    {group.items.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        className={`notification-row is-${notificationTone(item)}${item.read ? '' : ' is-unread'}`}
+                        onClick={() => openNotification(item)}
+                      >
+                        <span className="notification-icon" aria-hidden>{NOTIFICATION_ICONS[notificationKind(item)] || NOTIFICATION_ICONS.default}</span>
+                        <span className="notification-main">
+                          <span className="notification-title">{item.title}</span>
+                          {item.body && <span className="notification-body">{item.body}</span>}
+                        </span>
+                        <span className="notification-time" title={formatDateTime(item.created_at)}>{formatRelativeTime(item.created_at)}</span>
+                        {!item.read && <span className="notification-dot" role="img" aria-label="未读" />}
+                      </button>
+                    ))}
+                  </section>
+                ))}
+              </div>
+            ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有未读通知" />}
+          </div>
         ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无通知" />}
       </Drawer>
       {/* 设置面板挂在 ErrorBoundary 之外会连累整个工作台：面板里任何一处

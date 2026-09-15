@@ -74,6 +74,8 @@ export { default as ApiOutlined } from '@ant-design/icons/es/icons/ApiOutlined'
 export { default as ExperimentOutlined } from '@ant-design/icons/es/icons/ExperimentOutlined'
 export { default as EyeOutlined } from '@ant-design/icons/es/icons/EyeOutlined'
 export { default as InfoCircleOutlined } from '@ant-design/icons/es/icons/InfoCircleOutlined'
+// 通知中心：需要处理的通知用警告图标。
+export { default as WarningOutlined } from '@ant-design/icons/es/icons/WarningOutlined'
 // 工作项归档：抽屉里的「归档 / 恢复」两个动作。
 export { default as InboxOutlined } from '@ant-design/icons/es/icons/InboxOutlined'
 export { default as UndoOutlined } from '@ant-design/icons/es/icons/UndoOutlined'
