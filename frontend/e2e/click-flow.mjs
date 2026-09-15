@@ -23,6 +23,8 @@ const PASSWORD = process.env.E2E_PASSWORD || 'ChangeMe123!'
 // 真实模型调用可能较慢（推理模型尤其），单独给一个宽松上限。
 const REPLY_TIMEOUT = Number(process.env.E2E_REPLY_TIMEOUT || 180_000)
 const SHOT_DIR = 'e2e/failures'
+// 看板任务标题在「新建任务」步骤里生成，归档步骤要用同一个。
+let archiveTaskTitle = ''
 
 const results = []
 const check = (name, ok, detail = '') => {
@@ -135,6 +137,32 @@ const openChipPanel = async (index, panelSelector) => {
  * 正在淡出的节点，但里面已经没有可读文本）。这里等到真正出现带文字的菜单项为止，
  * 不行就再点一次。
  */
+/** 打开账号菜单，并在同一次求值里把菜单项读出来。
+ *
+ * 分成「等」和「读」两次调用会踩到竞态：工作区数据刷新会重挂头像区、
+ * 连带收起正在展开的下拉，于是等待刚刚通过、读取却拿到空数组。
+ */
+const readAccountMenu = async () => {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await page.keyboard.press('Escape').catch(() => {})
+    await page.waitForTimeout(200)
+    await page.locator('.sidebar-account').click()
+    const handle = await page.waitForFunction(
+      () => {
+        const items = [...document.querySelectorAll('.ant-dropdown-menu-item')]
+          .filter((el) => el.offsetParent !== null)
+          .map((el) => (el.innerText || '').trim())
+        return items.some((item) => item.includes('工作区设置')) ? items : null
+      },
+      null,
+      { timeout: 6000 },
+    ).catch(() => null)
+    if (handle) return await handle.jsonValue()
+    await page.waitForTimeout(400)
+  }
+  return []
+}
+
 const openAccountMenu = async () => {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     // 菜单可能已经开着（再点一下反而收起），先确保是关闭状态。
@@ -310,6 +338,7 @@ try {
     }
     return `gpt-4o → ${label}`
   })
+
 
   // ================= D. 导航切页 + 闪烁探针 =================
   await step('安装闪烁探针（逐帧采样内容区）', async () => {
@@ -503,16 +532,17 @@ try {
     await page.locator('.page-heading').getByRole('button', { name: '新建任务' }).click()
     const box = modal('新建任务')
     await box.waitFor({ timeout: 10000 })
-    await box.locator('input').first().fill('验收任务 A')
+    archiveTaskTitle = `验收归档任务${Date.now().toString().slice(-5)}`
+    await box.locator('input').first().fill(archiveTaskTitle)
     await box.locator('.ant-modal-footer button.ant-btn-primary').click()
     await page.waitForSelector('.task-card', { timeout: 20000 })
     const titles = await page.locator('.task-card strong').allInnerTexts()
-    if (!titles.some((item) => item.includes('验收任务 A'))) throw new Error(`看板未出现任务：${titles.join(',')}`)
+    if (!titles.some((item) => item.includes(archiveTaskTitle))) throw new Error(`看板未出现任务：${titles.join(',')}`)
     return `${titles.length} 张卡片`
   })
 
   await step('看板：任务抽屉改状态', async () => {
-    await page.locator('.task-card', { hasText: '验收任务 A' }).first().click()
+    await page.locator('.task-card', { hasText: archiveTaskTitle }).first().click()
     await page.waitForSelector('.ant-drawer-open', { timeout: 10000 })
     await page.locator('.ant-drawer-open .ant-select').first().click()
     await page.waitForSelector('.ant-select-item-option:visible', { timeout: 8000 })
@@ -529,6 +559,41 @@ try {
     await page.locator('.board-filters .ant-segmented-item', { hasText: '看板' }).click()
     await page.waitForSelector('.kanban-grid', { timeout: 10000 })
     return '看板 ⇄ 日历'
+  })
+
+  await step('看板：归档工作项并可从「显示已归档」恢复', async () => {
+    await sidebarNav('项目看板').click()
+    await page.waitForSelector('.kanban-grid', { timeout: 25000 })
+    await page.waitForTimeout(1200)
+    const card = page.locator('.task-card', { hasText: archiveTaskTitle }).first()
+    await card.waitFor({ timeout: 15000 })
+    await card.click()
+    const drawer = page.locator('.ant-drawer-open').last()
+    await drawer.waitFor({ timeout: 15000 })
+    await drawer.getByRole('button', { name: /归\s*档/ }).first().click()
+    await page.locator('.ant-popconfirm:visible, .ant-popover:visible').last()
+      .getByRole('button', { name: /归\s*档/ }).first().click()
+    await page.waitForTimeout(2500)
+    // 归档后默认视图里必须消失
+    if (await page.locator('.task-card', { hasText: archiveTaskTitle }).count()) {
+      throw new Error('归档后卡片仍在默认看板上')
+    }
+    // 打开「显示已归档」应能找回，并在抽屉里恢复
+    await page.locator('.board-filters', { hasText: '显示已归档' }).getByRole('checkbox').check()
+    await page.waitForTimeout(2000)
+    const archivedCard = page.locator('.task-card.is-archived', { hasText: archiveTaskTitle }).first()
+    await archivedCard.waitFor({ timeout: 15000 })
+    await archivedCard.click()
+    await page.locator('.ant-drawer-open').last().getByRole('button', { name: /恢复工作项/ }).click({ timeout: 10000 })
+    // 抽屉没关之前会挡住看板上的开关，先等它消失。
+    await page.locator('.ant-drawer-open').last().waitFor({ state: 'hidden', timeout: 15000 }).catch(() => {})
+    await page.waitForTimeout(2000)
+    await page.locator('.board-filters', { hasText: '显示已归档' }).getByRole('checkbox').uncheck()
+    await page.waitForTimeout(1500)
+    if (!(await page.locator('.task-card', { hasText: archiveTaskTitle }).count())) {
+      throw new Error('恢复后卡片没有回到看板')
+    }
+    return `${archiveTaskTitle} 归档 → 隐藏 → 显示已归档 → 恢复`
   })
 
   // ================= F. 任务（对话）全流程 =================
@@ -735,14 +800,7 @@ try {
 
   // ================= J. 账号菜单 / 设置 / 主题 =================
   await step('账号菜单可打开', async () => {
-    await openAccountMenu()
-    // 浮层有进场动画：立刻读 allInnerTexts 可能读到空数组，先等菜单项真的渲染出来。
-    await page.waitForFunction(
-      () => [...document.querySelectorAll('.ant-dropdown-menu-item')].some((el) => (el.innerText || '').includes('工作区设置')),
-      null,
-      { timeout: 8000 },
-    ).catch(() => {})
-    const items = await page.locator('.ant-dropdown-menu-item:visible').allInnerTexts()
+    const items = await readAccountMenu()
     if (!items.some((item) => item.includes('工作区设置'))) throw new Error(`菜单项异常：[${items.join(' / ')}]`)
     return items.join(' / ').slice(0, 60)
   })
