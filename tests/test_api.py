@@ -600,8 +600,9 @@ class ProductApiTests(unittest.TestCase):
             patch("api.routes._ensure_model_ready"),
             patch("api.routes.ModelHub.generate", fake_generate),
         ):
+            # 探针打的是「本部署配置的模型」：写死型号会让换供应商的部署直接 404。
             result = self.client.post(
-                "/api/v1/models/glm-5.3-flash/probe",
+                f"/api/v1/models/{settings.default_model}/probe",
                 headers=self.auth_headers(self.owner_token, self.owner_workspace),
             )
         self.assertEqual(result.status_code, 200, result.text)

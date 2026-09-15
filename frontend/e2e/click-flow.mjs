@@ -256,7 +256,16 @@ try {
     return '4 个动作均写入成功'
   })
 
-  await step('模型列表不含任何 GPT 模型，且默认落在 glm-5.3-flash', async () => {
+  // 部署默认模型由服务端配置决定（MODEL_PROFILES_JSON / DEFAULT_MODEL），
+  // 断言必须跟着它走：写死某个型号的用例换一次供应商就会误报。
+  const deploymentDefaultModel = await page.evaluate(async () => {
+    const token = sessionStorage.getItem('futureagent.access_token')
+    const res = await fetch('/api/v1/models', { headers: { Authorization: `Bearer ${token}` } })
+    const data = await res.json()
+    return String(data.default_model || '')
+  })
+
+  await step(`模型列表不含任何 GPT 模型，且默认落在 ${deploymentDefaultModel}`, async () => {
     // 模型探针要真实打一次供应商（约 2s），先等 chip 上出现真实模型名。
     const chip = page.locator('.composer-actions-left .composer-chip').nth(1)
     await page.waitForFunction(
@@ -266,7 +275,9 @@ try {
     )
     const label = (await chip.innerText()).trim()
     if (/gpt/i.test(label)) throw new Error(`默认模型仍是 GPT 系列：${label}`)
-    if (!label.includes('glm-5.3-flash')) throw new Error(`默认模型不是 glm-5.3-flash：${label}`)
+    if (!label.toLowerCase().includes(deploymentDefaultModel.toLowerCase())) {
+      throw new Error(`默认模型不是 ${deploymentDefaultModel}：${label}`)
+    }
 
     const panel = await openChipPanel(1, '.composer-picker-panel')
     const options = (await panel.locator('.composer-picker-item').allInnerTexts()).map((text) => text.trim())
@@ -277,7 +288,7 @@ try {
     return `默认 ${label}；可选 ${options.length} 个，无 GPT 系列`
   })
 
-  await step('历史选过 gpt-4o 的偏好会自动回退到 glm-5.3-flash', async () => {
+  await step(`历史选过 gpt-4o 的偏好会自动回退到 ${deploymentDefaultModel}`, async () => {
     // 用户上一版把 gpt-4o 存在本地。模型下架后必须自动回退，不能发出去才发现失败。
     await page.evaluate(() => {
       localStorage.setItem('futureagent.composer', JSON.stringify({
@@ -294,7 +305,9 @@ try {
       { timeout: 30000 },
     )
     const label = (await chip.innerText()).trim()
-    if (!label.includes('glm-5.3-flash')) throw new Error(`未回退到 glm-5.3-flash：${label}`)
+    if (!label.toLowerCase().includes(deploymentDefaultModel.toLowerCase())) {
+      throw new Error(`未回退到 ${deploymentDefaultModel}：${label}`)
+    }
     return `gpt-4o → ${label}`
   })
 
@@ -776,22 +789,37 @@ try {
   await step('设置面板：模型分区显示能力标签', async () => {
     await openSettings()
     await gotoSection('模型')
-    const glm = page.locator('.settings-model').filter({ hasText: 'glm-5.3-flash' }).first()
+    // 期望的标签由「部署里这个模型的档案」推导，写死会随供应商变化误报。
+    const detail = await page.evaluate(async (id) => {
+      const token = sessionStorage.getItem('futureagent.access_token')
+      const res = await fetch('/api/v1/models', { headers: { Authorization: `Bearer ${token}` } })
+      const data = await res.json()
+      return (data.details || []).find((item) => item.id === id) || null
+    }, deploymentDefaultModel)
+    const tokenLabel = (value) => (value >= 1_000_000 ? `${value / 1_000_000}M` : `${Math.round(value / 1000)}K`)
+    const expected = []
+    if (detail?.tool_calling !== false) expected.push('工具调用')
+    if (detail?.vision) expected.push('视觉')
+    if (detail?.max_input_tokens > 0) expected.push(`上下文 ${tokenLabel(detail.max_input_tokens)}`)
+    if (detail?.max_output_tokens > 0) expected.push(`输出上限 ${tokenLabel(detail.max_output_tokens)}`)
+    if (!expected.length) throw new Error(`部署档案里没有可断言的能力标签：${JSON.stringify(detail)}`)
+
+    const glm = page.locator('.settings-model').filter({ hasText: deploymentDefaultModel }).first()
     await glm.waitFor({ timeout: 20000 })
     const meta = (await glm.locator('.settings-model-meta').innerText()).replace(/\n/g, ' ')
-    for (const expected of ['工具调用', '视觉', '上下文 1M', '输出上限 128K']) {
-      if (!meta.includes(expected)) throw new Error(`能力标签缺少「${expected}」：${meta}`)
+    for (const label of expected) {
+      if (!meta.includes(label)) throw new Error(`能力标签缺少「${label}」：${meta}`)
     }
     // 探测按钮要真的打一次供应商；按钮文案可能被 antd 插空格，用宽松正则。
     await glm.getByRole('button', { name: btn('测试') }).first().click()
     await page.waitForFunction(
-      () => {
+      (modelId) => {
         const rows = [...document.querySelectorAll('.settings-model')]
-        const target = rows.find((el) => (el.textContent || '').includes('glm-5.3-flash'))
-        return target && /探测通过|失败|不可用|错误/.test(target.textContent || '')
+        const target = rows.find((el) => (el.textContent || '').includes(modelId))
+        return target && /探测通过|探测失败|失败|不可用|错误/.test(target.textContent || '')
       },
-      null,
-      { timeout: 90000 },
+      deploymentDefaultModel,
+      { timeout: 120000 },
     )
     const state = (await glm.innerText()).replace(/\s+/g, ' ')
     if (!state.includes('探测通过')) throw new Error(`模型探测未通过：${state.slice(0, 120)}`)
