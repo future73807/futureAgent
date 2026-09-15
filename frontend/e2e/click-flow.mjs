@@ -231,7 +231,7 @@ try {
     // 等模型列表落地再断言：模型还在探测时输入卡仍在变，空态/消息态会短暂
     // 来回切换，此时直接数元素会数到 0（截图里其实四个都渲染着）。
     await page.waitForFunction(
-      () => /glm|claude|ollama|gemini|LongCat/.test(document.querySelectorAll('.composer-actions-left .composer-chip')[1]?.innerText || ''),
+      () => /glm|gpt|claude|ollama|gemini|longcat/i.test(document.querySelectorAll('.composer-actions-left .composer-chip')[1]?.innerText || ''),
       null,
       { timeout: 30000 },
     )
@@ -269,7 +269,7 @@ try {
     // 模型探针要真实打一次供应商（约 2s），先等 chip 上出现真实模型名。
     const chip = page.locator('.composer-actions-left .composer-chip').nth(1)
     await page.waitForFunction(
-      () => /glm|gpt|claude|ollama|gemini|LongCat/.test(document.querySelectorAll('.composer-actions-left .composer-chip')[1]?.innerText || ''),
+      () => /glm|gpt|claude|ollama|gemini|longcat/i.test(document.querySelectorAll('.composer-actions-left .composer-chip')[1]?.innerText || ''),
       null,
       { timeout: 30000 },
     )
@@ -300,7 +300,7 @@ try {
     await page.waitForFunction(() => !document.querySelector('.workspace-loading'), null, { timeout: 30000 })
     const chip = page.locator('.composer-actions-left .composer-chip').nth(1)
     await page.waitForFunction(
-      () => /glm|gpt|claude|ollama|gemini|LongCat/.test(document.querySelectorAll('.composer-actions-left .composer-chip')[1]?.innerText || ''),
+      () => /glm|gpt|claude|ollama|gemini|longcat/i.test(document.querySelectorAll('.composer-actions-left .composer-chip')[1]?.innerText || ''),
       null,
       { timeout: 30000 },
     )
@@ -593,7 +593,7 @@ try {
   })
 
   await step('模型 chip 可搜索并切换', async () => {
-    const chip = page.locator('.composer-actions-left .composer-chip', { hasText: /glm|gpt|模型/ }).first()
+    const chip = page.locator('.composer-actions-left .composer-chip', { hasText: /glm|gpt|claude|ollama|gemini|longcat|模型/i }).first()
     const panel = await openChipPanel(1, '.composer-picker-panel')
     await panel.locator('input').fill('glm')
     await page.waitForTimeout(400)
