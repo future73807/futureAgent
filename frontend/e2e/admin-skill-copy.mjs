@@ -31,22 +31,38 @@ await page.waitForSelector('.ant-layout-sider', { timeout: 25000 })
 await page.locator('.ant-menu-item', { hasText: '技能管理' }).first().click()
 await page.waitForTimeout(1500)
 
-const row = page.locator('.ant-table-row', { hasText: 'python_demo_guardian' }).first()
-record('技能列表可见验收技能', (await row.count()) > 0, 'python_demo_guardian_*')
+/** 删掉列表里所有 -copy 行（含上一次崩溃留下的），返回剩余行数。 */
+const purgeCopies = async () => {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const copyRows = page.locator('.ant-table-row', { hasText: '-copy' })
+    if (!(await copyRows.count())) break
+    await copyRows.first().getByRole('button', { name: /删\s*除/ }).click()
+    await page.waitForTimeout(600)
+    await page.locator('.ant-popconfirm button.ant-btn-primary, .ant-popover button.ant-btn-primary').first().click()
+    await page.waitForTimeout(1500)
+  }
+  return page.locator('.ant-table-row', { hasText: '-copy' }).count()
+}
 
+// 先清残留：上一次运行若在断言处失败，-copy 行会留到下一次，导致"第一行"变成副本。
+await purgeCopies()
+
+// 源行排除 -copy：副本名 = 源技能名 + "-copy"，不能拿副本再复制一层。
+const row = page.locator('.ant-table-row', { hasText: 'python_demo_guardian' }).filter({ hasNotText: '-copy' }).first()
+record('技能列表可见验收技能', (await row.count()) > 0, 'python_demo_guardian*')
+
+// 副本名由服务端按「源技能名 + -copy」生成：写死某个具体名字（曾经是
+// python_demo_guardian_82637-copy）下一轮必然失效，这里从当前源行推出。
+const sourceName = (await row.locator('td').first().innerText()).trim().split('\n')[0]
+const expectedCopy = `${sourceName}-copy`
 await row.getByRole('button', { name: /复\s*制/ }).click()
 await page.waitForTimeout(2500)
-const copied = await page.locator('.ant-table-row', { hasText: 'python_demo_guardian_82637-copy' }).count()
-record('复制技能返回成功并出现在列表', copied > 0, copied ? 'python_demo_guardian_82637-copy' : '未出现副本')
+const copied = await page.locator('.ant-table-row', { hasText: expectedCopy }).count()
+record('复制技能返回成功并出现在列表', copied > 0, copied ? expectedCopy : `未出现副本 ${expectedCopy}`)
 await page.screenshot({ path: 'e2e/screens/admin-skill-copy.png' }).catch(() => {})
 
 if (copied) {
-  const copyRow = page.locator('.ant-table-row', { hasText: '-copy' }).first()
-  await copyRow.getByRole('button', { name: /删\s*除/ }).click()
-  await page.waitForTimeout(600)
-  await page.locator('.ant-popconfirm button.ant-btn-primary, .ant-popover button.ant-btn-primary').first().click()
-  await page.waitForTimeout(2000)
-  const left = await page.locator('.ant-table-row', { hasText: '-copy' }).count()
+  const left = await purgeCopies()
   record('删除副本清理干净', left === 0, left ? `仍剩 ${left} 行` : '已删除')
 }
 
