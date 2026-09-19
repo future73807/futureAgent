@@ -14,11 +14,36 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import sys
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-WORKSPACE_ROOT = BASE_DIR / "mcp_server" / "workspace"
+
+
+def _workspace_root() -> Path:
+    """素材必须落在**当前配置**的工作区根目录下。
+
+    根目录由 ``WORKSPACE_FILES_ROOT``（API 侧）与 ``MCP_WORKSPACE_ROOT``（MCP 服务
+    侧）决定，两者必须一致；这里跟随同一个覆盖，否则换了根目录之后素材会写进
+    仓库里的默认目录，而智能体的文件工具在别处找文件。
+    """
+    override = os.getenv("WORKSPACE_FILES_ROOT") or os.getenv("MCP_WORKSPACE_ROOT")
+    if override:
+        return Path(override).expanduser().resolve()
+    try:
+        # 以脚本方式运行时 sys.path[0] 是 scripts/ 而不是仓库根，config 不在
+        # 其内；先补上仓库根，否则这里永远读不到配置、静默退回默认目录。
+        if str(BASE_DIR) not in sys.path:
+            sys.path.insert(0, str(BASE_DIR))
+        from config import settings
+
+        return Path(settings.workspace_files_root).expanduser().resolve()
+    except Exception:  # noqa: BLE001 - 无法读取配置时退回仓库默认目录
+        return BASE_DIR / "mcp_server" / "workspace"
+
+
+WORKSPACE_ROOT = _workspace_root()
 
 
 def scope_dir(workspace_id: str) -> Path:

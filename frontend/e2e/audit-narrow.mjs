@@ -39,7 +39,16 @@ try {
   await page.waitForSelector('.ant-drawer-open', { timeout: 8000 })
   await page.waitForTimeout(700)
   const items = (await page.locator('.ant-drawer-open .sidebar-nav-item').allInnerTexts()).map((t) => t.trim())
-  record('导航抽屉可打开', items.length >= 6, `${items.length} 个入口：${items.slice(0, 8).join(' / ')}`)
+  // 校验"该有的入口都在"，而不是数个数：侧边栏把 chat/settings 放在别处，
+  // 入口数量随产品收敛变化（删掉两个智能体后正好从 6 变 5），写死数量会在
+  // 每次导航调整时误报，而漏掉一个页面才是真问题。
+  const expectedEntries = ['新建任务', '项目看板', '插件市场', '知识库', '团队成员']
+  const missing = expectedEntries.filter((label) => !items.some((text) => text.includes(label)))
+  record(
+    '导航抽屉可打开',
+    items.length > 0 && missing.length === 0,
+    `${items.length} 个入口：${items.slice(0, 8).join(' / ')}${missing.length ? `（缺 ${missing.join(' / ')}）` : ''}`,
+  )
 } catch (error) {
   record('导航抽屉可打开', false, String(error.message).split('\n')[0].slice(0, 120))
 }

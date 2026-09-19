@@ -230,6 +230,35 @@ class WebToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["results"][0]["url"], "https://example.com/docs")
         self.assertIn("concise result", result["results"][0]["snippet"])
 
+    async def test_search_falls_back_to_bing_when_duckduckgo_returns_no_results(self):
+        """DDG 被软拦截（返回 202 空页）时必须换后端，而不是把空结果当答案。
+
+        真实故障形态：数据中心/受限网络下 html.duckduckgo.com 返回 202 且页面里没有
+        任何结果节点；只用一个后端时工具"成功返回 0 条"，模型只好改用自身知识作答。
+        """
+        bing_page = """
+        <li class="b_algo">
+          <h2><a href="https://www.bing.com/ck/a?!&&p=abc&u=a1aHR0cHM6Ly9kb2NzLnB5dGhvbi5vcmcvMy4xMi8">Python 3.12 文档</a></h2>
+          <div class="b_caption"><p>3.12 的新特性说明。</p></div>
+        </li>
+        """
+
+        async def fake_fetch(url, *, preserve_html=False):
+            self.assertTrue(preserve_html)
+            if "duckduckgo" in url:
+                return {"text": "<html><body>no result nodes here</body></html>"}
+            self.assertIn("bing.com", url)
+            return {"text": bing_page}
+
+        with patch.object(server, "_fetch_web_resource", fake_fetch):
+            result = await server.web_search("python 3.12", limit=3)
+
+        self.assertEqual(result["provider"], "bing_html")
+        self.assertEqual(result["result_count"], 1)
+        self.assertEqual(result["results"][0]["title"], "Python 3.12 文档")
+        # /ck/a 跳转要还原成真实地址，否则用户点到的是 Bing 的跳转页。
+        self.assertEqual(result["results"][0]["url"], "https://docs.python.org/3.12/")
+
     async def test_search_failure_has_actionable_diagnostic_without_api_key(self):
         async def unavailable(_url, *, preserve_html=False):
             raise OSError("upstream detail")
@@ -237,6 +266,20 @@ class WebToolTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(server, "_fetch_web_resource", unavailable):
             with self.assertRaisesRegex(RuntimeError, "无需 API 密钥"):
                 await server.web_search("futureAgent")
+
+    async def test_search_soft_empty_result_is_reported_with_a_warning(self):
+        """后端都取回了页面但都没有结果：返回空结果并带上试过哪些后端。"""
+
+        async def empty_page(_url, *, preserve_html=False):
+            return {"text": "<html><body>nothing</body></html>"}
+
+        with patch.object(server, "_fetch_web_resource", empty_page):
+            result = await server.web_search("完全无关的查询词 12345")
+
+        self.assertEqual(result["result_count"], 0)
+        self.assertEqual(result["results"], [])
+        self.assertIn("duckduckgo_html", result["warning"])
+        self.assertIn("bing_html", result["warning"])
 
     async def test_fake_ip_dns_range_requires_explicit_opt_in(self):
         records = [(2, 1, 6, "", ("198.18.1.2", 443))]

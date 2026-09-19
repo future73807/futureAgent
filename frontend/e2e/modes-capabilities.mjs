@@ -241,7 +241,7 @@ await step('看板：新建验收任务', async () => {
 })
 
 // ---- 对话模式 --------------------------------------------------------------
-await step('对话模式：切换模型为 local-mock 并收到回复', async () => {
+await step(`对话模式：切换模型为 ${MODEL} 并收到回复`, async () => {
   await sidebarNav('新建任务').click()
   await page.waitForSelector('.composer-input textarea', { timeout: 25_000 })
   await page.waitForTimeout(1200)
@@ -255,7 +255,7 @@ await step('对话模式：切换模型为 local-mock 并收到回复', async ()
 })
 
 // ---- 联网搜索（MCP web_search 工具调用链） ---------------------------------
-await step('联网搜索：工具调用链走通', async () => {
+await step('联网搜索：真的取回搜索结果（不只是调用了工具）', async () => {
   const picked = await pickTools([/工作区|联网/])
   await pickMode('自主')
   await sendChat('联网搜索一下 Python 3.12 的新特性，给我三条要点')
@@ -266,9 +266,17 @@ await step('联网搜索：工具调用链走通', async () => {
   await page.waitForTimeout(600)
   const traceText = await trace.innerText()
   if (!traceText.includes('web_search')) throw new Error(`工具轨迹里没有 web_search：${traceText.replace(/\n/g, ' ').slice(0, 140)}`)
+  // 只断言"调用过"会漏掉最要命的一种坏法：工具被调用但后端取不回数据
+  // （代理 fake-IP、上游软拦截、DNS 失败），模型改用自身知识作答，界面全绿。
+  if (/Error executing tool web_search/.test(traceText)) {
+    throw new Error(`web_search 执行失败：${traceText.replace(/\n/g, ' ').slice(0, 200)}`)
+  }
+  if (!/result_count|provider/.test(traceText)) {
+    throw new Error(`web_search 没有返回结构化结果：${traceText.replace(/\n/g, ' ').slice(0, 200)}`)
+  }
   const answer = await waitAssistant()
   await shot('02-websearch')
-  return `${picked}｜轨迹：${traceText.replace(/\n/g, ' ').slice(0, 70)}｜回复：${answer.slice(0, 40)}`
+  return `${picked}｜轨迹：${traceText.replace(/\n/g, ' ').slice(0, 90)}｜回复：${answer.slice(0, 40)}`
 })
 
 // ---- 规划模式 → 保存为工作计划 ---------------------------------------------

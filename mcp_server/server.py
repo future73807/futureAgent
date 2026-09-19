@@ -4,6 +4,7 @@
 ``/workspace``。Python 执行工具只应在隔离容器内显式启用。
 """
 import asyncio
+import base64
 from collections import OrderedDict
 import time
 import csv
@@ -1066,6 +1067,86 @@ def _search_result_url(value: str) -> str:
     return unquote(redirected[0]) if redirected else candidate
 
 
+class _BingResultParser(HTMLParser):
+    """Bing 结果页解析：``<li class="b_algo"><h2><a href>标题</a></h2><p>摘要</p>``。
+
+    Bing 会把一部分结果包成 ``/ck/a?...&u=a1<base64url>`` 跳转链接，这里解回真实
+    地址；其余都是直链。留作 DuckDuckGo 的兜底后端：DDG 对数据中心/受限网络会回
+    202 软拦截，此时页面结构里根本没有结果。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.results: list[dict[str, str]] = []
+        self._li_depth = 0
+        self._item_depth = 0
+        self._in_title = False
+        self._in_snippet = False
+        self._href = ""
+        self._title_parts: list[str] = []
+        self._snippet_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        attributes = {key: value or "" for key, value in attrs}
+        classes = set(attributes.get("class", "").split())
+        if tag == "li":
+            self._li_depth += 1
+            if "b_algo" in classes:
+                self._item_depth = self._li_depth
+                self._href = ""
+                self._title_parts = []
+                self._snippet_parts = []
+        if not self._item_depth:
+            return
+        if tag == "a" and not self._title_parts:
+            self._in_title = True
+            self._href = attributes.get("href", "")
+        elif tag in {"p", "div"} and self._title_parts and not self._in_snippet:
+            self._in_snippet = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "li":
+            if self._item_depth and self._item_depth == self._li_depth:
+                self._item_depth = 0
+            self._li_depth = max(0, self._li_depth - 1)
+            return
+        if not self._item_depth:
+            return
+        if tag == "a" and self._in_title:
+            self._in_title = False
+            title = " ".join(self._title_parts).strip()
+            if title and self._href:
+                self.results.append(
+                    {"title": title, "url": _bing_result_url(self._href), "snippet": ""}
+                )
+        elif tag in {"p", "div"} and self._in_snippet:
+            self._in_snippet = False
+            if self.results and not self.results[-1]["snippet"]:
+                self.results[-1]["snippet"] = " ".join(self._snippet_parts).strip()
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title and data.strip():
+            self._title_parts.append(data.strip())
+        if self._in_snippet and data.strip():
+            self._snippet_parts.append(data.strip())
+
+
+def _bing_result_url(value: str) -> str:
+    """把 Bing 的 ``/ck/a`` 跳转还原成真实地址，直链原样返回。"""
+    parsed = urlsplit(value)
+    if parsed.netloc.endswith("bing.com") and parsed.path.startswith("/ck/a"):
+        token = parse_qs(parsed.query).get("u", [""])[0]
+        if token.startswith("a1"):
+            padded = token[2:] + "=" * (-len(token[2:]) % 4)
+            try:
+                decoded = base64.urlsafe_b64decode(padded).decode("utf-8", "ignore")
+            except Exception:  # noqa: BLE001 - 解不出来就退回原链接
+                return value
+            if decoded.startswith(("http://", "https://")):
+                return decoded
+    return value
+
+
 _search_cache: "OrderedDict[tuple[str, int], tuple[float, dict]]" = OrderedDict()
 SEARCH_CACHE_TTL_SECONDS = 300.0
 SEARCH_CACHE_MAX_ENTRIES = 128
@@ -1091,9 +1172,25 @@ def _search_cache_put(key: tuple[str, int], response: dict) -> None:
         _search_cache.popitem(last=False)
 
 
+# 无需密钥的搜索后端，按顺序尝试：先用 DuckDuckGo，被软拦截（数据中心网络常见
+# 返回 202 而没有结果）时退到 Bing。两者都不可用时才报错，并如实说明试过哪些。
+_SEARCH_BACKENDS: tuple[tuple[str, str, type], ...] = (
+    (
+        "duckduckgo_html",
+        "https://html.duckduckgo.com/html/?q={query}",
+        _SearchResultParser,
+    ),
+    (
+        "bing_html",
+        "https://www.bing.com/search?q={query}&setlang=zh-CN",
+        _BingResultParser,
+    ),
+)
+
+
 @mcp.tool()
 async def web_search(query: str, limit: int = 5) -> dict:
-    """通过无需密钥的 DuckDuckGo HTML 搜索公开网页，最多返回 10 条。"""
+    """搜索公开网页（无需 API 密钥：DuckDuckGo → Bing 依次兜底），最多返回 10 条。"""
     query = query.strip()
     if not query or len(query) > 500:
         raise ValueError("搜索词长度必须为 1 到 500 个字符")
@@ -1102,28 +1199,55 @@ async def web_search(query: str, limit: int = 5) -> dict:
     cached = _search_cache_get(cache_key)
     if cached is not None:
         return cached
-    search_url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
-    try:
-        page = await _fetch_web_resource(search_url, preserve_html=True)
-    except Exception as exc:
-        raise RuntimeError(
-            "网页搜索服务暂时不可用；该后端无需 API 密钥，请检查公网、DNS 或上游限流"
-        ) from exc
-    parser = _SearchResultParser()
-    parser.feed(page["text"])
-    results = [result for result in parser.results if result["url"].startswith(("http://", "https://"))]
-    selected = results[:limit]
-    response = {
-        "query": query,
-        "provider": "duckduckgo_html",
-        "results": selected,
-        "result_count": len(selected),
-    }
-    if not selected:
-        response["warning"] = "搜索服务未返回可解析结果，可能是无结果、网络限制或上游页面变更"
-    else:
+
+    attempted: list[str] = []
+    failures: list[str] = []
+    pages_fetched = 0
+    for provider, template, parser_class in _SEARCH_BACKENDS:
+        attempted.append(provider)
+        try:
+            page = await _fetch_web_resource(
+                template.format(query=quote_plus(query)), preserve_html=True
+            )
+        except Exception as exc:  # noqa: BLE001 - 换下一个后端继续
+            failures.append(f"{provider} 取回失败：{exc}")
+            continue
+        pages_fetched += 1
+        parser = parser_class()
+        parser.feed(page["text"])
+        results = [
+            result
+            for result in parser.results
+            if result["url"].startswith(("http://", "https://"))
+        ]
+        if not results:
+            failures.append(f"{provider} 未解析出结果")
+            continue
+        response = {
+            "query": query,
+            "provider": provider,
+            "results": results[:limit],
+            "result_count": len(results[:limit]),
+        }
         _search_cache_put(cache_key, response)
-    return response
+        return response
+
+    if not pages_fetched:
+        # 一个后端都没取回页面（网络/DNS/限流）：给出可操作的诊断，而不是空结果。
+        raise RuntimeError(
+            "网页搜索服务暂时不可用；这些后端都无需 API 密钥，请检查公网、DNS 或上游限流"
+            f"（已尝试 {'、'.join(attempted)}）"
+        )
+    return {
+        "query": query,
+        "provider": attempted[-1],
+        "results": [],
+        "result_count": 0,
+        "warning": (
+            "搜索服务未返回可解析结果（可能是无结果、网络限制或上游页面变更）："
+            + "；".join(failures)
+        ),
+    }
 
 
 if __name__ == "__main__":

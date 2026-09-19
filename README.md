@@ -167,7 +167,29 @@ cd frontend && npm run dev
 无需 `.env`：`MCP_SERVERS_JSON` 缺省即指向 `http://localhost:8050/mcp`，
 MCP 服务的签名密钥默认与 API 一致。启动后在对话页“按需启用工具”选择
 `工作区与联网工具`，即可让 AI 联网搜索、读写工作区文件、生成 xlsx/docx/
-图表并登记为交付物。联网搜索无需任何 API 密钥（DuckDuckGo HTML）。
+图表并登记为交付物。联网搜索无需任何 API 密钥（DuckDuckGo HTML，被软拦截时
+自动退到 Bing HTML）。
+
+两处与运行环境有关的开关，排障时先看这里：
+
+```powershell
+# 1) 换端口：MCP 服务的端口由环境变量决定，必须与 MCP_SERVERS_JSON 一致
+#    （本机 7991-8090 常被 Windows 保留段整段占用 → 8050/8051 绑不上）
+$env:MCP_SERVER_PORT=8150; py mcp_server/server.py
+$env:PYTHON_TOOLS_MCP_PORT=8151; py mcp_server/project_tools_server.py
+
+# 2) 工作区文件根：API 与 MCP 服务必须指向同一个目录，否则"文件工具找不到文件"
+#    （API 读 WORKSPACE_FILES_ROOT，MCP 读 MCP_WORKSPACE_ROOT）
+$env:MCP_WORKSPACE_ROOT='D:\Desktop\test'; py mcp_server/server.py
+
+# 3) 走 Clash/TUN 一类 fake-IP 代理时，DNS 会解析成 198.18.0.0/15，
+#    联网工具默认按"私有地址"拒绝；确认本机由可信代理接管后显式打开：
+$env:MCP_WEB_ALLOW_DNS_FAKE_IPS='true'; py mcp_server/server.py
+```
+
+`scripts/seed_python_demo.py` 会把联调用的 python-demo 项目（故意留一条失败用例）
+写进上面这个工作区根目录：`py scripts/seed_python_demo.py --workspace <工作区 id>`，
+之后可在「规划 → 批准 → 自主执行」闭环里让智能体定位并修复它。
 
 要再接一个**自己的**本地工具服务（例如给某个项目加只读探查与跑测试的工具），
 把它加进 `MCP_SERVERS_JSON` 后，还要在 `MCP_WORKSPACE_SCOPED_SERVERS_CSV`
