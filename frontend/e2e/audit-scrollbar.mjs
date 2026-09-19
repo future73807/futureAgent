@@ -108,7 +108,7 @@ for (const [width, height] of SIZES) {
   await page.waitForSelector('.chat-stage', { timeout: 20000 })
   await page.waitForTimeout(1400)
   await measure('对话页')
-  for (const [label, sel] of [['项目看板', '.page-shell'], ['插件市场', '.market-page'],  ['团队成员', '.page-shell'], ['汇报智能体', '.report-page'], ['经营助手', '.business-page']]) {
+  for (const [label, sel] of [['项目看板', '.page-shell'], ['插件市场', '.market-page'],  ['团队成员', '.page-shell'], ['知识库', '.kb-page']]) {
     await page.keyboard.press('Escape').catch(() => {})
     await page.locator('.sidebar-nav-item', { hasText: label }).first().click()
     await page.waitForSelector(sel, { timeout: 20000 }).catch(() => {})

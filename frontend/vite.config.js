@@ -2,6 +2,10 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { fileURLToPath, URL } from 'node:url'
 
+// 后端地址默认 8000；本机 8000 落在 Windows 保留端口段（netsh 可见 7991-8090）
+// 时用 VITE_API_TARGET 指到别的端口，不必改这个文件。
+const apiTarget = process.env.VITE_API_TARGET || 'http://127.0.0.1:8000'
+
 export default defineConfig({
   plugins: [react()],
   resolve: {
@@ -34,7 +38,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8000',
+        target: apiTarget,
         changeOrigin: true,
       },
     },
@@ -43,7 +47,7 @@ export default defineConfig({
     port: 4173,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8000',
+        target: apiTarget,
         changeOrigin: true,
       },
     },

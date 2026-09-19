@@ -103,7 +103,30 @@ try {
     check('看板无可点任务（跳过抽屉用例）', true, 'cardCount=0')
   }
 
-  // ---- 4. 无运行时错误 ----
+  // ---- 4. 知识库：创建 → 列表可见 → 删除 ----
+  const kbTitle = `冒烟知识库 ${Date.now().toString().slice(-5)}`
+  await page.locator('.sidebar-nav-item', { hasText: '知识库' }).first().click()
+  await page.waitForSelector('.kb-page', { timeout: 15000 })
+  check('知识库页面渲染', true)
+
+  await page.locator('.kb-page button', { hasText: '创建文档' }).first().click()
+  await page.waitForSelector('.ant-modal-content:visible', { timeout: 10000 })
+  await page.locator('.ant-modal-content:visible input').first().fill(kbTitle)
+  await page.locator('.ant-modal-content:visible textarea').first().fill('传送带每周需要润滑一次，张力异常时先停机再上报。')
+  await page.locator('.ant-modal-content:visible button', { hasText: '创 建' }).first().click()
+  await page.waitForSelector(`.kb-card:has-text("${kbTitle}")`, { timeout: 15000 })
+  check('新建知识库文档出现在列表', true, kbTitle)
+
+  await page.locator(`.kb-card:has-text("${kbTitle}") button[aria-label^="删除"]`).first().click()
+  await page.locator('.ant-popconfirm:visible button', { hasText: '删 除' }).first().click()
+  await page.waitForFunction(
+    (title) => !document.body.innerText.includes(title),
+    kbTitle,
+    { timeout: 15000 },
+  )
+  check('删除知识库文档后列表不再显示', true)
+
+  // ---- 5. 无运行时错误 ----
   check('无运行时错误', errors.length === 0, errors.join('; '))
 
   const failed = results.filter((r) => !r.ok)

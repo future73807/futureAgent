@@ -272,8 +272,8 @@ if (await addMember.count()) {
   results.push({ label: '团队·添加成员弹窗 角色 Select', ok: false, detail: '找不到「添加成员」按钮（可能是只读角色）' })
 }
 
-// ---------- 汇报智能体 / 经营助手 ----------
-for (const [label, selector] of [['汇报智能体', '.report-page'], ['经营助手', '.business-page']]) {
+// ---------- 知识库 ----------
+for (const [label, selector] of [['知识库', '.kb-page']]) {
   await goto(label, selector)
   const selects = await page.locator(`${selector} .ant-select`).count()
   for (let index = 0; index < Math.min(selects, 4); index += 1) {
@@ -312,7 +312,6 @@ await checkInteractive('设置·浏览器 内置浏览器开关', page.locator('
 
 await settingsSection('权限审批')
 await checkInteractive('设置·权限审批 常规任务档位', page.locator('[data-testid="permission-regular"] .settings-mode').first(), { keepOverlay: true })
-await checkInteractive('设置·权限审批 自动化任务档位', page.locator('[data-testid="permission-automation"] .settings-mode').first(), { keepOverlay: true })
 
 await settingsSection('规则与记忆')
 await checkInteractive('设置·规则与记忆 记忆开关', page.locator('.settings-section').filter({ hasText: '记忆 Beta' }).locator('.ant-switch').first(), { keepOverlay: true })

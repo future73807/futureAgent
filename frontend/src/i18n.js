@@ -13,8 +13,7 @@ const STORAGE_KEY = 'futureagent.locale'
 const messages = {
   'app.tagline': '团队 AI 工作空间',
   'nav.chat': 'AI 对话',
-  'nav.business': '经营助手',
-  'nav.report': '汇报智能体',
+  'nav.knowledge': '知识库',
   'nav.board': '项目看板',
   'nav.work': '工作模式',
   'nav.team': '团队成员',
@@ -58,11 +57,14 @@ const messages = {
   'settings.btn.saveName': '保存名称',
   'settings.btn.newTarget': '新建出口',
   'settings.btn.delete': '删除此工作区',
-  'business.title': '经营助手',
-  'business.subtitle': '将已授权的业务数据汇总为预警、生产日报与可追溯任务；不会绕过系统授权采集个人聊天记录。',
-  'business.card.select': '选择业务助手',
-  'business.isolation': '工作区隔离',
-  'business.btn.refresh': '刷新数据',
+  'knowledge.title': '知识库',
+  'knowledge.subtitle': '智能助手回答时会检索这里的文档，并在回复中标注引用来源。',
+  'knowledge.hint': '支持手动创建文档或上传 UTF-8 文本类文件（Markdown / CSV / JSON / YAML / HTML / XML），单个文件最大约 400 KB；每次写入都会重建向量切块。',
+  'knowledge.btn.create': '创建文档',
+  'knowledge.btn.upload': '上传文件',
+  'knowledge.btn.refresh': '刷新',
+  'knowledge.empty': '尚未创建知识库文档，创建后智能助手就能引用它回答。',
+  'knowledge.emptyReadonly': '当前工作区还没有知识库文档。',
 }
 
 export function getLocale() {

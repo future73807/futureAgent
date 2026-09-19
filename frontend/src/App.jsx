@@ -38,8 +38,8 @@ import Upload from 'antd/es/upload'
 import theme from 'antd/es/theme'
 import {
   AppstoreOutlined,
-  BarChartOutlined,
   BellOutlined,
+  BookOutlined,
   BulbOutlined,
   CheckCircleFilled,
   CheckCircleOutlined,
@@ -110,8 +110,7 @@ const { Title, Text, Paragraph } = Typography
 // 由调用方保留上一页，任何情况下都不会提交一个空的内容区。
 const routeLoaders = {
   chat: () => import('./components/ChatPage.jsx'),
-  business: () => import('./components/BusinessAssistantsPage.jsx'),
-  report: () => import('./components/ReportAssistantsPage.jsx'),
+  knowledge: () => import('./components/KnowledgePage.jsx'),
   market: () => import('./components/MarketplacePage.jsx'),
 }
 const routeComponents = new Map()
@@ -195,11 +194,10 @@ const historicRunErrorLabels = {
 // 工作模式与创造模式都不再单独占导航入口：前者是运行模式某几档的执行视图，
 // 后者的入口在运行模式下拉的「创造」一项里。把同一个概念摆两处只会让人疑惑
 // "这两个到底是不是同一个东西"。页面组件与路由都保留，只是不在导航露出。
-const navigationKeys = ['chat', 'board', 'market', 'business', 'report', 'team', 'settings']
+const navigationKeys = ['chat', 'board', 'market', 'knowledge', 'team', 'settings']
 const navigationIcons = {
   chat: <MessageOutlined />,
-  business: <BarChartOutlined />,
-  report: <FileTextOutlined />,
+  knowledge: <BookOutlined />,
   board: <ProjectOutlined />,
   work: <AppstoreOutlined />,
   market: <ThunderboltOutlined />,
@@ -1370,7 +1368,7 @@ function WorkspaceSettingsPage({ workspace, members, workspaceRole, onRefresh, o
     if (!target) return
     modal.confirm({
       title: `确认把所有权转移给「${target.user.display_name}」？`,
-      content: '转移后你将变为管理员；若存在老板/私事经营数据，系统会拒绝转移并给出处理指引。',
+      content: '转移后你将变为管理员；原所有者保留管理权限，可随时由新所有者调整。',
       okText: '确认转移',
       cancelText: '取消',
       onOk: async () => {
@@ -1516,7 +1514,7 @@ function WorkspaceSettingsPage({ workspace, members, workspaceRole, onRefresh, o
       {isOwner && (
         <>
           <Card className="settings-card" title={t("settings.card.transfer")}>
-            <Paragraph type="secondary" style={{ marginTop: 0 }}>转移后你将变为管理员。存在老板/私事经营数据时系统会拒绝转移，需先归档或交接。</Paragraph>
+            <Paragraph type="secondary" style={{ marginTop: 0 }}>转移后你将变为管理员，新所有者接管工作区的全部数据与设置。</Paragraph>
             <Flex gap={10} wrap="wrap">
               <Select value={transferMemberId || undefined} onChange={setTransferMemberId} style={{ width: 280, maxWidth: '100%' }} placeholder="选择新的所有者（工作区成员）" options={transferCandidates.map((m) => ({ value: m.id, label: `${m.user.display_name}（${m.user.email}）` }))} />
               <Button type="primary" disabled={!transferMemberId} onClick={transferOwnership}>转移所有权</Button>
@@ -1878,7 +1876,7 @@ function WorkspaceApp({ session, onLogout }) {
     else if (type === 'conversation') { selectConversation(id); setNav('chat') }
     else if (type === 'message') { if (item.conversation_id) selectConversation(item.conversation_id); setNav('chat') }
     else if (type === 'project') setNav('board')
-    else if (type === 'knowledge_base') setNav('report')
+    else if (type === 'knowledge_base') setNav('knowledge')
     else if (type === 'attachment') {
       if (item.task_id) { setNav('board'); setTaskDrawer(tasks.find((task) => task.id === item.task_id) || null) }
       else if (item.conversation_id) { selectConversation(item.conversation_id); setNav('chat') }
@@ -1968,19 +1966,17 @@ function WorkspaceApp({ session, onLogout }) {
   // 分包页面走自己的路由缓存；看板/工作模式/团队/设置是同步组件。
   // JSX 里小写标签会被当成 HTML 标签，必须先赋给大写开头的变量。
   const { key: resolvedRouteKey, Component: RouteView } = useRouteComponent(
-    ['chat', 'business', 'report', 'market'].includes(nav) ? nav : '',
+    ['chat', 'knowledge', 'market'].includes(nav) ? nav : '',
   )
   // 只有"缓存里的组件就是当前这一页"时才渲染，避免把上一页的组件按这一页的
   // props 渲染出来。
   const routeViewFor = (key) => (resolvedRouteKey === key && RouteView ? RouteView : null)
   let content = null
   const ChatView = routeViewFor('chat')
-  const BusinessView = routeViewFor('business')
-  const ReportView = routeViewFor('report')
+  const KnowledgeView = routeViewFor('knowledge')
   const MarketView = routeViewFor('market')
   if (nav === 'chat') content = ChatView ? <ChatView key={chatEpoch} activeConversation={activeConversation} messages={messages} models={models} modelsLoading={modelsLoading} defaultModel={defaultModel} skills={skills} mcpServers={mcpServers} hasMoreMessages={hasMoreMessages} onLoadMoreMessages={loadOlderMessages} onRefreshMessages={loadConversationMessages} onRefresh={refreshWorkspace} workspace={workspace} onWorkspaceUpdated={patchWorkspace} onOpenBoard={() => setNav('board')} onCreateTask={newConversation} workspaceRole={workspace?.role} activeAgent={activeAgent} onClearAgent={() => setActiveAgent(null)} onOpenStudio={() => setNav('studio')} /> : null
-  else if (nav === 'business') content = BusinessView ? <BusinessView workspaceRole={workspace?.role} members={members} currentUserId={profile?.id} /> : null
-  else if (nav === 'report') content = ReportView ? <ReportView workspaceRole={workspace?.role} members={members} currentUserId={profile?.id} /> : null
+  else if (nav === 'knowledge') content = KnowledgeView ? <KnowledgeView workspaceRole={workspace?.role} /> : null
   else if (nav === 'market') content = MarketView ? <MarketView mcpServers={mcpServers} skills={skills} mcpLoading={mcpLoading} preferences={workspace?.preferences} onSavePreferences={saveWorkspacePreferences} canManage={workspace?.role === 'owner' || workspace?.role === 'admin'} onUseSkill={useSkillFromMarket} onRefresh={refreshWorkspace} /> : null
   else if (nav === 'board') content = <BoardPage projects={projects} tasks={tasks} members={members} onRefresh={refreshWorkspace} openTask={(task) => setTaskDrawer(task)} workspaceRole={workspace?.role} />
   else if (nav === 'work') content = <WorkModePage tasks={tasks} members={members} models={models} skills={skills} mcpServers={mcpServers} workspaceRole={workspace?.role} profile={profile} workspace={workspace} onRefresh={refreshWorkspace} onOpenBoard={() => setNav('board')} requestedTaskId={workTaskRequest?.id} requestNonce={workTaskRequest?.nonce} />

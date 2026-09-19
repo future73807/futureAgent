@@ -104,7 +104,7 @@ const dropdownItem = (label) => page.locator('.ant-dropdown-menu-item:visible', 
 // antd 会在"恰好两个汉字"的按钮文案里插一个空格（"归 档"、"取 消"），
 // 按可访问名精确匹配会全部落空，因此统一用允许空格的宽松正则。
 const btn = (text) => new RegExp(text.split('').join('\\s*'))
-const heading = () => page.locator('.page-heading, .settings-page, .business-page, .report-page').first()
+const heading = () => page.locator('.page-heading, .settings-page, .kb-page').first()
 const modal = (titleText) => page.locator('.ant-modal-content:visible', { hasText: titleText })
 const confirmModal = (titleText, okText) => {
   const box = page.locator('.ant-modal-confirm:visible, .ant-modal-content:visible').filter({ hasText: titleText }).first()
@@ -359,8 +359,7 @@ try {
   const routes = [
     ['项目看板', '.page-shell', '项目看板'],
     ['插件市场', '.market-page', '插件市场'],
-    ['汇报智能体', '.report-page', '汇报智能体'],
-    ['经营助手', '.business-page', '经营助手'],
+    ['知识库', '.kb-page', '知识库'],
     ['团队成员', '.page-shell', '团队成员'],
   ]
   for (const [label, selector, title] of routes) {
@@ -943,26 +942,28 @@ try {
     return `memory ${before} → ${expected} → 复位；browser.allow_external ${externalBefore} → 复位`
   })
 
-  await step('设置面板：自动化任务权限档位落库并受部署上限约束', async () => {
+  await step('设置面板：常规任务权限档位落库', async () => {
     await openSettings()
     await gotoSection('权限审批')
-    const automation = page.locator('[data-testid="permission-automation"]')
-    await automation.waitFor({ timeout: 10000 })
-    const modes = (await automation.locator('.settings-mode-label').allInnerTexts()).map((t) => t.trim())
+    const regular = page.locator('[data-testid="permission-regular"]')
+    await regular.waitFor({ timeout: 10000 })
+    const modes = (await regular.locator('.settings-mode-label').allInnerTexts()).map((t) => t.trim())
     if (modes.length !== 3) throw new Error(`档位数量异常：${modes.join('/')}`)
-    await automation.locator('.settings-mode', { hasText: '自动审批' }).locator('.ant-radio-wrapper').click()
+    await regular.locator('.settings-mode', { hasText: '自动审批' }).locator('.ant-radio-wrapper').click()
     await page.waitForTimeout(1200)
     const stored = await page.evaluate(async () => {
-      const res = await fetch('/api/v1/workspaces/' + sessionStorage.getItem('futureagent.workspace_id') + '/preferences', {
+      const workspaceId = sessionStorage.getItem('futureagent.workspace_id')
+      const res = await fetch('/api/v1/workspaces', {
         headers: {
           Authorization: `Bearer ${sessionStorage.getItem('futureagent.access_token')}`,
-          'X-Workspace-ID': sessionStorage.getItem('futureagent.workspace_id'),
+          'X-Workspace-ID': workspaceId,
         },
       })
-      return (await res.json()).preferences.automation_permission_mode
+      const payload = await res.json()
+      return (payload.workspaces || []).find((item) => item.id === workspaceId)?.permission_mode
     })
-    if (stored !== 'auto_approve') throw new Error(`自动化档位没有落库：${stored}`)
-    await automation.locator('.settings-mode', { hasText: '手动审批' }).locator('.ant-radio-wrapper').click()
+    if (stored !== 'auto_approve') throw new Error(`常规档位没有落库：${stored}`)
+    await regular.locator('.settings-mode', { hasText: '手动审批' }).locator('.ant-radio-wrapper').click()
     await page.waitForTimeout(1200)
     return `${modes.join('/')} → auto_approve → 复位`
   })

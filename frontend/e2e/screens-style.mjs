@@ -62,23 +62,11 @@ await page.screenshot({ path: `${OUT}/20-dropdown-selected.png` })
 await page.keyboard.press('Escape')
 await page.waitForTimeout(400)
 
-// 经营助手页的提示条对比度
-await page.locator('.sidebar-nav-item', { hasText: '经营助手' }).first().click()
-await page.waitForSelector('.business-page, .page-shell', { timeout: 20000 }).catch(() => {})
+// 知识库页：文档卡片与提示文案
+await page.locator('.sidebar-nav-item', { hasText: '知识库' }).first().click()
+await page.waitForSelector('.kb-page', { timeout: 20000 }).catch(() => {})
 await page.waitForTimeout(2000)
-const alertStyle = await page.evaluate(() => {
-  const alert = document.querySelector('.ant-alert-info')
-  if (!alert) return null
-  const style = getComputedStyle(alert)
-  const msg = alert.querySelector('.ant-alert-message')
-  return {
-    background: style.backgroundColor,
-    messageColor: msg ? getComputedStyle(msg).color : null,
-    text: (alert.innerText || '').slice(0, 40),
-  }
-})
-console.log('提示条样式：', JSON.stringify(alertStyle))
-await page.screenshot({ path: `${OUT}/21-business-alert.png` })
+await page.screenshot({ path: `${OUT}/21-knowledge.png` })
 
 console.log('screens written to', OUT)
 await browser.close()

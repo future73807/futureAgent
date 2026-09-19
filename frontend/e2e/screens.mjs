@@ -44,8 +44,7 @@ await page.screenshot({ path: `${OUT}/02-code-empty.png` })
 const routes = [
   ['项目看板', '03-board'],
   ['插件市场', '04-market'],
-  ['汇报智能体', '06-report'],
-  ['经营助手', '07-business'],
+  ['知识库', '06-knowledge'],
   ['团队成员', '08-team'],
 ]
 for (const [label, file] of routes) {

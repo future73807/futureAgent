@@ -392,14 +392,6 @@ export default function SettingsModal({
               'permission-regular',
             )}
           </SectionCard>
-          <SectionCard title="自动化任务">
-            <SettingRow title="权限模式" hint="定时与自动化任务无人值守，建议比常规任务更严格" />
-            {renderModes(
-              prefs.automation_permission_mode || 'default',
-              (value) => patchPrefs({ automation_permission_mode: value }),
-              'permission-automation',
-            )}
-          </SectionCard>
           <Paragraph type="secondary" className="settings-note">
             当前部署的档位上限为 <Text code>{maxMode}</Text>，超过上限的档位不可选。
           </Paragraph>
