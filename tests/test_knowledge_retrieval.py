@@ -3,15 +3,15 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import date
 from pathlib import Path
 
 from sqlmodel import SQLModel, Session, create_engine
 
 import db.database as database
-from core.knowledge_retrieval import keyword_tokens, retrieve_knowledge
-from db.models import Attachment, User, Workspace, now_utc
-from db.report_models import KnowledgeBase, ReportRecord
+from core.assistant_ai import render_knowledge_context
+from core.knowledge_retrieval import keyword_tokens, retrieve_knowledge, workspace_has_knowledge
+from db.knowledge_models import KnowledgeBase
+from db.models import Attachment, User, Workspace
 
 
 class KnowledgeRetrievalTests(unittest.TestCase):
@@ -44,20 +44,6 @@ class KnowledgeRetrievalTests(unittest.TestCase):
                     title="报销流程",
                     content="差旅报销需要在月底前提交发票。",
                     created_by="u1",
-                )
-            )
-            session.add(
-                ReportRecord(
-                    id="rr1",
-                    workspace_id="w1",
-                    source_id="s1",
-                    external_id="e1",
-                    record_type="生产日报",
-                    title="传送带异常停产",
-                    content="传送带张力异常导致停产两小时。",
-                    occurred_on=date(2026, 9, 1),
-                    occurred_at=now_utc(),
-                    ingest_batch_id="b1",
                 )
             )
             session.add(
@@ -100,9 +86,8 @@ class KnowledgeRetrievalTests(unittest.TestCase):
             results = retrieve_knowledge(session, "w1", "传送带 张力 检查", limit=5)
         self.assertTrue(results)
         identifiers = [item["id"] for item in results]
-        # 手册与停产记录、维护附件都命中；报销流程不应出现
+        # 手册与维护附件都命中；报销流程不应出现
         self.assertIn("kb1", identifiers)
-        self.assertIn("rr1", identifiers)
         self.assertIn("a1", identifiers)
         self.assertNotIn("kb2", identifiers)
         # 隔离：二号工作区的文档不可出现在一号的召回里
@@ -115,6 +100,18 @@ class KnowledgeRetrievalTests(unittest.TestCase):
         with Session(database.engine) as session:
             self.assertEqual(retrieve_knowledge(session, "w1", "完全无关的查询词汇"), [])
             self.assertEqual(retrieve_knowledge(session, "w1", ""), [])
+
+    def test_workspace_probe_and_prompt_context_rendering(self):
+        """对话注入的前置条件与渲染：没建知识库就完全不加提示词内容。"""
+        with Session(database.engine) as session:
+            self.assertTrue(workspace_has_knowledge(session, "w1"))
+            self.assertFalse(workspace_has_knowledge(session, "w-none"))
+            hits = retrieve_knowledge(session, "w1", "传送带 张力 检查", limit=2)
+        context = render_knowledge_context(hits)
+        self.assertIn("【工作区知识库检索结果】", context)
+        self.assertIn("[1]", context)
+        self.assertIn("标注编号", context)
+        self.assertEqual(render_knowledge_context([]), "")
 
 
 if __name__ == "__main__":

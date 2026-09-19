@@ -5,16 +5,14 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from uuid import uuid4
 
 from sqlmodel import SQLModel, Session, create_engine, select
 
 import db.database as database
 from core.embedding import chunk_text, cosine_similarity
 from core.knowledge_retrieval import reindex_knowledge_base, retrieve_knowledge_smart_sync
+from db.knowledge_models import KnowledgeBase, KnowledgeChunk
 from db.models import User, Workspace
-from db.report_models import KnowledgeBase, KnowledgeChunk
-from main import app
 
 
 def _vector_for(keyword: str, dim: int = 8) -> list[float]:
@@ -72,7 +70,7 @@ class KnowledgeVectorTests(unittest.TestCase):
 
         with patch("core.knowledge_retrieval.embedding_enabled", return_value=True), \
                 patch("core.knowledge_retrieval.embed_texts", side_effect=fake_embed):
-            indexed = self.session.exec(select(KnowledgeChunk)).all() if False else None
+
             import asyncio
 
             done = asyncio.run(reindex_knowledge_base(self.session, "w1", kb))

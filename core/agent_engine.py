@@ -299,6 +299,11 @@ class AgentEngine:
             prompt = f"{base_prompt}\n\n{LOOP_MODE_CONTRACT}\n停止条件：{criteria or '（未提供）'}"
         else:
             prompt = base_prompt
+        # 知识库检索片段是"数据"，紧跟在角色与模式契约之后：它描述可用资料，
+        # 不该盖过人设与工作区规则；没有命中时这里完全不加东西。
+        knowledge = str(config.get("knowledge_context") or "").strip()
+        if knowledge:
+            prompt = f"{prompt}\n\n{knowledge}"
         # 自建智能体的人设插在技能提示词与工作区规则之间：它比通用技能更具体，
         # 又要服从部署方的硬约束，所以不能排在规则之后。
         persona = str(config.get("agent_persona") or "").strip()

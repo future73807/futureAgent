@@ -115,12 +115,10 @@ class WorkspaceSettingsTests(unittest.TestCase):
         )
         self.assertEqual(initial.status_code, 200, initial.text)
         # 未设置过的工作区拿到的是完整默认值，而不是缺字段的空对象。
-        self.assertEqual(initial.json()["preferences"]["automation_permission_mode"], "default")
         self.assertTrue(initial.json()["preferences"]["memory_enabled"])
         self.assertEqual(initial.json()["preferences"]["rules"], [])
 
         payload = {
-            "automation_permission_mode": "auto_approve",
             "memory_enabled": False,
             "include_agents_md": False,
             "include_claude_md": True,
@@ -141,7 +139,6 @@ class WorkspaceSettingsTests(unittest.TestCase):
         )
         self.assertEqual(saved.status_code, 200, saved.text)
         stored = saved.json()["preferences"]
-        self.assertEqual(stored["automation_permission_mode"], "auto_approve")
         self.assertFalse(stored["memory_enabled"])
         self.assertFalse(stored["include_agents_md"])
         # 空白规则被丢弃，不留空条目
@@ -154,21 +151,7 @@ class WorkspaceSettingsTests(unittest.TestCase):
         listed = next(ws for ws in workspaces if ws["id"] == self.workspace_id)
         self.assertEqual(listed["preferences"]["rules"], ["先给结论再给理由", "不要编造数据"])
 
-    def test_d_preferences_above_deployment_cap_are_rejected(self):
-        """自动化任务档位同样受部署上限约束，超限必须报错而不是静默收紧。"""
-        original_cap = settings.max_permission_mode
-        settings.max_permission_mode = "default"
-        try:
-            rejected = self.client.put(
-                f"/api/v1/workspaces/{self.workspace_id}/preferences",
-                json={"automation_permission_mode": "full_access"},
-                headers=self.headers(),
-            )
-        finally:
-            settings.max_permission_mode = original_cap
-        self.assertEqual(rejected.status_code, 422, rejected.text)
-
-    def test_e_plain_member_cannot_write_preferences(self):
+    def test_d_plain_member_cannot_write_preferences(self):
         """成员可读不可写：规则会影响所有人的对话行为，只能由所有者改。"""
         member_login = self.client.post(
             "/api/v1/auth/login",

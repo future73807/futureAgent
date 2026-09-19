@@ -1,7 +1,7 @@
 """工作区内知识检索（RAG 召回层）：关键词 + 可选向量融合。
 
-- 关键词召回：对查询提取 ASCII 词与中文单字/二元组合，在知识库文档、
-  业务/汇报记录与附件提取文本里按命中打分排序，任何数据库可用。
+- 关键词召回：对查询提取 ASCII 词与中文单字/二元组合，在知识库文档与
+  附件提取文本里按命中打分排序，任何数据库可用。
 - 向量召回（可选）：``EMBEDDING_PROVIDER`` 启用后，知识库文档切块向量化
   （本地 Ollama 的 qwen3-embedding 即可），查询向量做余弦融合加权；
   embedding 不可用时自动退回纯关键词，行为与历史版本一致。
@@ -18,8 +18,8 @@ from sqlmodel import Session, select
 
 from core.embedding import chunk_text, cosine_similarity, embed_texts, embedding_enabled
 from config import settings
-from db.models import Attachment, BusinessRecord
-from db.report_models import KnowledgeBase, KnowledgeChunk, ReportRecord
+from db.knowledge_models import KnowledgeBase, KnowledgeChunk
+from db.models import Attachment
 
 logger = logging.getLogger(__name__)
 
@@ -92,24 +92,6 @@ def _collect_candidates(session: Session, workspace_id: str) -> list[tuple[str, 
         ).all()
     ):
         candidates.append(("knowledge_base", kb.id, kb.title, f"{kb.title}\n{kb.content}", kb))
-    for record in (
-        session.exec(
-            select(BusinessRecord)
-            .where(BusinessRecord.workspace_id == workspace_id)
-            .order_by(BusinessRecord.occurred_at.desc())
-            .limit(_SCAN_LIMIT)
-        ).all()
-    ):
-        candidates.append(("business_record", record.id, record.title, f"{record.title}\n{record.content}", record))
-    for record in (
-        session.exec(
-            select(ReportRecord)
-            .where(ReportRecord.workspace_id == workspace_id)
-            .order_by(ReportRecord.occurred_at.desc())
-            .limit(_SCAN_LIMIT)
-        ).all()
-    ):
-        candidates.append(("report_record", record.id, record.title, f"{record.title}\n{record.content}", record))
     for attachment in (
         session.exec(
             select(Attachment)
@@ -123,6 +105,16 @@ def _collect_candidates(session: Session, workspace_id: str) -> list[tuple[str, 
                 ("attachment", attachment.id, attachment.original_name, f"{attachment.original_name}\n{attachment.extracted_text}", attachment)
             )
     return candidates
+
+
+def workspace_has_knowledge(session: Session, workspace_id: str) -> bool:
+    """工作区是否有知识库文档；用于跳过"注定没有命中"的检索与向量调用。"""
+    return (
+        session.exec(
+            select(KnowledgeBase.id).where(KnowledgeBase.workspace_id == workspace_id).limit(1)
+        ).first()
+        is not None
+    )
 
 
 def retrieve_knowledge(

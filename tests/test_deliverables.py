@@ -4,7 +4,6 @@ from __future__ import annotations
 import base64
 import tempfile
 import unittest
-from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
 

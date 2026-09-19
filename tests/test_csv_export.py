@@ -1,9 +1,8 @@
-"""月报与 CSV 导出 API 测试。"""
+"""任务与审计 CSV 导出 API 测试。"""
 from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import date
 from pathlib import Path
 from uuid import uuid4
 
@@ -17,7 +16,7 @@ from main import app
 TEST_PASSWORD = "S3ed-" + uuid4().hex[:13] + "!"
 
 
-class MonthlyReportAndExportTests(unittest.TestCase):
+class CsvExportTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temp_dir = tempfile.TemporaryDirectory()
@@ -89,33 +88,6 @@ class MonthlyReportAndExportTests(unittest.TestCase):
     @classmethod
     def headers(cls):
         return {"Authorization": f"Bearer {cls.owner_token}", "X-Workspace-ID": cls.workspace_id}
-
-    def test_monthly_report_generate_list_and_rerun(self):
-        today = date.today()
-        generated = self.client.post(
-            "/api/v1/report/monthly-reports/generate",
-            json={"year": today.year, "month": today.month},
-            headers=self.headers(),
-        )
-        self.assertEqual(generated.status_code, 200, generated.text)
-        report = generated.json()["monthly_report"]
-        self.assertEqual(report["period_year"], today.year)
-        self.assertEqual(report["period_month"], today.month)
-        self.assertIn("月报", report["title"])
-        self.assertIn("summary", report)
-
-        # 幂等：同月重复生成更新而不新建
-        again = self.client.post(
-            "/api/v1/report/monthly-reports/generate",
-            json={"year": today.year, "month": today.month},
-            headers=self.headers(),
-        )
-        self.assertEqual(again.status_code, 200, again.text)
-        self.assertEqual(again.json()["monthly_report"]["id"], report["id"])
-
-        listed = self.client.get("/api/v1/report/monthly-reports", headers=self.headers())
-        self.assertEqual(listed.status_code, 200, listed.text)
-        self.assertEqual(len(listed.json()["monthly_reports"]), 1)
 
     def test_task_export_csv_contains_rows(self):
         response = self.client.get("/api/v1/tasks/export", headers=self.headers())

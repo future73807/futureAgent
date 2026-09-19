@@ -54,7 +54,9 @@ from api.notifications import dispatch_to_targets, push_notification
 from auth.auth_manager import AuthManager
 from config import PERMISSION_MODES, settings
 from core.agent_engine import AgentEngine, WORKSPACE_TOOL_NAMES
+from core.assistant_ai import render_knowledge_context
 from core.checkpointer import get_checkpointer
+from core.knowledge_retrieval import retrieve_knowledge_smart, workspace_has_knowledge
 from core.mcp_manager import MCPManager
 from core.model_hub import ModelHub
 from core.observability import (
@@ -68,18 +70,11 @@ from core.skill_manager import Skill, SkillManager
 from core.storage import ObjectNotFound, StorageError, attachment_object_key, get_storage
 from core.workspace_context import build_workspace_context
 from db.database import get_session
+from db.knowledge_models import KnowledgeBase, KnowledgeChunk
 from db.models import (
     AgentRun,
     Attachment,
     AuditEvent,
-    BusinessAlert,
-    BusinessAlertRule,
-    BusinessAssistant,
-    BusinessAssistantMessage,
-    BusinessBossTask,
-    BusinessDailyReport,
-    BusinessDataSource,
-    BusinessRecord,
     ChatMessage,
     Conversation,
     CustomAgent,
@@ -89,7 +84,6 @@ from db.models import (
     NotificationTarget,
     Project,
     RefreshSession,
-    ScheduledJob,
     AgentRunBatch,
     Task,
     TaskComment,
@@ -126,6 +120,8 @@ ALLOWED_UPLOAD_EXTENSIONS = {
 }
 PREVIEW_TEXT_LIMIT = 100_000
 PREVIEW_ARCHIVE_MEMBER_LIMIT = 2_000_000
+# 注入对话的知识库片段条数：够用即可，多了会挤占上下文与 token 预算。
+KNOWLEDGE_CONTEXT_LIMIT = 4
 
 
 class RequestModel(BaseModel):
@@ -173,9 +169,6 @@ class WorkspacePreferencesRequest(RequestModel):
     每一项都有默认值，未提交的字段保持原值。
     """
 
-    # 自动化任务可以单独设一档：定时任务无人值守，多数团队希望它比
-    # 手动任务更严而不是更松，共用一档会让二者只能同进同退。
-    automation_permission_mode: Literal["default", "auto_approve", "full_access"] = "default"
     memory_enabled: bool = True
     include_agents_md: bool = True
     include_claude_md: bool = True
@@ -572,16 +565,14 @@ def _user_reference_blockers(session: Session, user_id: str) -> list[str]:
 
     labels = {
         "audit_events": "审计记录",
-        "business_records": "经营记录",
         "chat_messages": "对话消息",
         "conversations": "对话",
         "deliverables": "交付物",
+        "knowledge_bases": "知识库文档",
         "memberships": "工作区成员关系",
         "notifications": "通知",
         "projects": "项目",
         "refresh_sessions": "登录会话",
-        "report_assistant_messages": "汇报助手消息",
-        "report_records": "汇报记录",
         "task_comments": "任务评论",
         "tasks": "工作项",
         "work_plans": "工作计划",
@@ -1576,19 +1567,9 @@ def update_workspace_preferences(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    """整体覆盖工作区偏好。
-
-    自动化任务档位同样受部署上限约束；常规任务档位仍走
-    ``/permission-mode``，避免同一件事有两个写入点。
-    """
+    """整体覆盖工作区偏好（权限档位走 ``/permission-mode``，不在这里改）。"""
     _require_workspace_owner(session, user, workspace_id)
     workspace = _workspace_or_404(session, workspace_id)
-    cap = settings.effective_max_permission_mode
-    if PERMISSION_MODES.index(request.automation_permission_mode) > PERMISSION_MODES.index(cap):
-        raise HTTPException(
-            status_code=422,
-            detail=f"当前部署将权限档位上限设为 {cap}，自动化任务无法选择更宽松的 {request.automation_permission_mode}。",
-        )
     previous = _workspace_preferences(workspace)
     payload = request.model_dump()
     payload["rules"] = [rule.strip()[:500] for rule in request.rules if rule.strip()][:50]
@@ -1951,67 +1932,6 @@ def transfer_workspace_ownership(
     target_membership = session.get(Membership, request.member_id)
     if not target_membership or target_membership.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="目标成员不存在")
-    # Boss/private operating-agent data must never silently cross an ownership
-    # boundary.  A deliberate archival/handover workflow can be added later;
-    # this MVP blocks the transfer instead of exposing the old owner's private
-    # assistant history, sources, alerts or tasks to the new owner.
-    has_private_business_data = any(
-        (
-            session.exec(
-                select(BusinessDataSource.id).where(
-                    BusinessDataSource.workspace_id == workspace_id,
-                    BusinessDataSource.data_scope != "company",
-                ).limit(1)
-            ).first(),
-            session.exec(
-                select(BusinessRecord.id).where(
-                    BusinessRecord.workspace_id == workspace_id,
-                    BusinessRecord.data_scope != "company",
-                ).limit(1)
-            ).first(),
-            session.exec(
-                select(BusinessAlertRule.id).where(
-                    BusinessAlertRule.workspace_id == workspace_id,
-                    BusinessAlertRule.data_scope != "company",
-                ).limit(1)
-            ).first(),
-            session.exec(
-                select(BusinessAlert.id).where(
-                    BusinessAlert.workspace_id == workspace_id,
-                    BusinessAlert.data_scope != "company",
-                ).limit(1)
-            ).first(),
-            session.exec(
-                select(BusinessAssistantMessage.id).where(
-                    BusinessAssistantMessage.workspace_id == workspace_id,
-                    BusinessAssistantMessage.owner_user_id == workspace.owner_id,
-                ).limit(1)
-            ).first(),
-            session.exec(
-                select(BusinessBossTask.id).where(
-                    BusinessBossTask.workspace_id == workspace_id,
-                    BusinessBossTask.boss_user_id == workspace.owner_id,
-                ).limit(1)
-            ).first(),
-        )
-    )
-    if has_private_business_data:
-        write_audit(
-            session,
-            actor_id=user.id,
-            workspace_id=workspace_id,
-            action="workspace.owner_transfer_blocked_private_business_data",
-            target_type="workspace",
-            target_id=workspace_id,
-            metadata={"reason": "private_business_data_requires_archival_or_handover"},
-            visibility="private",
-            owner_user_id=workspace.owner_id,
-        )
-        session.commit()
-        raise HTTPException(
-            status_code=409,
-            detail="工作区存在老板或私事经营数据；请先完成归档或受控交接后再转移所有权",
-        )
     old_owner = session.exec(
         select(Membership).where(
             Membership.workspace_id == workspace_id,
@@ -2849,8 +2769,6 @@ def workspace_search(
             {"type": "attachment", "id": attachment.id, "title": attachment.original_name, "snippet": f"{max(1, attachment.size_bytes // 1024)} KB", "updated_at": attachment.created_at, "task_id": attachment.task_id, "conversation_id": attachment.conversation_id}
         )
     # 知识库文档（标题与正文）
-    from db.report_models import KnowledgeBase
-
     for kb in session.exec(
         select(KnowledgeBase)
         .where(KnowledgeBase.workspace_id == context.workspace.id)
@@ -3047,6 +2965,14 @@ async def agent_chat(
         if not preset.enabled:
             raise HTTPException(status_code=422, detail=f"智能体“{preset.name}”已停用")
         agent_persona = preset.persona
+    # 知识库召回：只有工作区确实建过知识库文档才检索，未建库的工作区（也是
+    # 绝大多数）连一次 embedding 调用都不会多付，提示词与历史逐字一致。
+    knowledge_context = ""
+    if workspace_has_knowledge(session, context.workspace.id):
+        retrieved = await retrieve_knowledge_smart(
+            session, context.workspace.id, request.query, limit=KNOWLEDGE_CONTEXT_LIMIT
+        )
+        knowledge_context = render_knowledge_context(retrieved)
     config = {
         "model_id": model_id,
         "skill_name": request.skill_name,
@@ -3057,6 +2983,7 @@ async def agent_chat(
         "usage_by_message": {},
         "permission_mode": permission_mode,
         "agent_persona": agent_persona,
+        "knowledge_context": knowledge_context,
         **_mode_config(request),
         **run_context,
     }
@@ -4994,7 +4921,6 @@ def admin_overview(
             "attachments": len(session.exec(select(Attachment.id)).all()),
             "deliverables": len(session.exec(select(Deliverable.id)).all()),
             "notifications": len(session.exec(select(Notification.id)).all()),
-            "automation_jobs": len(session.exec(select(ScheduledJob.id)).all()),
             "usage_records": len(session.exec(select(UsageRecord.id)).all()),
             "total_tokens": sum(session.exec(select(UsageRecord.total_tokens)).all()),
             "models": len(ModelHub.list_supported_models()),
@@ -5250,20 +5176,6 @@ def purge_workspace_data(session: Session, workspace_id: str) -> None:
     删除，否则 Postgres 的外键约束会拒绝删除（SQLite 默认不强制，
     但顺序同样保持正确）。
     """
-    from db.report_models import (
-        KnowledgeBase,
-        KnowledgeChunk,
-        ReportAlert,
-        ReportAlertRule,
-        ReportAssistant,
-        ReportAssistantMessage,
-        ReportDailyReport,
-        ReportDataSource,
-        ReportMonthlyReport,
-        ReportRecord,
-        ReportWeeklyReport,
-    )
-
     def drop_rows(model):
         for row in session.exec(select(model).where(model.workspace_id == workspace_id)).all():
             session.delete(row)
@@ -5294,26 +5206,8 @@ def purge_workspace_data(session: Session, workspace_id: str) -> None:
         AuditEvent,
         Notification,
         NotificationTarget,
-        ScheduledJob,
-        BusinessAssistantMessage,  # → business_assistants
-        BusinessRecord,            # → business_data_sources
-        BusinessAlert,             # → rules / sources / records
-        BusinessAlertRule,
-        BusinessBossTask,
-        BusinessAssistant,
-        BusinessDataSource,
-        BusinessDailyReport,
-        ReportAssistantMessage,    # → report_assistants
-        ReportRecord,              # → report_data_sources
-        ReportAlert,               # → rules / sources
-        ReportAlertRule,
         KnowledgeChunk,            # → knowledge_bases
         KnowledgeBase,
-        ReportDataSource,
-        ReportWeeklyReport,
-        ReportMonthlyReport,
-        ReportDailyReport,
-        ReportAssistant,
     ):
         drop_rows(model)
 
@@ -5560,10 +5454,3 @@ def admin_list_audit_events(
             if _audit_visible_to_user(event, user)
         ]
     }
-
-
-# Keep the operating-agent module isolated from the general project/task API
-# while mounting it below the same authenticated /api/v1 boundary.
-from api.business_routes import router as business_router
-
-router.include_router(business_router, prefix="/v1/business")

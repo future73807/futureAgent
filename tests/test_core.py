@@ -1,5 +1,4 @@
 import asyncio
-import functools
 import hashlib
 import hmac
 import tempfile
@@ -277,6 +276,24 @@ class WorkspaceContextTests(unittest.TestCase):
             # 规则排在模式契约之后：它是硬约束，不该被前面的措辞盖过。
             self.assertTrue(prompt.rstrip().endswith("1. 先给结论"))
         self.assertEqual(AgentEngine._mode_prompt("基础提示", "agent", {}), "基础提示")
+
+    def test_knowledge_context_is_injected_between_skill_and_persona(self):
+        """知识库召回片段是数据，插在模式契约与人设之间，不能盖过硬约束。"""
+        config = {
+            "knowledge_context": "【工作区知识库检索结果】\n[1]（知识库）设备手册 — 传送带每周润滑一次。",
+            "agent_persona": "你是现场工程师助手",
+            "workspace_rules": "## 工作区规则（必须遵守）\n1. 先给结论",
+        }
+        prompt = AgentEngine._mode_prompt("基础提示", "agent", config)
+        self.assertIn("[1]（知识库）设备手册", prompt)
+        self.assertLess(prompt.index("基础提示"), prompt.index("检索结果"))
+        self.assertLess(prompt.index("检索结果"), prompt.index("当前智能体人设"))
+        self.assertLess(prompt.index("当前智能体人设"), prompt.index("工作区规则"))
+        # 没有召回（工作区没建知识库）时提示词逐字不变
+        self.assertEqual(
+            AgentEngine._mode_prompt("基础提示", "agent", {"knowledge_context": "   "}),
+            "基础提示",
+        )
 
 
 class ModelReadinessTests(unittest.TestCase):

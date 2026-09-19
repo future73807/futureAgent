@@ -1,10 +1,9 @@
-"""经营/汇报智能体的 LLM 应答层。
+"""轻量 LLM 应答层：对话摘要与知识库检索片段的提示词拼装。
 
 设计边界：
-- 只回答"用户工作区内已授权数据"的问题，prompt 中显式注入确定性摘要与
-  检索片段，并要求模型不得编造。
-- 模型未配置/不可达/超时/空回复时返回 ``None``，由调用方降级为原有
-  确定性回复 —— 智能体的可用性永远不依赖外部供应商。
+- 模型调用是可以失败的一步：未配置/不可达/超时/空回复一律返回 ``None``，
+  由调用方走确定性降级 —— 产品可用性永远不依赖外部供应商。
+- 检索片段以带编号的引用块注入，并要求模型不得编造未覆盖的内容。
 """
 from __future__ import annotations
 
@@ -19,11 +18,15 @@ logger = logging.getLogger(__name__)
 DEFAULT_ANSWER_TIMEOUT_SECONDS = 60.0
 
 SYSTEM_PROMPT = (
-    "你是团队的经营与汇报助手。你只能依据下方提供的"
-    "【确定性数据摘要】与【检索资料片段】回答问题；"
-    "资料不足以回答时必须明确说明缺少哪些数据，禁止编造数字或结论。"
-    "引用资料片段时在句子末尾标注其编号，例如 [1]。用简体中文回答。"
+    "你是团队工作区里的助理。回答必须严格依据用户提供的内容；"
+    "资料不足以回答时明确说明缺少什么，禁止编造数字或结论。用简体中文回答。"
 )
+
+# 检索片段的来源标签；新增召回来源时在这里登记，避免 prompt 中出现英文枚举值。
+_SOURCE_LABELS = {
+    "knowledge_base": "知识库",
+    "attachment": "附件",
+}
 
 
 def extract_answer_text(response: Any) -> str | None:
@@ -84,25 +87,22 @@ def generate_answer_sync(
         return None
 
 
-def render_user_prompt(
-    question: str,
-    deterministic_summary: str,
-    retrieved: list[dict[str, Any]],
-) -> str:
-    """把确定性摘要与召回片段拼装成带编号引用的用户 prompt。"""
-    blocks = [f"用户问题：{question}", "", "【确定性数据摘要】", deterministic_summary or "（暂无）", ""]
-    blocks.append("【检索资料片段】")
-    if retrieved:
-        for index, item in enumerate(retrieved, start=1):
-            source_label = {
-                "knowledge_base": "知识库",
-                "business_record": "业务记录",
-                "report_record": "汇报记录",
-                "attachment": "附件",
-            }.get(item.get("source", ""), "资料")
-            blocks.append(f"[{index}]（{source_label}）{item.get('title', '')} — {item.get('snippet', '')}")
-    else:
-        blocks.append("（没有命中的资料片段）")
-    blocks.append("")
-    blocks.append("请基于以上内容回答用户问题。")
-    return "\n".join(blocks)
+def render_knowledge_context(retrieved: list[dict[str, Any]]) -> str:
+    """把工作区知识检索的片段渲染成带编号引用的提示词块。
+
+    没有命中时返回空串：调用方据此完全跳过注入，未建知识库的工作区
+    提示词与历史行为逐字一致。
+    """
+    if not retrieved:
+        return ""
+    lines = [
+        "【工作区知识库检索结果】",
+        "以下内容由工作区已登记的资料召回，可能不完整，也可能与问题无关。",
+    ]
+    for index, item in enumerate(retrieved, start=1):
+        source_label = _SOURCE_LABELS.get(item.get("source", ""), "资料")
+        lines.append(
+            f"[{index}]（{source_label}）{item.get('title', '')} — {item.get('snippet', '')}"
+        )
+    lines.append("引用资料时在句末标注编号，例如 [1]；资料未覆盖的内容不要编造。")
+    return "\n".join(lines)

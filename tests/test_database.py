@@ -15,10 +15,12 @@ from sqlmodel import SQLModel
 
 import db.database as database
 from config import settings
-from db.database import BUSINESS_AGENT_TABLES, _matches_schema
+from db.database import KNOWLEDGE_TABLES, NEWEST_FEATURE_TABLES, _matches_schema
 
 # 迁移链的当前 head；新增迁移时只需更新这一处。
-CURRENT_HEAD = "20260915_24"
+CURRENT_HEAD = "20260919_26"
+# 删除汇报/经营智能体之前的那一版：该版库里还有那些表。
+PRE_DROP_HEAD = "20260915_24"
 
 
 class _Inspector:
@@ -84,7 +86,10 @@ class MigrationBaselineTests(unittest.TestCase):
             self.assertFalse(environment_path.exists())
 
     def test_pre_alembic_schema_is_recognised_as_a_safe_baseline(self):
-        legacy_tables = set(SQLModel.metadata.tables) - BUSINESS_AGENT_TABLES - {"agent_runs"}
+        # Alembic 之前的产品基线：既没有知识库表、也没有后续增量特性表。
+        legacy_tables = (
+            set(SQLModel.metadata.tables) - KNOWLEDGE_TABLES - NEWEST_FEATURE_TABLES - {"agent_runs"}
+        )
         self.assertTrue(_matches_schema(_Inspector(legacy_tables), legacy_tables))
         self.assertFalse(_matches_schema(_Inspector(legacy_tables), set(SQLModel.metadata.tables)))
 
@@ -111,7 +116,8 @@ class MigrationBaselineTests(unittest.TestCase):
             finally:
                 engine.dispose()
 
-    def test_existing_20260725_02_database_upgrades_to_business_revision(self):
+    def test_existing_20260725_02_database_upgrades_to_current_head(self):
+        """从最老的可升级版本一路到 head：中途建出的智能体表最终被删除。"""
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "existing-02.db"
             url = f"sqlite:///{database_path.as_posix()}"
@@ -130,8 +136,14 @@ class MigrationBaselineTests(unittest.TestCase):
                         "business_alerts",
                         "business_daily_reports",
                         "business_boss_tasks",
-                    }.issubset(tables)
+                        "report_assistants",
+                        "report_records",
+                        "report_monthly_reports",
+                        "scheduled_jobs",
+                    }.isdisjoint(tables)
                 )
+                # 知识库（RAG）表必须保留：它是唯一没有随智能体一起删除的特性表
+                self.assertTrue({"knowledge_bases", "knowledge_chunks"}.issubset(tables))
                 with engine.connect() as connection:
                     self.assertEqual(
                         connection.exec_driver_sql("select version_num from alembic_version").scalar_one(),
@@ -140,7 +152,7 @@ class MigrationBaselineTests(unittest.TestCase):
             finally:
                 engine.dispose()
 
-    def test_unversioned_20260725_02_schema_is_stamped_then_only_business_revision_runs(self):
+    def test_unversioned_20260725_02_schema_is_stamped_then_missing_revisions_run(self):
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "unversioned-02.db"
             url = f"sqlite:///{database_path.as_posix()}"
@@ -161,7 +173,8 @@ class MigrationBaselineTests(unittest.TestCase):
                 with patch.object(settings, "database_url", url):
                     database._upgrade_schema()
                 tables = set(inspect(migration_engine).get_table_names())
-                self.assertIn("business_assistants", tables)
+                self.assertNotIn("business_assistants", tables)
+                self.assertIn("knowledge_bases", tables)
                 with migration_engine.connect() as connection:
                     self.assertEqual(
                         connection.exec_driver_sql("select version_num from alembic_version").scalar_one(),
@@ -216,6 +229,7 @@ class MigrationBaselineTests(unittest.TestCase):
                 migration_engine.dispose()
 
     def test_unversioned_business_revision_is_stamped_at_03_before_upgrade(self):
+        """20260725_03 的无版本库：识别为 03（而不是从头重跑），最终到 head。"""
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "unversioned-business.db"
             url = f"sqlite:///{database_path.as_posix()}"
@@ -239,8 +253,10 @@ class MigrationBaselineTests(unittest.TestCase):
                 with patch.object(settings, "database_url", url):
                     database._upgrade_schema()
                 tables = set(inspect(migration_engine).get_table_names())
-                self.assertIn("business_assistants", tables)
-                self.assertIn("report_assistants", tables)
+                self.assertNotIn("business_assistants", tables)
+                self.assertNotIn("report_assistants", tables)
+                # 该库自建的表不能被迁移链清掉（只删本产品自己的表）
+                self.assertIn("custom_business_extension", tables)
                 columns = {
                     column["name"]
                     for column in inspect(migration_engine).get_columns("agent_runs")
@@ -480,6 +496,74 @@ class MigrationBaselineTests(unittest.TestCase):
             finally:
                 database.engine = original_engine
                 migration_engine.dispose()
+
+    def test_unversioned_previous_head_database_drops_agent_tables(self):
+        """无版本库已具备当前全部结构、但还带着已删除智能体的表。
+
+        这时不能直接 stamp head：那样删除迁移永远不会执行，孤儿表会一直留在
+        库里。正确行为是停在删除迁移的前一版，只补跑这一版。
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "unversioned-prev-drop.db"
+            url = f"sqlite:///{database_path.as_posix()}"
+            config = Config("alembic.ini")
+            config.set_main_option("sqlalchemy.url", url)
+            command.upgrade(config, PRE_DROP_HEAD)
+            bootstrap_engine = create_engine(url)
+            try:
+                with bootstrap_engine.begin() as connection:
+                    connection.exec_driver_sql("drop table alembic_version")
+            finally:
+                bootstrap_engine.dispose()
+
+            original_engine = database.engine
+            migration_engine = create_engine(url, connect_args={"check_same_thread": False})
+            database.engine = migration_engine
+            try:
+                with patch.object(settings, "database_url", url):
+                    database._upgrade_schema()
+                tables = set(inspect(migration_engine).get_table_names())
+                self.assertTrue(
+                    {"business_assistants", "report_records", "scheduled_jobs"}.isdisjoint(tables)
+                )
+                self.assertTrue({"knowledge_bases", "knowledge_chunks"}.issubset(tables))
+                with migration_engine.connect() as connection:
+                    self.assertEqual(
+                        connection.exec_driver_sql("select version_num from alembic_version").scalar_one(),
+                        CURRENT_HEAD,
+                    )
+            finally:
+                database.engine = original_engine
+                migration_engine.dispose()
+
+    def test_stray_probe_columns_are_dropped_so_schema_detection_stays_honest(self):
+        """模型里没有迁移来源的调试列必须清掉，否则结构判定永远为假。
+
+        这类残留列（create_all 建出来的库会有）会让 ``_matches_schema`` 每次
+        都认为"结构落后于模型"：启动日志常驻一条假错误，无版本旧库也认不出
+        "已经是当前结构"，只能退回更早的阶梯版本去重放迁移。
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "stray-column.db"
+            url = f"sqlite:///{database_path.as_posix()}"
+            config = Config("alembic.ini")
+            config.set_main_option("sqlalchemy.url", url)
+            engine = create_engine(url)
+            try:
+                SQLModel.metadata.create_all(engine)
+                with engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        "alter table tasks add column dummy_probe varchar default ''"
+                    )
+                command.stamp(config, "20260919_25")
+                command.upgrade(config, "head")
+                for table in ("tasks", "conversations"):
+                    columns = {column["name"] for column in inspect(engine).get_columns(table)}
+                    self.assertNotIn("dummy_probe", columns)
+                    # 归档列不能跟着一起丢
+                    self.assertIn("archived", columns)
+            finally:
+                engine.dispose()
 
     def test_half_applied_migration_self_heals(self):
         """复现强杀场景：表已建但 alembic_version 未写 → 启动时自动对齐。"""

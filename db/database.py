@@ -7,18 +7,11 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from sqlalchemy import inspect, text
 
 from config import settings
-from db.models import Membership, User, Workspace, now_utc
-from db.report_models import (  # 汇报智能体模型（导入同时完成 metadata 注册）
+from db.knowledge_models import (  # 知识库模型（导入同时完成 metadata 注册）
     KnowledgeBase,
-    ReportAlert,
-    ReportAlertRule,
-    ReportAssistant,
-    ReportAssistantMessage,
-    ReportDailyReport,
-    ReportDataSource,
-    ReportRecord,
-    ReportWeeklyReport,
+    KnowledgeChunk,
 )
+from db.models import Membership, User, Workspace, now_utc
 
 LEGACY_BOOTSTRAP_ADMIN_EMAIL = "admin@futureagent.local"
 DEVELOPMENT_BOOTSTRAP_ADMIN_EMAIL = "admin@futureagent.dev"
@@ -31,11 +24,18 @@ if settings.database_url.startswith("sqlite"):
 engine = create_engine(settings.database_url, **engine_options)
 
 
-# These tables were introduced after the initial governed-workspace and
-# AgentRun migrations.  They let a pre-20260725_03 installation without an
-# Alembic version table be stamped at the last schema it actually has, rather
-# than attempting to recreate its existing base tables.
-BUSINESS_AGENT_TABLES = {
+# 知识库（RAG）表由 20260726_04 与 20260902_14 引入，是当前仍在用的特性表。
+# 判定"20260726_04 之前的老库"时要把它们从期望表里排除，否则每个历史分支的
+# _matches_schema 都会因为缺这两张表而落空。
+KNOWLEDGE_TABLES = {
+    KnowledgeBase.__tablename__,
+    KnowledgeChunk.__tablename__,
+}
+
+# 汇报/经营智能体与自动化调度的表。产品收敛到单一智能体后由迁移
+# 20260919_25 删除，模型层已不存在这些表；无版本旧库里若还留着它们，
+# 说明该库在删除迁移之前就已是完整结构，需要让它真的跑一遍删除迁移。
+DROPPED_FEATURE_TABLES = {
     "business_assistants",
     "business_data_sources",
     "business_records",
@@ -44,31 +44,30 @@ BUSINESS_AGENT_TABLES = {
     "business_daily_reports",
     "business_boss_tasks",
     "business_assistant_messages",
+    "report_assistants",
+    "report_data_sources",
+    "report_records",
+    "report_alert_rules",
+    "report_alerts",
+    "report_daily_reports",
+    "report_weekly_reports",
+    "report_monthly_reports",
+    "report_assistant_messages",
+    "scheduled_jobs",
 }
 
-# 汇报智能体表（由模型派生，避免表名漂移）
-REPORT_AGENT_TABLES = {
-    KnowledgeBase.__tablename__,
-    ReportRecord.__tablename__,
-    ReportDataSource.__tablename__,
-    ReportAlert.__tablename__,
-    ReportAlertRule.__tablename__,
-    ReportAssistant.__tablename__,
-    ReportAssistantMessage.__tablename__,
-    ReportDailyReport.__tablename__,
-    ReportWeeklyReport.__tablename__,
-}
+# 删除迁移的前一版。无版本库里"结构已是当前模型、但还带着已删除表"时
+# 从这里起跑，只补跑删除迁移，而不是整条链或直接 stamp head。
+DROP_FEATURE_TABLES_BASE_REVISION = "20260915_24"
 
-# 通知中心、自动化调度、交付物与月报是最新加入的特性表。旧库识别时忽略
-# 它们：缺少这些表只说明版本停在迁移链早期，升级链会以增量表把它们补齐。
+# 通知中心、交付物与近期的增量表。旧库识别时忽略它们：缺少这些表只说明
+# 版本停在迁移链早期，升级链会以增量表把它们补齐。
 # 近期版本（06-18）由 ADDITIVE_STEPS 阶梯精确判定；更旧的库走 legacy 分支。
 NEWEST_FEATURE_TABLES = {
     "notifications",
     "notification_targets",
-    "scheduled_jobs",
     "deliverables",
     "task_comments",
-    "report_monthly_reports",
     "knowledge_chunks",
     "agent_run_batches",
     "usage_records",
@@ -78,10 +77,10 @@ NEWEST_FEATURE_TABLES = {
     "custom_agents",
 }
 
-# Revision 20260725_03 adds both business tables and audit visibility columns.
-# A real 20260725_02 installation has every prior table but naturally lacks
-# those two new audit columns, so bootstrap detection must ignore only them
-# while deciding where to stamp an unversioned legacy database.
+# Revision 20260725_03 added the audit visibility columns (its operating-agent
+# tables were dropped again later). A real 20260725_02 installation has every
+# prior table but naturally lacks those two columns, so bootstrap detection must
+# ignore only them while deciding where to stamp an unversioned legacy database.
 PRE_BUSINESS_MISSING_COLUMNS = {
     "audit_events": {"visibility", "owner_user_id"},
     "agent_runs": {"mcp_servers_json", "tool_trace_json"},
@@ -129,10 +128,8 @@ ADDITIVE_STEPS = [
     ("20260911_18", {"usage_records"}),
     ("20260902_15", {"agent_run_batches"}),
     ("20260902_14", {"knowledge_chunks"}),
-    ("20260902_12", {"report_monthly_reports"}),
     ("20260902_10", {"task_comments"}),
     ("20260902_09", {"deliverables"}),
-    ("20260902_08", {"scheduled_jobs"}),
     ("20260902_07", {"notifications", "notification_targets"}),
 ]
 
@@ -261,17 +258,24 @@ def _upgrade_schema() -> None:
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names())
     if "alembic_version" not in existing_tables:
-        # Exclude business/report agent tables and the newest feature tables
-        # when detecting legacy schemas: their absence only means the install
+        # Exclude the knowledge tables and the newest feature tables when
+        # detecting legacy schemas: their absence only means the install
         # predates those revisions, and the additive chain recreates them.
         current_tables = set(SQLModel.metadata.tables)
         core_current = current_tables - NEWEST_FEATURE_TABLES
-        non_agent_tables = current_tables - BUSINESS_AGENT_TABLES - REPORT_AGENT_TABLES - NEWEST_FEATURE_TABLES
-        pre_report_tables = current_tables - REPORT_AGENT_TABLES - NEWEST_FEATURE_TABLES
+        pre_knowledge_tables = current_tables - KNOWLEDGE_TABLES - NEWEST_FEATURE_TABLES
         if _matches_schema(inspector, current_tables):
             # A controlled transition for installations that already include
-            # every current model table. No DDL is needed; record the head.
-            command.stamp(alembic_config, "head")
+            # every current model table.
+            if existing_tables & DROPPED_FEATURE_TABLES:
+                # 表结构已经对齐，但库里还留着已删除智能体的表：停在前一版并
+                # 立刻补跑删除迁移。直接 stamp head 会让这些表永远留在库里。
+                command.stamp(alembic_config, DROP_FEATURE_TABLES_BASE_REVISION)
+                _upgrade_stepwise(alembic_config, DROP_FEATURE_TABLES_BASE_REVISION)
+                _warn_on_schema_gap()
+            else:
+                # No DDL is needed; record the head.
+                command.stamp(alembic_config, "head")
             return
         # 无版本表的近期安装：按已拥有的最高增量表判定版本（新→旧）。
         legacy_ignored = _ignored_columns(
@@ -308,9 +312,9 @@ def _upgrade_schema() -> None:
                 ),
             ):
                 command.stamp(alembic_config, "20260726_04")
-            elif not (existing_tables & REPORT_AGENT_TABLES) and _matches_schema(
+            elif not (existing_tables & KNOWLEDGE_TABLES) and _matches_schema(
                 inspector,
-                pre_report_tables,
+                pre_knowledge_tables,
                 ignored_columns=_ignored_columns(
                     PRE_AGENT_RUN_MCP_MISSING_COLUMNS,
                     PRE_SUMMARY_MISSING_COLUMNS,
@@ -324,7 +328,7 @@ def _upgrade_schema() -> None:
                 command.stamp(alembic_config, "20260725_03")
             elif _matches_schema(
                 inspector,
-                non_agent_tables,
+                pre_knowledge_tables,
                 ignored_columns=_ignored_columns(
                     PRE_BUSINESS_MISSING_COLUMNS,
                     PRE_SUMMARY_MISSING_COLUMNS,
@@ -336,10 +340,10 @@ def _upgrade_schema() -> None:
                 ),
             ):
                 # The immediately preceding commercial schema has all governed
-                # AgentRun columns but not the operating-agent tables.
+                # AgentRun columns but not the audit visibility columns.
                 command.stamp(alembic_config, "20260725_02")
             else:
-                legacy_tables = non_agent_tables - {"agent_runs"}
+                legacy_tables = pre_knowledge_tables - {"agent_runs"}
                 if _matches_schema(
                     inspector,
                     legacy_tables,

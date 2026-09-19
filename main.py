@@ -1,6 +1,6 @@
 """
 futureAgent 启动入口
-整合: FastAPI + LangGraph + LiteLLM + MCP + Casbin + 汇报智能体
+整合: FastAPI + LangGraph + LiteLLM + MCP + Casbin + 知识库检索
 """
 from contextlib import asynccontextmanager
 
@@ -9,17 +9,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
 from api.docs_catalog import render_api_catalog
-from api.automation_routes import router as automation_router
 from api.deliverables import router as deliverables_router
 from api.file_versions import router as file_versions_router
+from api.knowledge_routes import router as knowledge_router
 from api.notifications import router as notifications_router
 from api.openapi import API_TITLE, build_openapi_schema
 from api.routes import router
-from api.report_routes import router as report_router
 from config import settings
 from core.observability import install_observability
 from core.checkpointer import aclose_checkpointer
-from core.scheduler import shutdown_scheduler, start_scheduler
 from db.database import init_db
 import os
 
@@ -27,9 +25,7 @@ import os
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
-    start_scheduler()
     yield
-    shutdown_scheduler()
     await aclose_checkpointer()
 
 app = FastAPI(
@@ -62,9 +58,8 @@ from core.rate_limit import rate_limit_auth_middleware  # noqa: E402
 app.middleware("http")(rate_limit_auth_middleware)
 
 app.include_router(router, prefix="/api")
-app.include_router(report_router, prefix="/api/v1/report")
+app.include_router(knowledge_router, prefix="/api/v1/knowledge-bases")
 app.include_router(notifications_router, prefix="/api")
-app.include_router(automation_router, prefix="/api")
 app.include_router(deliverables_router, prefix="/api")
 app.include_router(file_versions_router, prefix="/api")
 
