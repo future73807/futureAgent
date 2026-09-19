@@ -12,6 +12,7 @@ import Upload from 'antd/es/upload'
 import {
   ArrowUpOutlined,
   BugOutlined,
+  ClockCircleOutlined,
   CodeOutlined,
   DownloadOutlined,
   FileExcelOutlined,
@@ -66,6 +67,13 @@ const quickActions = [
     label: '工具脚本',
     icon: <ToolOutlined />,
     prompt: '写一个可直接运行的自动化脚本，处理我描述的数据整理工作，并说明依赖与运行命令。',
+  },
+  {
+    // 定时任务没有独立页面，全靠对话安排——这里是它唯一的发现入口。
+    key: 'schedule',
+    label: '定时任务',
+    icon: <ClockCircleOutlined />,
+    prompt: '帮我安排一个定时任务：每天早上九点，把工作区里昨天新增的任务与 AI 执行结果总结成一段简报。',
   },
 ]
 

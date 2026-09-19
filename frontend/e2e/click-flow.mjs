@@ -252,7 +252,7 @@ try {
     return detail
   })
 
-  await step('四个快捷动作可点击并写入输入框', async () => {
+  await step('快捷动作可点击并写入输入框', async () => {
     // 首屏会自动选中最近一个任务；那个任务已经有消息，空态快捷动作不会渲染。
     // 先建一个空任务，把 Code 工作台的首屏状态稳定下来。
     await sidebarNav('新建任务').click()
@@ -267,13 +267,13 @@ try {
     const hero = (await page.locator('.code-hero h1').innerText()).trim()
     if (!/Code with/i.test(hero)) throw new Error(`空态主标题异常：${hero}`)
     await page.waitForFunction(
-      () => document.querySelectorAll('.chat-stage.is-empty .code-quick-action').length === 4,
+      () => document.querySelectorAll('.chat-stage.is-empty .code-quick-action').length === 5,
       null,
       { timeout: 20000 },
     )
     const actions = page.locator('.chat-stage.is-empty .code-quick-action')
     const count = await actions.count()
-    if (count !== 4) throw new Error(`快捷动作数量为 ${count}`)
+    if (count !== 5) throw new Error(`快捷动作数量为 ${count}`)
     for (let index = 0; index < count; index += 1) {
       await actions.nth(index).click()
       await page.waitForTimeout(150)
@@ -281,7 +281,7 @@ try {
       if (!value.trim()) throw new Error(`第 ${index + 1} 个快捷动作没有写入内容`)
       await page.locator('.composer-input textarea').fill('')
     }
-    return '4 个动作均写入成功'
+    return '5 个动作均写入成功'
   })
 
   // 部署默认模型由服务端配置决定（MODEL_PROFILES_JSON / DEFAULT_MODEL），

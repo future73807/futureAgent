@@ -59,6 +59,10 @@ const actionLabels = {
   'knowledge_base.uploaded': '上传知识库文档',
   'knowledge_base.updated': '更新知识库文档',
   'knowledge_base.deleted': '删除知识库文档',
+  'automation_job.created': '创建定时任务',
+  'automation_job.updated': '更新定时任务',
+  'automation_job.deleted': '删除定时任务',
+  'automation_job.executed': '执行定时任务',
 }
 
 const targetLabels = {
