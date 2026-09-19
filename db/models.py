@@ -376,6 +376,38 @@ class CustomAgent(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=now_utc)
 
 
+class ScheduledJob(SQLModel, table=True):
+    """工作区级定时任务：按 cron 到点让智能体跑一次提示词。
+
+    任务本身不携带任何权限，也不代表某个人的身份：执行时用的是发起人的身份与
+    工作区最严格的权限档（不自动批准、不自动完成步骤），需要人工决策的动作仍会
+    留在工作模式里等人处理。每次执行产出一个新对话，并把结果推送成站内通知。
+    """
+
+    __tablename__ = "scheduled_jobs"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    workspace_id: str = Field(foreign_key="workspaces.id", index=True)
+    name: str = Field(max_length=120)
+    # 目前只有 agent_task 一种；保留这一列是为了让"以后再加任务类型"不必改表。
+    job_type: str = Field(default="agent_task", max_length=32)
+    cron: str = Field(max_length=64)
+    enabled: bool = Field(default=True)
+    prompt: str = Field(default="", max_length=4000)
+    model_id: str = Field(default="", max_length=120)
+    skill_name: str = Field(default="chatbot", max_length=120)
+    mode: str = Field(default="chat", max_length=16)  # chat/plan/agent/goal/loop
+    agent_id: str | None = Field(default=None, max_length=64)  # 自建智能体预设
+    mcp_servers_json: str = Field(default="[]", max_length=2000)
+    last_run_at: datetime | None = Field(default=None)
+    last_status: str = Field(default="", max_length=16)  # ok/failed
+    last_message: str = Field(default="", max_length=500)
+    last_conversation_id: str | None = Field(default=None, max_length=64)
+    created_by: str = Field(foreign_key="users.id", index=True)
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)
+
+
 class NotificationTarget(SQLModel, table=True):
     """工作区级通知出口：普通 Webhook 或企业微信/飞书/钉钉群机器人。"""
 

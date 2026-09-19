@@ -18,6 +18,7 @@ from api.routes import router
 from config import settings
 from core.observability import install_observability
 from core.checkpointer import aclose_checkpointer
+from core.scheduler import shutdown_scheduler, start_scheduler
 from db.database import init_db
 import os
 
@@ -25,7 +26,9 @@ import os
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    start_scheduler()
     yield
+    shutdown_scheduler()
     await aclose_checkpointer()
 
 app = FastAPI(

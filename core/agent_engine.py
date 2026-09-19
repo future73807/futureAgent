@@ -24,6 +24,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from core.model_hub import ModelHub
+from core.scheduling import scheduling_tools
 from core.skill_manager import SkillManager
 from core.mcp_manager import MCPManager
 from auth.auth_manager import AuthManager
@@ -599,15 +600,25 @@ class AgentEngine:
                     )
                 ]
 
+            # 定时任务是引擎本地注入的产品能力（不经 MCP）：用户在对话里最常直说的
+            # 就是"每天早上帮我……"，所以在 chat 模式下也保留这三个工具——它们是
+            # chat 模式唯一的例外。它们不碰文件、不发网络请求，只写一行任务定义。
+            scheduling: list[StructuredTool] = []
+            if self.auth_manager.is_allowed(user_role, "tool:schedule_task", "use"):
+                scheduling = scheduling_tools(
+                    workspace_id=workspace_id,
+                    created_by=str(config.get("user_id") or ""),
+                )
+
             # 3. 按模式收敛工具面，再装配 Skill（过滤工具 + 获取提示词）
             if mode == "chat":
-                mode_tools: list[StructuredTool] = []
+                mode_tools: list[StructuredTool] = list(scheduling)
             elif mode == "plan":
                 mode_tools = [
                     tool for tool in all_tools if tool.name in PLAN_MODE_TOOL_NAMES
                 ]
             else:
-                mode_tools = all_tools
+                mode_tools = list(all_tools) + scheduling
             skill_data = self.skill_manager.assemble_skill(skill_name, mode_tools)
 
             # 4. 通过 ModelHub 获取 ChatModel (LiteLLM 或后备方案)

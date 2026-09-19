@@ -445,12 +445,15 @@ class PythonToolRegistrationTests(unittest.TestCase):
 class BundledSkillMappingTests(unittest.TestCase):
     def test_skill_whitelists_only_reference_builtin_or_optional_tools(self):
         from core.agent_engine import SUBAGENT_TOOL_NAME
+        from core.scheduling import SCHEDULING_TOOL_NAMES
 
         tool_names = {tool.name for tool in server.mcp._tool_manager.list_tools()}
         tool_names.add("run_python")  # optional, registered only when enabled
         # dispatch_subagent 由 AgentEngine 本地注入而非 MCP 提供，但同样是
         # 合法的白名单条目（技能据此显式开启子代理能力）。
         tool_names.add(SUBAGENT_TOOL_NAME)
+        # 定时任务工具同理：引擎本地注入，不经过 MCP。
+        tool_names |= set(SCHEDULING_TOOL_NAMES)
         manager = SkillManager(Path(__file__).parents[1] / "skills")
         for skill_name in ("chatbot", "coder", "data_analyst"):
             skill = manager.get_skill(skill_name)

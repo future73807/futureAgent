@@ -14,6 +14,10 @@ allowed_tool_names:
 - read_project_file
 - run_project_tests
 - check_python_syntax
+# 定时任务是引擎本地注入的产品能力（不经 MCP）：把巡检提示词安排成周期执行。
+- schedule_task
+- list_scheduled_tasks
+- cancel_scheduled_task
 model_override: ''
 category: 其他
 tags: []

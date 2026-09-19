@@ -2978,6 +2978,8 @@ async def agent_chat(
         "skill_name": request.skill_name,
         "mcp_servers": request.mcp_servers,
         "workspace_id": context.workspace.id,
+        # 发起人身份：定时任务一类的引擎本地工具据此归属任务，不信任模型参数。
+        "user_id": context.user.id,
         "thread_id": conversation.id,
         "tool_trace": [],
         "usage_by_message": {},
@@ -3533,6 +3535,8 @@ async def execute_task_with_agent(
         "skill_name": request.skill_name,
         "mcp_servers": request.mcp_servers,
         "workspace_id": context.workspace.id,
+        # 发起人身份：定时任务一类的引擎本地工具据此归属任务，不信任模型参数。
+        "user_id": context.user.id,
         # 任务级线程：同一任务的多次执行共享 LangGraph 记忆（Postgres 部署）
         "thread_id": f"governed-task-{task.id}",
         "tool_trace": [],
@@ -3846,6 +3850,7 @@ async def execute_task_steps_in_parallel(
             "skill_name": request.skill_name,
             "mcp_servers": request.mcp_servers,
             "workspace_id": context.workspace.id,
+            "user_id": context.user.id,
             # 并行步骤各自独立线程：并发写同一线程会破坏 LangGraph 状态。
             "thread_id": f"governed-task-{task.id}-step-{step.id}",
             "tool_trace": [],

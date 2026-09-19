@@ -18,7 +18,7 @@ from config import settings
 from db.database import KNOWLEDGE_TABLES, NEWEST_FEATURE_TABLES, _matches_schema
 
 # 迁移链的当前 head；新增迁移时只需更新这一处。
-CURRENT_HEAD = "20260919_26"
+CURRENT_HEAD = "20260919_27"
 # 删除汇报/经营智能体之前的那一版：该版库里还有那些表。
 PRE_DROP_HEAD = "20260915_24"
 
@@ -139,11 +139,12 @@ class MigrationBaselineTests(unittest.TestCase):
                         "report_assistants",
                         "report_records",
                         "report_monthly_reports",
-                        "scheduled_jobs",
                     }.isdisjoint(tables)
                 )
                 # 知识库（RAG）表必须保留：它是唯一没有随智能体一起删除的特性表
                 self.assertTrue({"knowledge_bases", "knowledge_chunks"}.issubset(tables))
+                # 定时任务表在 _25 被删、_27 以新形态重建：走到 head 必须存在。
+                self.assertIn("scheduled_jobs", tables)
                 with engine.connect() as connection:
                     self.assertEqual(
                         connection.exec_driver_sql("select version_num from alembic_version").scalar_one(),
@@ -523,10 +524,10 @@ class MigrationBaselineTests(unittest.TestCase):
                 with patch.object(settings, "database_url", url):
                     database._upgrade_schema()
                 tables = set(inspect(migration_engine).get_table_names())
-                self.assertTrue(
-                    {"business_assistants", "report_records", "scheduled_jobs"}.isdisjoint(tables)
-                )
+                self.assertTrue({"business_assistants", "report_records"}.isdisjoint(tables))
                 self.assertTrue({"knowledge_bases", "knowledge_chunks"}.issubset(tables))
+                # 定时任务表在这条路径上会被 _25 删掉、再由 _27 建回来。
+                self.assertIn("scheduled_jobs", tables)
                 with migration_engine.connect() as connection:
                     self.assertEqual(
                         connection.exec_driver_sql("select version_num from alembic_version").scalar_one(),

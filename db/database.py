@@ -32,9 +32,11 @@ KNOWLEDGE_TABLES = {
     KnowledgeChunk.__tablename__,
 }
 
-# 汇报/经营智能体与自动化调度的表。产品收敛到单一智能体后由迁移
-# 20260919_25 删除，模型层已不存在这些表；无版本旧库里若还留着它们，
-# 说明该库在删除迁移之前就已是完整结构，需要让它真的跑一遍删除迁移。
+# 汇报/经营智能体的表。产品收敛到单一智能体后由迁移 20260919_25 删除，模型层
+# 已不存在这些表；无版本旧库里若还留着它们，说明该库在删除迁移之前就已是完整
+# 结构，需要让它真的跑一遍删除迁移。
+# 注意：scheduled_jobs 不属于这里 —— 它在 20260919_27 以新形态重建，是当前模型
+# 里的表；把它算作"已删除表"会让结构已对齐的库误跑一遍删除迁移，白丢任务。
 DROPPED_FEATURE_TABLES = {
     "business_assistants",
     "business_data_sources",
@@ -53,7 +55,6 @@ DROPPED_FEATURE_TABLES = {
     "report_weekly_reports",
     "report_monthly_reports",
     "report_assistant_messages",
-    "scheduled_jobs",
 }
 
 # 删除迁移的前一版。无版本库里"结构已是当前模型、但还带着已删除表"时
@@ -71,6 +72,10 @@ NEWEST_FEATURE_TABLES = {
     "knowledge_chunks",
     "agent_run_batches",
     "usage_records",
+    # 定时任务在 20260919_25 删过、20260919_27 以新形态重建：它是 head 才有的表，
+    # 不算"老库应该有的表"。注意不要把它作为 ADDITIVE_STEPS 的判定标记——旧库里
+    # 的同名表来自另一个迁移版本，按它判定会跳过中间版本。
+    "scheduled_jobs",
     # 创造模式的自建智能体表。必须登记在这里：否则它会被算进"老库应该有的表"，
     # 每个历史分支的 _matches_schema 都不匹配，最后一个分支也落空 —— 结果是从头
     # 重跑整条迁移链，在已存在的表上再 batch_alter 一次。
@@ -113,6 +118,23 @@ PRE_AGENT_MODE_MISSING_COLUMNS = {"agent_runs": {"agent_mode", "iterations_json"
 # 消息级执行上下文是 chat_messages 的最新增量列；旧库识别时统一忽略。
 PRE_CHAT_AGENT_CONTEXT_MISSING_COLUMNS = {
     "chat_messages": {"agent_mode", "usage_json", "iterations_json"}
+}
+
+# 定时任务表在 20260919_25 被删、20260919_27 以新形态重建。旧形态（payload_json
+# 那一版）的无版本库如果不忽略这几列，就会被判成"结构落后于模型"，退回阶梯版本
+# 从头重放迁移链——那条路上会重跑 20260915_24 的 batch_alter，在已经有归档列的
+# tasks 表上再建一次同名列，SQLite 直接抛循环依赖。正确做法是把这类库认成"停在
+# 删除迁移之前"，补跑 25/26/27 一次到位。
+PRE_SCHEDULED_JOB_REBUILD_MISSING_COLUMNS = {
+    "scheduled_jobs": {
+        "prompt",
+        "model_id",
+        "skill_name",
+        "mode",
+        "agent_id",
+        "mcp_servers_json",
+        "last_conversation_id",
+    },
 }
 
 # 工作区偏好是 workspaces 的最新增量列；旧库识别时统一忽略。
@@ -264,12 +286,18 @@ def _upgrade_schema() -> None:
         current_tables = set(SQLModel.metadata.tables)
         core_current = current_tables - NEWEST_FEATURE_TABLES
         pre_knowledge_tables = current_tables - KNOWLEDGE_TABLES - NEWEST_FEATURE_TABLES
-        if _matches_schema(inspector, current_tables):
+        if _matches_schema(
+            inspector,
+            current_tables,
+            ignored_columns=_ignored_columns(PRE_SCHEDULED_JOB_REBUILD_MISSING_COLUMNS),
+        ):
             # A controlled transition for installations that already include
-            # every current model table.
-            if existing_tables & DROPPED_FEATURE_TABLES:
-                # 表结构已经对齐，但库里还留着已删除智能体的表：停在前一版并
-                # 立刻补跑删除迁移。直接 stamp head 会让这些表永远留在库里。
+            # every current model table (旧形态的定时任务表不算差异)。
+            # 两类库需要停在前一版补跑删除迁移，而不是直接记成 head：
+            # 还留着已删除智能体表的，和 scheduled_jobs 还没重建的。
+            if (existing_tables & DROPPED_FEATURE_TABLES) or not _matches_schema(
+                inspector, {"scheduled_jobs"}
+            ):
                 command.stamp(alembic_config, DROP_FEATURE_TABLES_BASE_REVISION)
                 _upgrade_stepwise(alembic_config, DROP_FEATURE_TABLES_BASE_REVISION)
                 _warn_on_schema_gap()

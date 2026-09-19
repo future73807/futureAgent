@@ -484,12 +484,15 @@ class AgentStreamingTests(unittest.IsolatedAsyncioTestCase):
                 auth_manager=AuthManager(),
             )
             chunks = []
-            async for chunk in engine.run(
-                "developer",
-                "hi",
-                {"model_id": "fake-model", "skill_name": "default", "mcp_servers": []},
-            ):
-                chunks.append(chunk)
+            # 本用例只关心流内容；假模型不支持 bind_tools，因此关掉引擎本地注入的
+            # 定时任务工具（工具注入本身由 tests/test_scheduling.py 覆盖）。
+            with patch("core.agent_engine.scheduling_tools", lambda **_kwargs: []):
+                async for chunk in engine.run(
+                    "developer",
+                    "hi",
+                    {"model_id": "fake-model", "skill_name": "default", "mcp_servers": []},
+                ):
+                    chunks.append(chunk)
             self.assertEqual("".join(chunks), "hello")
 
 
@@ -885,16 +888,19 @@ class AgentModeTests(unittest.TestCase):
             {"agent_node", "tools", "supervisor"}.issubset(set(with_tools.nodes))
         )
 
-    def test_chat_mode_binds_no_tools_and_plan_mode_is_read_only(self):
+    def test_chat_mode_binds_only_scheduling_tools_and_plan_mode_is_read_only(self):
         tools = [
             self._tool("read_file"),
             self._tool("write_file"),
             self._tool("web_search"),
         ]
+        # chat 模式不挂工作区/联网工具，唯一例外是引擎本地注入的定时任务工具：
+        # "每天早上帮我……"是对话里最常被直接说出口的诉求。
+        scheduling = ["schedule_task", "list_scheduled_tasks", "cancel_scheduled_task"]
         for mode, expected in (
-            ("chat", []),
+            ("chat", scheduling),
             ("plan", ["read_file", "web_search"]),
-            ("agent", ["read_file", "write_file", "web_search"]),
+            ("agent", ["read_file", "write_file", "web_search", *scheduling]),
         ):
             with self.subTest(mode=mode):
                 captured = self._run_capturing_agent_factory(tools, mode)
@@ -989,8 +995,10 @@ class AgentModeTests(unittest.TestCase):
 
             async def drive():
                 chunks = []
-                async for chunk in engine.run("developer", "写一句口号", config):
-                    chunks.append(chunk)
+                # 同上：假模型不支持 bind_tools，这里不测工具面。
+                with patch("core.agent_engine.scheduling_tools", lambda **_kwargs: []):
+                    async for chunk in engine.run("developer", "写一句口号", config):
+                        chunks.append(chunk)
                 return "".join(chunks)
 
             text = asyncio.run(drive())
