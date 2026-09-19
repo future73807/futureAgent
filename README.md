@@ -247,6 +247,12 @@ cd frontend && npm run e2e:smoke
 # 分区与偏好落库、建项目/任务、配置 chips、真实模型问答、搜索、主题、退出，
 # 并逐帧检测切页闪烁）
 cd frontend && npm run e2e
+# 五档模式与四大能力验收（18 项：对话/规划/自主/目标/循环 + 联网搜索 + 双 MCP
+# + 技能 + 创造模式 + 「规划→批准→自主执行」闭环）。**跑之前先重置被测项目**，
+# 否则"计划+自主闭环"必然失败——智能体核实后发现不用改，就没有写入类工具调用：
+#   py scripts/seed_python_demo.py --workspace <工作区 id> --force
+#   # 再删掉上一轮智能体自己加的测试与 __pycache__，基线回到"3 条测试、1 条失败"
+cd frontend && E2E_MODEL=GLM-5.3-Flash E2E_RUN_TIMEOUT=600000 node e2e/modes-capabilities.mjs
 # 交互体检（154 项）：
 #   - 创造模式 10：新建 → 卡片出现 → 使用 → 对话页提示条 → 退出 → 删除，
 #     并断言"人设为空"会被前端拦下、运行模式下拉里有「创造模式」且点了能跳页。
